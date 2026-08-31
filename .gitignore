@@ -1,0 +1,11 @@
+# Rust build artifacts
+target/
+*.pdb
+
+# Local application state
+rustrict_state.json
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.code-workspace
