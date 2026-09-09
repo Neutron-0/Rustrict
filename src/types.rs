@@ -2,8 +2,11 @@ use std::fmt;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MacAddress(pub [u8; 6]);
+
 
 impl MacAddress {
     pub const BROADCAST: MacAddress = MacAddress([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
