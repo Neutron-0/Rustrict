@@ -29,6 +29,10 @@ Rustrict employs asynchronous Layer 2 ARP operations, multi-protocol identity re
   - [5. MITM & Traffic Shaping Engine](#5-mitm--traffic-shaping-engine)
   - [6. State & Persistence Subsystem](#6-state--persistence-subsystem)
   - [7. Wireless Subsystem (802.11)](#7-wireless-subsystem-80211)
+  - [8. Scope & Boundary Enforcement](#8-scope--boundary-enforcement)
+  - [9. Active Probing & Protocol Auditing (Offensive Assessment)](#9-active-probing--protocol-auditing)
+  - [10. Resilience Simulation & Fault Injection](#10-resilience-simulation--fault-injection)
+  - [11. Structured Assessment & Evidence Reporting](#11-structured-assessment--evidence-reporting)
 - [End-to-End Data Flow](#end-to-end-data-flow)
   - [Device Discovery Pipeline](#device-discovery-pipeline)
   - [Traffic Throttling & MITM Pipeline](#traffic-throttling--mitm-pipeline)
@@ -44,7 +48,7 @@ Rustrict employs asynchronous Layer 2 ARP operations, multi-protocol identity re
 
 ## Architecture Overview
 
-Rustrict is organized into seven architectural layers, each responsible for a distinct concern in the network management pipeline:
+Rustrict is organized into modular architectural layers, each responsible for a distinct concern in the network management and security assessment pipeline:
 
 | Layer | Modules | Responsibility |
 | :--- | :--- | :--- |
@@ -53,10 +57,15 @@ Rustrict is organized into seven architectural layers, each responsible for a di
 | **Scanner** | `src/scanner/` | Parallel ARP subnet sweeping via Rayon, rate-limited in batches of 48 to prevent router queue exhaustion |
 | **Identity & Resolution** | `src/resolver/`, `src/gateway/` | 10-protocol hostname fingerprinting chain, OUI vendor lookup, router UPnP/TR-064 SOAP interrogation |
 | **MITM & Traffic Shaping** | `src/spoofer/`, `src/limiter/`, `src/monitor/` | Bidirectional ARP cache poisoning, WinDivert kernel packet interception, token-bucket rate limiting |
+| **Scope & Boundaries** | `src/core/scope.rs` | Operational CIDR boundary validation, IP/MAC exclusions, and strict mode authorization enforcement |
+| **Offensive Assessment Probes** | `src/probes/` | Multi-port TCP enumeration, banner grabbing, TLS posture (SSLv3/TLS1.0/1.1), SMB signing & SMBv1 auditing |
+| **Resilience & Fault Simulation** | `src/limiter/fault.rs` | Configurable packet drop percentage, latency delay, and jitter simulation via WinDivert |
+| **Evidence & Reporting** | `src/cli/export.rs` | Structured Markdown executive summaries, JSON asset inventory, and SARIF v2.1.0 compliance outputs |
 | **State & Persistence** | `src/state.rs` | JSON-backed durable block rules surviving restarts and rescans |
 | **Wireless (802.11)** | `src/wireless/` | Deauth frame crafting, Radiotap parsing, 4-way WPA handshake / PMKID inspection |
 
 ---
+
 
 ## System Architecture Diagram
 
@@ -574,6 +583,96 @@ flowchart LR
 
 ---
 
+### 8. Scope & Boundary Enforcement
+
+The Scope subsystem (`src/core/scope.rs`) acts as a safeguard preventing unauthorized operations during assessment, traffic shaping, or fault simulation:
+
+```mermaid
+flowchart TD
+    Target["Target Action Requested (limit, block, ports, audit, simulate)"] --> CheckExcludedIP{"IP in excluded_ips?"}
+    CheckExcludedIP -->|Yes| RejectIP["Reject: Target IP explicitly excluded"]
+    CheckExcludedIP -->|No| CheckExcludedMAC{"MAC in excluded_macs?"}
+    CheckExcludedMAC -->|Yes| RejectMAC["Reject: Target MAC explicitly excluded"]
+    CheckExcludedMAC -->|No| CheckStrict{"Strict Mode Enabled?"}
+    CheckStrict -->|No| AllowAction["Allow Action"]
+    CheckStrict -->|Yes| CheckCIDR{"Matches allowed_cidrs?"}
+    CheckCIDR -->|Yes| AllowAction
+    CheckCIDR -->|No| RejectScope["Reject: Out of authorized scope CIDR"]
+```
+
+**Capabilities:**
+- **CIDR Range Normalization:** Automatically computes network boundaries from prefix notation (`192.168.1.50/24` $\rightarrow$ `192.168.1.0/24`).
+- **Explicit Exclusions:** Supports excluding specific critical endpoints by IPv4 or MAC address (e.g. gateway router, management server, monitoring probes).
+- **Strict Authorization Mode:** When enabled, any operation targeting an endpoint outside configured CIDRs is rejected immediately with a descriptive error.
+
+---
+
+### 9. Active Probing & Protocol Auditing
+
+The Probes subsystem (`src/probes/`) shifts Rustrict from passive visibility into active posture assessment:
+
+```mermaid
+flowchart LR
+    TargetHost["Target Host"] --> PortScan["Port Scanner (Top 25 + Custom Ranges)"]
+    PortScan --> Banners["Banner Grabbing (HTTP HEAD, Service Greetings)"]
+    
+    TargetHost --> TLSAudit["TLS Posture Auditor"]
+    TLSAudit --> SSLv3["SSL 3.0 / TLS 1.0 / TLS 1.1 ClientHello Handshakes"]
+    TLSAudit --> Ciphers["Weak Cipher Probe (RC4, 3DES, NULL)"]
+    
+    TargetHost --> SMBAudit["SMB Configuration Auditor"]
+    SMBAudit --> SMB1["SMBv1 Dialect Probe"]
+    SMBAudit --> SMBSign["SMB2/3 Negotiate Signing Requirement Check"]
+```
+
+**Capabilities:**
+- **High-Speed Multi-Threaded Port Scanner:** Rayon-parallel TCP connect probing with non-blocking socket timeouts (400ms read/write). Covers 25 curated infrastructure ports or arbitrary user ranges (`parse_ports_arg`).
+- **Banner Grabbing & Service Identification:** Fast HTTP `Server:` header extraction and greeting banner capture for SSH, FTP, SMTP, and POP3.
+- **TLS Protocol & Cipher Posture Audit:** Probes servers with crafted `ClientHello` messages to detect support for cryptographically deprecated SSL 3.0, TLS 1.0, and TLS 1.1, and flags weak ciphers.
+- **SMB Signing & Protocol Audit:** Inspects SMB2/SMB3 Negotiate responses to verify whether message signing is mandatory or optional (identifying NTLM relay vulnerabilities), and detects legacy SMBv1 support.
+
+---
+
+### 10. Resilience Simulation & Fault Injection
+
+The Resilience engine (`src/limiter/fault.rs`, `src/limiter/divert.rs`) injects real-world network degradations into live traffic intercepted via WinDivert:
+
+```mermaid
+sequenceDiagram
+    participant App as Target Device Traffic
+    participant WD as WinDivert Driver (Forward Layer)
+    participant Fault as FaultProfile Engine
+    participant Wire as Network Interface
+
+    App->>WD: Packet Forwarded
+    WD->>Fault: Evaluate Host Fault Profile
+    alt should_drop() == true
+        Fault-->>WD: Drop Packet (Simulated Loss)
+    else should_drop() == false
+        Fault->>Fault: Compute delay = latency_ms ± jitter_ms
+        Note over Fault: Sleep for computed delay duration
+        Fault->>Wire: Forward packet
+    end
+```
+
+**Capabilities:**
+- **Packet Loss Simulation:** Configurable drop probability (0% to 100%) using nanosecond entropy.
+- **Latency & Jitter Simulation:** Adds configurable base delay (in ms) combined with uniform random jitter variance.
+- **Dynamic Attachment:** Applied and cleared on live target devices without restarting the application (`simulate <id> drop 20 delay 100 jitter 20` and `simulate <id> clear`).
+
+---
+
+### 11. Structured Assessment & Evidence Reporting
+
+The Export subsystem (`src/cli/export.rs`) generates structured assessment artifacts:
+
+- **Executive Markdown Report (`.md`):** Formatted summary containing operational scope boundaries, executive risk breakdown, open service inventory, and prioritized vulnerability findings with actionable remediation advice.
+- **JSON Asset Inventory (`.json`):** Machine-readable asset and finding inventory for programmatic ingestion.
+- **SARIF v2.1.0 Compliance (`.sarif`):** Standard Static Analysis Results Format compatible with GitHub Code Scanning, VS Code SARIF Viewer, and CI/CD security quality gates.
+
+---
+
+
 ## End-to-End Data Flow
 
 ### Device Discovery Pipeline
@@ -715,8 +814,13 @@ flowchart TD
 
 | Command | Syntax | Description |
 | :--- | :--- | :--- |
-| **`scan`** | `scan [--range <start-end>] [--fresh]` | Discovers online hosts via parallel ARP sweep. `--fresh` purges stale offline entries while preserving active rules. `--range 100-200` limits scan to a specific host range within the subnet. |
+| **`scan`** | `scan [--range <start-end>] [--fresh] [--ports]` | Discovers online hosts via parallel ARP sweep. `--fresh` purges stale offline entries while preserving active rules. `--range 100-200` limits scan to a specific host range within the subnet. `--ports` automatically triggers multi-port service enumeration on discovered hosts. |
 | **`hosts`** | `hosts` | Displays the current device inventory table with IP, MAC, verified hostname, vendor, online/offline state, and management status (Free / Limited / Blocked). Merges any passively discovered DHCP identities. |
+| **`scope`** | `scope [status \| add <cidr> \| remove <cidr> \| exclude-ip <ip> \| exclude-mac <mac> \| strict <on\|off>]` | Manages authorized target boundaries and operational rules of engagement. When `strict` mode is enabled, actions targeting out-of-scope CIDRs or excluded IP/MAC endpoints are blocked automatically. |
+| **`ports`** | `ports <targets> [port-range]` | Performs high-speed multi-threaded TCP connect scan with greeting and HTTP banner grabbing. Defaults to curated Top 25 management ports (`21`, `22`, `80`, `443`, `445`, `3389`, etc.) or custom lists/ranges (e.g. `80,443,8000-8080`). |
+| **`audit`** | `audit <targets>` | Executes active security posture checks against target hosts: tests TLS version negotiation (flags obsolete SSLv3, TLS 1.0, TLS 1.1, weak ciphers) and SMB configuration (detects SMBv1 support and checks whether SMB message signing is mandatory vs optional). |
+| **`simulate`** | `simulate <targets> [drop <0-100>] [delay <ms>] [jitter <ms>]` | Simulates network resilience conditions and fault injection on intercepted target traffic via WinDivert. Use `simulate <targets> clear` to restore normal forwarding. |
+| **`export`** | `export [markdown\|json\|sarif] [filename]` | Generates structured security assessment and inventory evidence. Supports Markdown executive summaries, structured JSON asset/findings dumps, and industry-standard SARIF v2.1.0 reports for GitHub Security and CI/CD ingestion. |
 | **`limit`** | `limit <targets> <rate> [--upload] [--download]` | Throttles device bandwidth. Targets can be device IDs (`1`), IP addresses (`192.168.18.50`), comma-separated lists (`1,192.168.18.50`), or `all`. Rate supports `bit`, `kbit`, `mbit`, `gbit` units. Direction defaults to `Both`. |
 | **`block`** | `block <targets> [--upload] [--download]` | Completely cuts off device internet access by dropping all forwarded packets. **Persists across restarts** — blocked devices are saved to `rustrict_state.json` and automatically re-armed on next launch. |
 | **`free`** | `free <targets>` | Removes all limits and blocks for specified devices. Restores authentic ARP cache entries. Removes persistent block rules from disk. |
@@ -724,6 +828,7 @@ flowchart TD
 | **`clear`** | `clear` / `cls` | Clears the terminal screen. |
 | **`help`** | `help` / `?` | Displays command reference. |
 | **`exit`** | `quit` / `exit` | Stops all spoofing, restores ARP tables, disables IP forwarding, and exits cleanly. |
+
 
 ### Target Resolution Syntax
 
@@ -791,8 +896,20 @@ rustrict/
 │   ├── cli/
 │   │   ├── mod.rs                # CLI module exports
 │   │   ├── banner.rs             # ASCII art banner renderer
+│   │   ├── export.rs             # Structured evidence export: Markdown, JSON, SARIF v2.1.0
 │   │   ├── prompt.rs             # RustrictCli: REPL loop, command handlers, reconciliation logic
-│   │   └── table.rs              # Host inventory table renderer (comfy-table)
+│   │   └── table.rs              # Table renderers for hosts, services, findings, and scope (comfy-table)
+│   │
+│   ├── core/
+│   │   ├── mod.rs                # Core module exports
+│   │   ├── scope.rs              # ScopeManager & Ipv4Cidr: boundary enforcement, CIDR normalization, exclusions
+│   │   └── assessment.rs         # Assessment domain types: ServiceEntry, AuditFinding, AuditSeverity
+│   │
+│   ├── probes/
+│   │   ├── mod.rs                # Probes module exports
+│   │   ├── ports.rs              # Parallel TCP connect port scanner (Top 25 + custom ranges) & banner grabbing
+│   │   ├── tls_audit.rs          # TLS posture auditor: crafts ClientHello for SSLv3/TLS1.0/1.1 and weak ciphers
+│   │   └── smb_audit.rs          # SMB posture auditor: SMBv1 probe & SMB2/3 message signing validation
 │   │
 │   ├── platform/
 │   │   ├── mod.rs                # Platform gate: compile_error for non-Windows
@@ -826,7 +943,8 @@ rustrict/
 │   │
 │   ├── limiter/
 │   │   ├── mod.rs                # Limiter module exports
-│   │   ├── divert.rs             # TrafficLimiter: WinDivert NETWORK_FORWARD packet filter
+│   │   ├── divert.rs             # TrafficLimiter: WinDivert NETWORK_FORWARD packet filter & fault loop
+│   │   ├── fault.rs              # FaultProfile: drop probability, latency delay, and jitter simulation
 │   │   └── token_bucket.rs       # TokenBucket + SharedTokenBucket rate limiter
 │   │
 │   ├── monitor/
@@ -844,6 +962,8 @@ rustrict/
 │
 └── tests/
     ├── unit_tests.rs             # MAC formatting, OUI lookup, BitRate parsing, TokenBucket, ARP crafting, Deauth, EAPOL
+    ├── test_assessment.rs        # Offensive assessment: CIDR containment, ScopeManager strict rules, port parsing, SARIF/JSON/Markdown
+    ├── test_fixes.rs             # Regression tests: BitRate overflow, mDNS echo, HTML title Unicode, SOAP prefixes, LLMNR, diagnostics
     ├── test_dhcp.rs              # DHCP Option 12 packet parsing
     ├── test_smb.rs               # SMB2 NTLMSSP Type 2 challenge parsing
     ├── test_tls.rs               # X.509 certificate CN extraction
@@ -855,21 +975,24 @@ rustrict/
 
 ## Test Suite
 
-Rustrict includes **26 automated tests** covering all critical subsystems:
+Rustrict includes **39 automated tests** covering all critical subsystems:
 
 | Test File | Tests | Coverage |
 | :--- | :---: | :--- |
-| `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
+| `test_assessment.rs` | 5 | CIDR normalization, ScopeManager strict authorization and exclusions, port string parsing, FaultProfile jitter/drop simulation, SARIF v2.1.0/JSON/Markdown report generation |
+| `test_fixes.rs` | 8 | BitRate overflow protection, mDNS question echo parsing, HTML title Unicode extraction, SOAP tag prefix handling, bounded scan ranges, LLMNR PTR parsing, PersistentState bidirectional direction serialization, environment diagnostics |
 | `test_target_resolution.rs` | 12 | Target resolution by ID, by IP, mixed lists, `all` keyword, deduplication, unknown ID/IP errors, ambiguous records, non-destructive upsert, fresh rescan pruning with blocked device preservation, PersistentState roundtrip |
+| `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
 | `test_gateway.rs` | 4 | SOAP XML tag extraction, missing tag handling, SSDP response header parsing, GatewayHostEntry construction |
-| `test_dhcp.rs` | 1 | DHCP Option 12 (Host Name) extraction from raw BOOTP packet bytes |
 | `test_smb.rs` | 1 | SMB2 NTLMSSP Type 2 challenge AV_PAIR parsing (MsvAvDnsComputerName / MsvAvNbComputerName) |
 | `test_tls.rs` | 1 | X.509 certificate Common Name extraction via ASN.1 OID `2.5.4.3` |
+| `test_dhcp.rs` | 1 | DHCP Option 12 (Host Name) extraction from raw BOOTP packet bytes |
 
 Run the full suite:
 ```powershell
 cargo test
 ```
+
 
 ---
 
