@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use parking_lot::RwLock;
 
+use crate::limiter::fault::FaultProfile;
 use crate::limiter::token_bucket::SharedTokenBucket;
 use crate::types::{BitRate, Direction};
 
@@ -27,6 +28,7 @@ unsafe impl Sync for WinDivertHandle {}
 #[derive(Clone)]
 pub struct TrafficLimiter {
     rules: Arc<RwLock<HashMap<Ipv4Addr, HostLimitRule>>>,
+    fault_profiles: Arc<RwLock<HashMap<Ipv4Addr, FaultProfile>>>,
     running: Arc<AtomicBool>,
     active_handle: Arc<parking_lot::Mutex<Option<(WinDivertHandle, WinDivertCloseFn)>>>,
 }
@@ -41,10 +43,12 @@ impl TrafficLimiter {
     pub fn new() -> Self {
         Self {
             rules: Arc::new(RwLock::new(HashMap::new())),
+            fault_profiles: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
             active_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
+
 
     pub fn limit(&self, ip: Ipv4Addr, direction: Direction, rate: BitRate) {
         let ul_bucket = if direction.includes_outgoing() {
@@ -86,6 +90,20 @@ impl TrafficLimiter {
 
     pub fn unlimit(&self, ip: &Ipv4Addr) {
         self.rules.write().remove(ip);
+        self.fault_profiles.write().remove(ip);
+    }
+
+    pub fn set_fault(&self, ip: Ipv4Addr, profile: FaultProfile) {
+        self.fault_profiles.write().insert(ip, profile);
+        self.start_worker();
+    }
+
+    pub fn clear_fault(&self, ip: &Ipv4Addr) {
+        self.fault_profiles.write().remove(ip);
+    }
+
+    pub fn get_fault(&self, ip: &Ipv4Addr) -> Option<FaultProfile> {
+        self.fault_profiles.read().get(ip).cloned()
     }
 
     pub fn stop(&self) {
@@ -101,11 +119,12 @@ impl TrafficLimiter {
         }
 
         let rules = Arc::clone(&self.rules);
+        let fault_profiles = Arc::clone(&self.fault_profiles);
         let running = Arc::clone(&self.running);
         let active_handle = Arc::clone(&self.active_handle);
 
         thread::spawn(move || {
-            run_windivert_loop(rules, running, active_handle);
+            run_windivert_loop(rules, fault_profiles, running, active_handle);
         });
     }
 }
@@ -118,6 +137,7 @@ impl Drop for TrafficLimiter {
 
 fn run_windivert_loop(
     rules: Arc<RwLock<HashMap<Ipv4Addr, HostLimitRule>>>,
+    fault_profiles: Arc<RwLock<HashMap<Ipv4Addr, FaultProfile>>>,
     running: Arc<AtomicBool>,
     active_handle: Arc<parking_lot::Mutex<Option<(WinDivertHandle, WinDivertCloseFn)>>>,
 ) {
@@ -309,6 +329,33 @@ fn run_windivert_loop(
             }
         }
 
+        // Check Resilience / Fault Injection Profiles
+        let fault_map = fault_profiles.read();
+        let src_fault = fault_map.get(&src_ip).cloned();
+        let dst_fault = fault_map.get(&dst_ip).cloned();
+        drop(fault_map);
+
+        if let Some(ref fault) = src_fault {
+            if fault.should_drop() {
+                continue; // Simulated packet drop
+            }
+        }
+        if let Some(ref fault) = dst_fault {
+            if fault.should_drop() {
+                continue; // Simulated packet drop
+            }
+        }
+
+        let delay = match (src_fault, dst_fault) {
+            (Some(f1), Some(f2)) => f1.compute_delay().max(f2.compute_delay()),
+            (Some(f), None) | (None, Some(f)) => f.compute_delay(),
+            (None, None) => std::time::Duration::ZERO,
+        };
+
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+
         // Forward allowed packet
         let _ = unsafe {
             send_fn(
@@ -319,6 +366,7 @@ fn run_windivert_loop(
                 std::ptr::null_mut(),
             )
         };
+
     }
 
     let should_close = active_handle.lock().take().is_some();
