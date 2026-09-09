@@ -42,21 +42,28 @@ pub fn query_mdns(ip: Ipv4Addr) -> Option<String> {
     None
 }
 
-fn parse_dns_name(buf: &[u8]) -> Option<String> {
-    // Search for ".local" in response bytes
-    let local_bytes = b".local";
-    let pos = buf.windows(local_bytes.len()).position(|w| w == local_bytes)?;
+pub fn parse_dns_name(buf: &[u8]) -> Option<String> {
+    let patterns: [&[u8]; 2] = [b"\x05local", b".local"];
 
-    // Scan backwards from position to find the length of the leading label
-    let mut start = pos;
-    while start > 0 && buf[start - 1] >= 0x20 && buf[start - 1] < 0x7f && buf[start - 1] != b'.' {
-        start -= 1;
-    }
+    for pat in patterns {
+        // Iterate through all occurrences of the pattern in buf
+        for (pos, _) in buf.windows(pat.len()).enumerate().filter(|(_, w)| *w == pat) {
+            let mut start = pos;
+            while start > 0 && buf[start - 1] >= 0x20 && buf[start - 1] < 0x7f && buf[start - 1] != b'.' {
+                start -= 1;
+            }
 
-    if start < pos {
-        let name = String::from_utf8_lossy(&buf[start..pos]).trim().to_string();
-        if !name.is_empty() && name.len() > 1 && !name.starts_with('_') {
-            return Some(format!("{}.local", name));
+            if start < pos {
+                let name = String::from_utf8_lossy(&buf[start..pos]).trim().to_string();
+                if !name.is_empty()
+                    && name.len() > 1
+                    && !name.starts_with('_')
+                    && !name.eq_ignore_ascii_case("tcp")
+                    && !name.eq_ignore_ascii_case("udp")
+                {
+                    return Some(format!("{}.local", name));
+                }
+            }
         }
     }
 

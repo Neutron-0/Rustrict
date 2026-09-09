@@ -17,6 +17,25 @@ pub struct HostIdentity {
     pub vendor: String,
 }
 
+/// Extracts <title>...</title> text safely from HTML without UTF-8 boundary panics
+pub fn extract_html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start_tag = "<title>";
+    let end_tag = "</title>";
+    let start_idx = lower.find(start_tag)?;
+    let content_start = start_idx + start_tag.len();
+    let end_idx = lower[content_start..].find(end_tag)?;
+    let content_end = content_start + end_idx;
+
+    if html.is_char_boundary(content_start) && html.is_char_boundary(content_end) {
+        let title = html[content_start..content_end].trim().to_string();
+        if !title.is_empty() && title.len() < 50 {
+            return Some(title);
+        }
+    }
+    None
+}
+
 /// Attempts a fast HTTP title probe (port 80 / 8080) for routers, web consoles, and printers
 fn probe_http_title(ip: Ipv4Addr) -> Option<String> {
     for port in [80, 8080] {
@@ -30,15 +49,8 @@ fn probe_http_title(ip: Ipv4Addr) -> Option<String> {
                 let mut buf = [0u8; 1024];
                 if let Ok(n) = stream.read(&mut buf) {
                     let resp = String::from_utf8_lossy(&buf[..n]);
-                    if let Some(start) = resp.to_lowercase().find("<title>") {
-                        if let Some(end) = resp.to_lowercase().find("</title>") {
-                            if start + 7 < end {
-                                let title = resp[start + 7..end].trim().to_string();
-                                if !title.is_empty() && title.len() < 50 {
-                                    return Some(title);
-                                }
-                            }
-                        }
+                    if let Some(title) = extract_html_title(&resp) {
+                        return Some(title);
                     }
                 }
             }

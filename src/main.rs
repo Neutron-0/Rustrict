@@ -3,15 +3,24 @@ use rustrict::cli::{print_banner, RustrictCli};
 use rustrict::platform;
 
 fn main() {
+    platform::enable_ansi_support();
     print_banner("2.0.0");
 
-    // 1. Check Windows Administrator privileges
-    if !platform::is_privileged() {
+    // 1. Run Pre-flight Environment Diagnostics
+    let env_status = platform::check_environment();
+    if !env_status.is_admin {
         eprintln!(
             "{} Please run as Administrator (open PowerShell or Command Prompt as Administrator).",
             "[ERR]".bright_red().bold()
         );
         std::process::exit(1);
+    }
+
+    if !env_status.npcap_available {
+        eprintln!("{} Warning: {}", "[WARN]".yellow().bold(), env_status.npcap_details);
+    }
+    if !env_status.windivert_available {
+        eprintln!("{} Warning: {}", "[WARN]".yellow().bold(), env_status.windivert_details);
     }
 
     // 2. Discover default network interface and gateway

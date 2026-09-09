@@ -34,14 +34,22 @@ impl SubnetScanner {
         let network_u32 = ip_u32 & mask_u32;
         let broadcast_u32 = network_u32 | (!mask_u32);
 
-        let first_ip = network_u32 + 1;
-        let last_ip = broadcast_u32 - 1;
+        let first_ip = network_u32.saturating_add(1);
+        let last_ip = broadcast_u32.saturating_sub(1);
 
         if first_ip >= last_ip {
             return Vec::new();
         }
 
-        let ip_list: Vec<Ipv4Addr> = (first_ip..=last_ip)
+        // Bound automatic subnet scan to at most /16 (65,534 hosts) to prevent memory exhaustion and network DOS
+        let max_hosts = 65534u32;
+        let bounded_last = if last_ip - first_ip >= max_hosts {
+            first_ip + max_hosts - 1
+        } else {
+            last_ip
+        };
+
+        let ip_list: Vec<Ipv4Addr> = (first_ip..=bounded_last)
             .map(Ipv4Addr::from)
             .collect();
 
@@ -59,7 +67,14 @@ impl SubnetScanner {
             return Vec::new();
         }
 
-        let ip_list: Vec<Ipv4Addr> = (start_u32..=end_u32)
+        let max_hosts = 65534u32;
+        let bounded_end = if end_u32 - start_u32 >= max_hosts {
+            start_u32 + max_hosts - 1
+        } else {
+            end_u32
+        };
+
+        let ip_list: Vec<Ipv4Addr> = (start_u32..=bounded_end)
             .map(Ipv4Addr::from)
             .collect();
 
@@ -117,7 +132,7 @@ impl SubnetScanner {
                         Some((ip, mac))
                     } else {
                         let curr_disc = disc_clone.load(Ordering::Relaxed);
-                        if current_scanned % 5 == 0 || current_scanned == total {
+                        if current_scanned.is_multiple_of(5) || current_scanned == total {
                             progress_ref(current_scanned, total, curr_disc);
                         }
                         None

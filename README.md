@@ -1,12 +1,11 @@
 ```text
-██████╗ ██╗   ██╗███████╗████████╗██████╗ ██╗ ██████╗████████╗
-██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔══██╗██║██╔════╝╚══██╔══╝
-██████╔╝██║   ██║███████╗   ██║   ██████╔╝██║██║        ██║   
-██╔══██╗██║   ██║╚════██║   ██║   ██╔══██╗██║██║        ██║   
-██║  ██║╚██████╔╝███████║   ██║   ██║  ██║██║╚██████╗   ██║   
-╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝ ╚═════╝   ╚═╝   
-             Windows Network Bandwidth Limiter & Controller
-                                     v2.0.0 [Rust Core]
+  ██████╗  ██╗   ██╗ ███████╗ ████████╗ ██████╗  ██╗  ██████╗ ████████╗
+  ██╔══██╗ ██║   ██║ ██╔════╝ ╚══██╔══╝ ██╔══██╗ ██║ ██╔════╝ ╚══██╔══╝
+  ██████╔╝ ██║   ██║ ███████╗    ██║    ██████╔╝ ██║ ██║         ██║   
+  ██╔══██╗ ██║   ██║ ╚════██║    ██║    ██╔══██╗ ██║ ██║         ██║   
+  ██║  ██║ ╚██████╔╝ ███████║    ██║    ██║  ██║ ██║ ╚██████╗    ██║   
+  ╚═╝  ╚═╝  ╚═════╝  ╚══════╝    ╚═╝    ╚═╝  ╚═╝ ╚═╝  ╚═════╝    ╚═╝   
+          Windows Network Bandwidth Limiter & Controller
 ```
 
 # Rustrict
@@ -236,7 +235,7 @@ sequenceDiagram
     participant Kernel as Windows SendARP API
     participant Resolver as Identity Resolver
 
-    User->>CLI: scan [--fresh] [--range]
+    User->>CLI: scan (--fresh, --range)
     CLI->>Scanner: scan_subnet() / scan_range()
 
     par Background Router Query
@@ -274,7 +273,7 @@ Rustrict resolves device hostnames through a **10-protocol priority chain**, sto
 ```mermaid
 flowchart TD
     Start["Discovered IP + MAC"] --> GatewayCheck{"Is this the Gateway IP?"}
-    GatewayCheck -->|Yes| GWLabel["'Gateway' (NameSource::Gateway)"]
+    GatewayCheck -->|Yes| GWLabel["Gateway (NameSource::Gateway)"]
     GatewayCheck -->|No| LocalCheck{"Is this the local machine?"}
     LocalCheck -->|Yes| LocalLabel["COMPUTERNAME (NameSource::Local)"]
     LocalCheck -->|No| UPnP["1. Router UPnP / TR-064 Lookup"]
@@ -291,7 +290,7 @@ flowchart TD
     NetBIOS -->|Found| NBResult["Workstation Name (NameSource::NetBios)"]
     NetBIOS -->|Not Found| mDNS["5. mDNS Reverse PTR (UDP 5353)"]
 
-    mDNS -->|Found| mDNSResult["'.local' Hostname (NameSource::Mdns)"]
+    mDNS -->|Found| mDNSResult[".local Hostname (NameSource::Mdns)"]
     mDNS -->|Not Found| LLMNR["6. LLMNR PTR Query (UDP 5355)"]
 
     LLMNR -->|Found| LLMNRResult["Link-Local Name (NameSource::Local)"]
@@ -458,14 +457,14 @@ flowchart TD
         CheckState -->|"No"| Ready["Interactive REPL Shell Ready"]
 
         LoadState --> ParseBlocked["Parse Persisted Block Rules"]
-        ParseBlocked --> RestoreSpoof["ArpSpoofer::add() — Resume ARP Poisoning"]
-        ParseBlocked --> RestoreDrop["TrafficLimiter::block() — Re-install Drop Filter"]
+        ParseBlocked --> RestoreSpoof["ArpSpoofer::add() - Resume ARP Poisoning"]
+        ParseBlocked --> RestoreDrop["TrafficLimiter::block() - Re-install Drop Filter"]
         RestoreSpoof --> Ready
         RestoreDrop --> Ready
     end
 
     subgraph RUNTIME["Interactive Runtime State"]
-        Ready --> WaitCmd["rustrict > (Prompt Waiting for Command)"]
+        Ready --> WaitCmd["rustrict prompt: Waiting for Command"]
 
         WaitCmd -->|"block target"| ExecBlock["Add Host to PersistentState"]
         ExecBlock --> WriteSave1["Write to rustrict_state.json"]
@@ -526,15 +525,15 @@ flowchart LR
     end
 
     subgraph MANAGEMENT["Management Frame Analysis"]
-        Beacon["Beacon → extract_ssid()"]
-        Probe["Probe → extract_ssid()"]
+        Beacon["Beacon: extract_ssid()"]
+        Probe["Probe: extract_ssid()"]
         DeauthRx["Deauth Detection"]
     end
 
     subgraph DATA_FRAME["Data Frame Analysis"]
         EAPOLCheck{"is_eapol_frame()?"}
         HandshakeInspect["inspect_eapol_key()"]
-        MsgIdentify{"Message #?"}
+        MsgIdentify{"Message Number?"}
         Msg1["Message 1: ANonce + PMKID extraction"]
         Msg2["Message 2: SNonce"]
         Msg3["Message 3: GTK Install"]

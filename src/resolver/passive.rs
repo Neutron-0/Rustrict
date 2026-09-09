@@ -91,22 +91,37 @@ fn run_passive_loop(
     let open_fn: PcapOpenLiveFn = unsafe {
         let name = CString::new("pcap_open_live").unwrap();
         let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-        if addr.is_none() { return; }
-        std::mem::transmute(addr)
+        match addr {
+            Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapOpenLiveFn>(f),
+            None => {
+                crate::platform::free_library(h_module);
+                return;
+            }
+        }
     };
 
     let next_ex_fn: PcapNextExFn = unsafe {
         let name = CString::new("pcap_next_ex").unwrap();
         let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-        if addr.is_none() { return; }
-        std::mem::transmute(addr)
+        match addr {
+            Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapNextExFn>(f),
+            None => {
+                crate::platform::free_library(h_module);
+                return;
+            }
+        }
     };
 
     let close_fn: PcapCloseFn = unsafe {
         let name = CString::new("pcap_close").unwrap();
         let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-        if addr.is_none() { return; }
-        std::mem::transmute(addr)
+        match addr {
+            Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapCloseFn>(f),
+            None => {
+                crate::platform::free_library(h_module);
+                return;
+            }
+        }
     };
 
     let c_dev = CString::new(device_path).unwrap();
@@ -114,6 +129,7 @@ fn run_passive_loop(
     // Open with 200ms timeout for non-blocking loop
     let pcap_handle = unsafe { open_fn(c_dev.as_ptr(), 1500, 1, 200, errbuf.as_mut_ptr()) };
     if pcap_handle.is_null() {
+        unsafe { crate::platform::free_library(h_module); }
         return;
     }
 
@@ -132,7 +148,10 @@ fn run_passive_loop(
         }
     }
 
-    unsafe { close_fn(pcap_handle); }
+    unsafe {
+        close_fn(pcap_handle);
+        crate::platform::free_library(h_module);
+    }
 }
 
 /// Parses DHCP Option 12 (Host Name) or NetBIOS Host Announcements
@@ -170,7 +189,7 @@ pub fn parse_dhcp_or_broadcast(data: &[u8]) -> Option<(Ipv4Addr, MacAddress, Str
     // Check DHCP (ports 67 or 68)
     if (src_port == 67 || src_port == 68 || dst_port == 67 || dst_port == 68) && udp_payload.len() > 240 {
         // DHCP Magic Cookie: 0x63, 0x82, 0x53, 0x63 at offset 236
-        if &udp_payload[236..240] == &[0x63, 0x82, 0x53, 0x63] {
+        if udp_payload[236..240] == [0x63, 0x82, 0x53, 0x63] {
             // Client IP at offset 12 (ciaddr) or yiaddr at offset 16
             let ciaddr = Ipv4Addr::new(udp_payload[12], udp_payload[13], udp_payload[14], udp_payload[15]);
             let yiaddr = Ipv4Addr::new(udp_payload[16], udp_payload[17], udp_payload[18], udp_payload[19]);

@@ -1,68 +1,7 @@
 use rustrict::types::{Host, MacAddress, NameSource};
 use std::net::Ipv4Addr;
 
-/// Mirrors target resolution logic for unit testing
-fn resolve_test_targets(hosts: &[Host], arg: &str) -> Result<Vec<usize>, String> {
-    let trimmed = arg.trim();
-    if trimmed.eq_ignore_ascii_case("all") {
-        if hosts.is_empty() {
-            return Err("No devices in inventory. Run 'scan' or 'add <ip>' first.".to_string());
-        }
-        return Ok(hosts.iter().map(|h| h.id).collect());
-    }
-
-    let mut ids = Vec::new();
-    for token in trimmed.split(',') {
-        let t = token.trim();
-        if t.is_empty() {
-            continue;
-        }
-
-        if let Ok(id) = t.parse::<usize>() {
-            if hosts.iter().any(|h| h.id == id) {
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            } else {
-                return Err(format!("Device with ID {} not found in known hosts table.", id));
-            }
-        } else if let Ok(ip) = t.parse::<Ipv4Addr>() {
-            let matches: Vec<usize> = hosts
-                .iter()
-                .filter(|h| h.ip == ip)
-                .map(|h| h.id)
-                .collect();
-
-            if matches.is_empty() {
-                return Err(format!(
-                    "Device with IP {} is not in the known hosts table. Run 'scan' or use 'add {}' first.",
-                    ip, ip
-                ));
-            } else if matches.len() > 1 {
-                return Err(format!(
-                    "Ambiguous identifier: IP {} maps to multiple devices (IDs: {:?}). Specify target by unique Device ID.",
-                    ip, matches
-                ));
-            } else {
-                let id = matches[0];
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-        } else {
-            return Err(format!(
-                "Invalid device identifier '{}'. Expected a Device ID (e.g. 1) or IPv4 address (e.g. 192.168.18.50).",
-                t
-            ));
-        }
-    }
-
-    if ids.is_empty() {
-        return Err("No valid device targets specified.".to_string());
-    }
-
-    Ok(ids)
-}
+use rustrict::cli::prompt::resolve_targets as resolve_test_targets;
 
 fn sample_hosts() -> Vec<Host> {
     vec![
@@ -234,7 +173,7 @@ fn test_fresh_rescan_prunes_unmanaged_but_preserves_blocked() {
     current_hosts[2].persistent_block = true;
 
     // Fresh scan only discovers router (192.168.18.1)
-    let new_scan = vec![
+    let new_scan = [
         Host::with_source(
             0,
             Ipv4Addr::new(192, 168, 18, 1),
@@ -289,9 +228,20 @@ fn test_persistent_state_roundtrip() {
         "Dell".to_string(),
     );
 
+    // Test Outgoing
     state.add_blocked(&host, rustrict::types::Direction::Outgoing);
     assert!(state.is_blocked(&test_ip));
     assert_eq!(state.get_direction(&test_ip), rustrict::types::Direction::Outgoing);
+
+    // Test Both (Previously broken due to bug in get_direction)
+    state.add_blocked(&host, rustrict::types::Direction::Both);
+    assert!(state.is_blocked(&test_ip));
+    assert_eq!(state.get_direction(&test_ip), rustrict::types::Direction::Both);
+
+    // Test Incoming
+    state.add_blocked(&host, rustrict::types::Direction::Incoming);
+    assert!(state.is_blocked(&test_ip));
+    assert_eq!(state.get_direction(&test_ip), rustrict::types::Direction::Incoming);
 
     state.remove_blocked(&test_ip);
     assert!(!state.is_blocked(&test_ip));

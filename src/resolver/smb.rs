@@ -198,17 +198,13 @@ pub fn parse_ntlmssp_challenge(data: &[u8]) -> Option<String> {
         let decoded = String::from_utf16_lossy(&u16_chars);
 
         match avid {
-            0x0001 => {
+            0x0001 if !decoded.trim().is_empty() => {
                 // MsvAvNbComputerName
-                if !decoded.trim().is_empty() {
-                    nb_computer_name = Some(decoded.trim().to_string());
-                }
+                nb_computer_name = Some(decoded.trim().to_string());
             }
-            0x0003 => {
+            0x0003 if !decoded.trim().is_empty() => {
                 // MsvAvDnsComputerName
-                if !decoded.trim().is_empty() {
-                    dns_computer_name = Some(decoded.trim().to_string());
-                }
+                dns_computer_name = Some(decoded.trim().to_string());
             }
             _ => {}
         }

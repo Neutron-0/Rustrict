@@ -17,9 +17,24 @@ pub struct HostLimitRule {
     pub dl_bucket: Option<Arc<SharedTokenBucket>>,
 }
 
+pub type WinDivertCloseFn = unsafe extern "system" fn(handle: *mut std::ffi::c_void) -> i32;
+
+#[derive(Clone, Copy)]
+pub struct WinDivertHandle(pub *mut std::ffi::c_void);
+unsafe impl Send for WinDivertHandle {}
+unsafe impl Sync for WinDivertHandle {}
+
+#[derive(Clone)]
 pub struct TrafficLimiter {
     rules: Arc<RwLock<HashMap<Ipv4Addr, HostLimitRule>>>,
     running: Arc<AtomicBool>,
+    active_handle: Arc<parking_lot::Mutex<Option<(WinDivertHandle, WinDivertCloseFn)>>>,
+}
+
+impl Default for TrafficLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TrafficLimiter {
@@ -27,6 +42,7 @@ impl TrafficLimiter {
         Self {
             rules: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
+            active_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -74,6 +90,9 @@ impl TrafficLimiter {
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Some((h, close_fn)) = self.active_handle.lock().take() {
+            unsafe { close_fn(h.0); }
+        }
     }
 
     fn start_worker(&self) {
@@ -83,16 +102,24 @@ impl TrafficLimiter {
 
         let rules = Arc::clone(&self.rules);
         let running = Arc::clone(&self.running);
+        let active_handle = Arc::clone(&self.active_handle);
 
         thread::spawn(move || {
-            run_windivert_loop(rules, running);
+            run_windivert_loop(rules, running, active_handle);
         });
+    }
+}
+
+impl Drop for TrafficLimiter {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
 fn run_windivert_loop(
     rules: Arc<RwLock<HashMap<Ipv4Addr, HostLimitRule>>>,
     running: Arc<AtomicBool>,
+    active_handle: Arc<parking_lot::Mutex<Option<(WinDivertHandle, WinDivertCloseFn)>>>,
 ) {
     use std::ffi::CString;
 
@@ -118,8 +145,6 @@ fn run_windivert_loop(
         p_addr: *const u8,
         p_send_len: *mut u32,
     ) -> i32;
-
-    type WinDivertCloseFn = unsafe extern "system" fn(handle: *mut std::ffi::c_void) -> i32;
 
     // Dynamically load WinDivert.dll or WinDivert64.dll from exe dir or PATH
     let mut h_module = std::ptr::null_mut();
@@ -155,6 +180,7 @@ fn run_windivert_loop(
         let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
         if addr.is_none() { 
             eprintln!("[ERR] Symbol WinDivertOpen not found in WinDivert.dll");
+            crate::platform::free_library(h_module);
             return; 
         }
         std::mem::transmute(addr)
@@ -163,21 +189,30 @@ fn run_windivert_loop(
     let recv_fn: WinDivertRecvFn = unsafe {
         let name = CString::new("WinDivertRecv").unwrap();
         let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-        if addr.is_none() { return; }
+        if addr.is_none() {
+            crate::platform::free_library(h_module);
+            return;
+        }
         std::mem::transmute(addr)
     };
 
     let send_fn: WinDivertSendFn = unsafe {
         let name = CString::new("WinDivertSend").unwrap();
         let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-        if addr.is_none() { return; }
+        if addr.is_none() {
+            crate::platform::free_library(h_module);
+            return;
+        }
         std::mem::transmute(addr)
     };
 
     let close_fn: WinDivertCloseFn = unsafe {
         let name = CString::new("WinDivertClose").unwrap();
         let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-        if addr.is_none() { return; }
+        if addr.is_none() {
+            crate::platform::free_library(h_module);
+            return;
+        }
         std::mem::transmute(addr)
     };
 
@@ -192,8 +227,11 @@ fn run_windivert_loop(
         } else if err == 2 {
             eprintln!("[ERR] WinDivert64.sys driver file missing from application directory.\n");
         }
+        unsafe { crate::platform::free_library(h_module); }
         return;
     }
+
+    *active_handle.lock() = Some((WinDivertHandle(handle), close_fn));
 
     let mut packet_buf = vec![0u8; 65535];
     let mut addr_buf = [0u8; 128]; // WinDivertAddress structure
@@ -210,7 +248,20 @@ fn run_windivert_loop(
             )
         };
 
-        if res == 0 || read_len < 20 {
+        if res == 0 {
+            if !running.load(Ordering::Relaxed) {
+                break;
+            }
+            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            if err == 995 || err == 6 {
+                // ERROR_OPERATION_ABORTED (995) or ERROR_INVALID_HANDLE (6)
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+
+        if read_len < 20 {
             continue;
         }
 
@@ -270,5 +321,9 @@ fn run_windivert_loop(
         };
     }
 
-    unsafe { close_fn(handle) };
+    let should_close = active_handle.lock().take().is_some();
+    if should_close {
+        unsafe { close_fn(handle); }
+    }
+    unsafe { crate::platform::free_library(h_module); }
 }

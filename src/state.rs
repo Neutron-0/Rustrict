@@ -61,9 +61,12 @@ impl PersistentState {
 
     pub fn get_direction(&self, ip: &Ipv4Addr) -> Direction {
         if let Some(h) = self.blocked_hosts.iter().find(|b| b.ip == *ip) {
-            if h.direction.contains("upload") {
+            let dir_lower = h.direction.to_ascii_lowercase();
+            if (dir_lower.contains("upload") && dir_lower.contains("download")) || dir_lower.contains("both") {
+                Direction::Both
+            } else if dir_lower.contains("upload") {
                 Direction::Outgoing
-            } else if h.direction.contains("download") {
+            } else if dir_lower.contains("download") {
                 Direction::Incoming
             } else {
                 Direction::Both

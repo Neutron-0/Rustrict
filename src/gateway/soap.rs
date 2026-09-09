@@ -27,17 +27,34 @@ impl SoapClient {
                     .next()
                     .unwrap_or("")
                     .split(':')
-                    .last()
+                    .next_back()
                     .unwrap_or("")
                     .to_ascii_lowercase();
 
                 if local_name == tag_lower {
-                    // Found opening tag, now locate corresponding closing tag
+                    // Found opening tag, now locate corresponding closing tag (with or without namespace prefix)
                     let content_start = bracket_pos + 1;
-                    if let Some(close_rel) = xml_lower[content_start..].find(&format!("</{}", local_name)) {
-                        let content_end = content_start + close_rel;
-                        let val = xml[content_start..content_end].trim();
-                        return Some(val.to_string());
+                    let mut close_search = content_start;
+                    while let Some(close_rel) = xml_lower[close_search..].find("</") {
+                        let close_tag_start = close_search + close_rel;
+                        if let Some(close_bracket) = xml_lower[close_tag_start..].find('>') {
+                            let close_bracket_pos = close_tag_start + close_bracket;
+                            let close_tag_body = xml_lower[close_tag_start + 2..close_bracket_pos].trim();
+                            let close_local = close_tag_body
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or("")
+                                .split(':')
+                                .next_back()
+                                .unwrap_or("");
+                            if close_local == tag_lower {
+                                let val = xml[content_start..close_tag_start].trim();
+                                return Some(val.to_string());
+                            }
+                            close_search = close_bracket_pos + 1;
+                        } else {
+                            break;
+                        }
                     }
                 }
                 search_idx = bracket_pos + 1;

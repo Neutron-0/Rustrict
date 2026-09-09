@@ -60,6 +60,13 @@ impl RustrictCli {
             }
         }
 
+        let spoofer_clone = spoofer.clone();
+        let limiter_clone = limiter.clone();
+        crate::platform::register_shutdown_handler(move || {
+            limiter_clone.stop();
+            spoofer_clone.stop();
+        });
+
         Self {
             iface,
             scanner,
@@ -69,6 +76,12 @@ impl RustrictCli {
             hosts,
             persistent_state,
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.limiter.stop();
+        self.spoofer.stop();
+        self.sniffer.stop();
     }
 
     pub fn run_interactive(&mut self) {
@@ -102,9 +115,7 @@ impl RustrictCli {
                 }
                 "help" | "?" => self.print_help(),
                 "quit" | "exit" => {
-                    self.limiter.stop();
-                    self.spoofer.stop();
-                    self.sniffer.stop();
+                    self.shutdown();
                     println!("Exiting rustrict. Active session stopped.");
                     break;
                 }
@@ -426,73 +437,8 @@ impl RustrictCli {
         }
     }
 
-    /// Resolves target argument into a list of unique host IDs.
-    /// Supports:
-    /// - "all" -> all known host IDs
-    /// - Device IDs (e.g. "0", "1")
-    /// - IPv4 addresses (e.g. "192.168.18.50")
-    /// - Mixed comma-separated lists (e.g. "0,192.168.18.50,2")
-    /// Performs strictly in-memory lookup against self.hosts with zero network scanning.
     fn resolve_targets(&self, arg: &str) -> Result<Vec<usize>, String> {
-        let trimmed = arg.trim();
-        if trimmed.eq_ignore_ascii_case("all") {
-            if self.hosts.is_empty() {
-                return Err("No devices in inventory. Run 'scan' or 'add <ip>' first.".to_string());
-            }
-            return Ok(self.hosts.iter().map(|h| h.id).collect());
-        }
-
-        let mut ids = Vec::new();
-        for token in trimmed.split(',') {
-            let t = token.trim();
-            if t.is_empty() {
-                continue;
-            }
-
-            if let Ok(id) = t.parse::<usize>() {
-                if self.hosts.iter().any(|h| h.id == id) {
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                } else {
-                    return Err(format!("Device with ID {} not found in known hosts table.", id));
-                }
-            } else if let Ok(ip) = t.parse::<Ipv4Addr>() {
-                let matches: Vec<usize> = self.hosts
-                    .iter()
-                    .filter(|h| h.ip == ip)
-                    .map(|h| h.id)
-                    .collect();
-
-                if matches.is_empty() {
-                    return Err(format!(
-                        "Device with IP {} is not in the known hosts table. Run 'scan' or use 'add {}' first.",
-                        ip, ip
-                    ));
-                } else if matches.len() > 1 {
-                    return Err(format!(
-                        "Ambiguous identifier: IP {} maps to multiple devices (IDs: {:?}). Specify target by unique Device ID.",
-                        ip, matches
-                    ));
-                } else {
-                    let id = matches[0];
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-            } else {
-                return Err(format!(
-                    "Invalid device identifier '{}'. Expected a Device ID (e.g. 1) or IPv4 address (e.g. 192.168.18.50).",
-                    t
-                ));
-            }
-        }
-
-        if ids.is_empty() {
-            return Err("No valid device targets specified.".to_string());
-        }
-
-        Ok(ids)
+        resolve_targets(&self.hosts, arg)
     }
 
     fn print_help(&self) {
@@ -506,4 +452,80 @@ impl RustrictCli {
         println!("  clear                                 Clears screen");
         println!("  quit / exit                           Exits rustrict and restores network\n");
     }
+}
+
+impl Drop for RustrictCli {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Resolves target argument into a list of unique host IDs.
+/// Supports:
+/// - "all" -> all known host IDs
+/// - Device IDs (e.g. "0", "1")
+/// - IPv4 addresses (e.g. "192.168.18.50")
+/// - Mixed comma-separated lists (e.g. "0,192.168.18.50,2")
+///
+/// Performs strictly in-memory lookup against hosts with zero network scanning.
+pub fn resolve_targets(hosts: &[Host], arg: &str) -> Result<Vec<usize>, String> {
+    let trimmed = arg.trim();
+    if trimmed.eq_ignore_ascii_case("all") {
+        if hosts.is_empty() {
+            return Err("No devices in inventory. Run 'scan' or 'add <ip>' first.".to_string());
+        }
+        return Ok(hosts.iter().map(|h| h.id).collect());
+    }
+
+    let mut ids = Vec::new();
+    for token in trimmed.split(',') {
+        let t = token.trim();
+        if t.is_empty() {
+            continue;
+        }
+
+        if let Ok(id) = t.parse::<usize>() {
+            if hosts.iter().any(|h| h.id == id) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            } else {
+                return Err(format!("Device with ID {} not found in known hosts table.", id));
+            }
+        } else if let Ok(ip) = t.parse::<Ipv4Addr>() {
+            let matches: Vec<usize> = hosts
+                .iter()
+                .filter(|h| h.ip == ip)
+                .map(|h| h.id)
+                .collect();
+
+            if matches.is_empty() {
+                return Err(format!(
+                    "Device with IP {} is not in the known hosts table. Run 'scan' or use 'add {}' first.",
+                    ip, ip
+                ));
+            } else if matches.len() > 1 {
+                return Err(format!(
+                    "Ambiguous identifier: IP {} maps to multiple devices (IDs: {:?}). Specify target by unique Device ID.",
+                    ip, matches
+                ));
+            } else {
+                let id = matches[0];
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        } else {
+            return Err(format!(
+                "Invalid device identifier '{}'. Expected a Device ID (e.g. 1) or IPv4 address (e.g. 192.168.18.50).",
+                t
+            ));
+        }
+    }
+
+    if ids.is_empty() {
+        return Err("No valid device targets specified.".to_string());
+    }
+
+    Ok(ids)
 }

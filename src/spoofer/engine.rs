@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use crate::spoofer::raw_l2::{craft_arp_reply, RawL2Sender};
 use crate::types::{Host, MacAddress};
 
+#[derive(Clone)]
 pub struct ArpSpoofer {
     sender: Arc<RwLock<Option<RawL2Sender>>>,
     local_mac: MacAddress,
@@ -108,6 +109,9 @@ impl ArpSpoofer {
                 let hosts: Vec<Host> = targets.read().values().cloned().collect();
                 if let Some(ref s) = *sender.read() {
                     for host in hosts {
+                        if !running.load(Ordering::Relaxed) {
+                            break;
+                        }
                         // Poison target host: Gateway IP is at Local MAC
                         let pkt_host = craft_arp_reply(
                             host.mac,
@@ -131,8 +135,19 @@ impl ArpSpoofer {
                         let _ = s.send_frame(&pkt_gw);
                     }
                 }
-                thread::sleep(Duration::from_secs(2));
+                for _ in 0..20 {
+                    if !running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
         });
+    }
+}
+
+impl Drop for ArpSpoofer {
+    fn drop(&mut self) {
+        self.stop();
     }
 }

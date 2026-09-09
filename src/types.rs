@@ -41,7 +41,7 @@ impl FromStr for MacAddress {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let clean = s.trim();
-        let parts: Vec<&str> = clean.split(|c| c == ':' || c == '-').collect();
+        let parts: Vec<&str> = clean.split([':', '-']).collect();
 
         if parts.len() != 6 {
             return Err("MAC address must contain 6 octets".into());
@@ -208,7 +208,10 @@ impl BitRate {
             _ => return Err(format!("Unknown bitrate unit: {}", unit)),
         };
 
-        Ok(BitRate(num * multiplier))
+        let value = num.checked_mul(multiplier)
+            .ok_or_else(|| "Bitrate value overflows u64".to_string())?;
+
+        Ok(BitRate(value))
     }
 }
 

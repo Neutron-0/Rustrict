@@ -20,6 +20,12 @@ pub struct BandwidthMeter {
     last_sample: RwLock<Instant>,
 }
 
+impl Default for BandwidthMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BandwidthMeter {
     pub fn new() -> Self {
         Self {

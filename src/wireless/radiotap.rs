@@ -49,10 +49,8 @@ impl RadiotapHeader {
             }
         }
         // Bit 5: dBm Antenna Signal (1 byte signed)
-        if (present & (1 << 5)) != 0 {
-            if offset < length {
-                dbm_signal = Some(buf[offset] as i8);
-            }
+        if (present & (1 << 5)) != 0 && offset < length {
+            dbm_signal = Some(buf[offset] as i8);
         }
 
         let payload = &buf[length..];

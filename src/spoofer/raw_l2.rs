@@ -1,8 +1,43 @@
 use std::ffi::CString;
 use crate::types::MacAddress;
 
+type PcapOpenLiveFn = unsafe extern "C" fn(
+    device: *const i8,
+    snaplen: i32,
+    promisc: i32,
+    to_ms: i32,
+    errbuf: *mut i8,
+) -> *mut std::ffi::c_void;
+
+type PcapSendPacketFn = unsafe extern "C" fn(
+    handle: *mut std::ffi::c_void,
+    buf: *const u8,
+    size: i32,
+) -> i32;
+
+type PcapCloseFn = unsafe extern "C" fn(handle: *mut std::ffi::c_void);
+
+#[repr(C)]
+struct PcapIf {
+    next: *mut PcapIf,
+    name: *const i8,
+    description: *const i8,
+    addresses: *mut std::ffi::c_void,
+    flags: u32,
+}
+
+type PcapFindAllDevsFn = unsafe extern "C" fn(
+    alldevsp: *mut *mut PcapIf,
+    errbuf: *mut i8,
+) -> i32;
+
+type PcapFreeAllDevsFn = unsafe extern "C" fn(alldevs: *mut PcapIf);
+
 pub struct RawL2Sender {
     handle: *mut std::ffi::c_void,
+    send_fn: PcapSendPacketFn,
+    close_fn: PcapCloseFn,
+    h_module: *mut std::ffi::c_void,
 }
 
 unsafe impl Send for RawL2Sender {}
@@ -10,14 +45,6 @@ unsafe impl Sync for RawL2Sender {}
 
 impl RawL2Sender {
     pub fn open(iface_name: &str) -> Result<Self, String> {
-        type PcapOpenLiveFn = unsafe extern "C" fn(
-            device: *const i8,
-            snaplen: i32,
-            promisc: i32,
-            to_ms: i32,
-            errbuf: *mut i8,
-        ) -> *mut std::ffi::c_void;
-
         let dll_name = CString::new("wpcap.dll").unwrap();
         let h_module = unsafe {
             windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_name.as_ptr() as *const u8)
@@ -30,10 +57,37 @@ impl RawL2Sender {
         let open_fn: PcapOpenLiveFn = unsafe {
             let name = CString::new("pcap_open_live").unwrap();
             let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-            if addr.is_none() {
-                return Err("pcap_open_live symbol not found".into());
+            match addr {
+                Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapOpenLiveFn>(f),
+                None => {
+                    crate::platform::free_library(h_module);
+                    return Err("pcap_open_live symbol not found".into());
+                }
             }
-            std::mem::transmute(addr)
+        };
+
+        let send_fn: PcapSendPacketFn = unsafe {
+            let name = CString::new("pcap_sendpacket").unwrap();
+            let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+            match addr {
+                Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapSendPacketFn>(f),
+                None => {
+                    crate::platform::free_library(h_module);
+                    return Err("pcap_sendpacket symbol not found".into());
+                }
+            }
+        };
+
+        let close_fn: PcapCloseFn = unsafe {
+            let name = CString::new("pcap_close").unwrap();
+            let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+            match addr {
+                Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapCloseFn>(f),
+                None => {
+                    crate::platform::free_library(h_module);
+                    return Err("pcap_close symbol not found".into());
+                }
+            }
         };
 
         // Try standard device format: \Device\NPF_{GUID} or adapter name
@@ -49,73 +103,61 @@ impl RawL2Sender {
 
         let handle = unsafe { open_fn(c_dev.as_ptr(), 65535, 1, 1000, errbuf.as_mut_ptr()) };
         if !handle.is_null() {
-            return Ok(Self { handle });
+            return Ok(Self { handle, send_fn, close_fn, h_module });
         }
 
         // Fallback 1: Try raw name without prefix
         let c_dev_raw = CString::new(iface_name).unwrap();
         let handle_raw = unsafe { open_fn(c_dev_raw.as_ptr(), 65535, 1, 1000, errbuf.as_mut_ptr()) };
         if !handle_raw.is_null() {
-            return Ok(Self { handle: handle_raw });
+            return Ok(Self { handle: handle_raw, send_fn, close_fn, h_module });
         }
 
-        // Fallback 2: Enumerate all Npcap adapters using pcap_findalldevs
-        type PcapFindAllDevsFn = unsafe extern "C" fn(
-            alldevsp: *mut *mut std::ffi::c_void,
-            errbuf: *mut i8,
-        ) -> i32;
-
+        // Fallback 2: Enumerate all Npcap adapters using pcap_findalldevs safely
         let find_name = CString::new("pcap_findalldevs").unwrap();
         let find_addr = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, find_name.as_ptr() as *const u8) };
+        let free_name = CString::new("pcap_freealldevs").unwrap();
+        let free_addr = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, free_name.as_ptr() as *const u8) };
+
         if let Some(find_ptr) = find_addr {
             let find_fn: PcapFindAllDevsFn = unsafe { std::mem::transmute(find_ptr) };
-            let mut alldevs: *mut std::ffi::c_void = std::ptr::null_mut();
+            let free_fn_opt: Option<PcapFreeAllDevsFn> = free_addr.map(|ptr| unsafe { std::mem::transmute(ptr) });
+            let mut alldevs: *mut PcapIf = std::ptr::null_mut();
+
             if unsafe { find_fn(&mut alldevs, errbuf.as_mut_ptr()) } == 0 && !alldevs.is_null() {
-                // pcap_if struct layout: next (*mut void), name (*mut c_char)
                 let mut curr = alldevs;
+                let mut found_handle = std::ptr::null_mut();
+
                 while !curr.is_null() {
-                    let dev_name_ptr = unsafe { *(curr.offset(1) as *const *const i8) };
+                    let dev_name_ptr = unsafe { (*curr).name };
                     if !dev_name_ptr.is_null() {
                         let dev_h = unsafe { open_fn(dev_name_ptr, 65535, 1, 1000, errbuf.as_mut_ptr()) };
                         if !dev_h.is_null() {
-                            return Ok(Self { handle: dev_h });
+                            found_handle = dev_h;
+                            break;
                         }
                     }
-                    curr = unsafe { *(curr as *const *mut std::ffi::c_void) };
+                    curr = unsafe { (*curr).next };
+                }
+
+                if let Some(free_fn) = free_fn_opt {
+                    unsafe { free_fn(alldevs); }
+                }
+
+                if !found_handle.is_null() {
+                    return Ok(Self { handle: found_handle, send_fn, close_fn, h_module });
                 }
             }
         }
 
         let err_bytes: Vec<u8> = errbuf.iter().map(|&b| b as u8).take_while(|&b| b != 0).collect();
         let err_msg = String::from_utf8_lossy(&err_bytes);
+        unsafe { crate::platform::free_library(h_module); }
         Err(format!("Could not open Npcap interface ({}) err: {}", iface_name, err_msg))
     }
 
     pub fn send_frame(&self, frame: &[u8]) -> Result<(), String> {
-        type PcapSendPacketFn = unsafe extern "C" fn(
-            handle: *mut std::ffi::c_void,
-            buf: *const u8,
-            size: i32,
-        ) -> i32;
-
-        let dll_name = CString::new("wpcap.dll").unwrap();
-        let h_module = unsafe {
-            windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_name.as_ptr() as *const u8)
-        };
-        if h_module.is_null() {
-            return Err("wpcap.dll not loaded".into());
-        }
-
-        let send_fn: PcapSendPacketFn = unsafe {
-            let name = CString::new("pcap_sendpacket").unwrap();
-            let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-            if addr.is_none() {
-                return Err("pcap_sendpacket not found".into());
-            }
-            std::mem::transmute(addr)
-        };
-
-        let res = unsafe { send_fn(self.handle, frame.as_ptr(), frame.len() as i32) };
+        let res = unsafe { (self.send_fn)(self.handle, frame.as_ptr(), frame.len() as i32) };
         if res != 0 {
             return Err("Failed to send raw packet".into());
         }
@@ -125,17 +167,10 @@ impl RawL2Sender {
 
 impl Drop for RawL2Sender {
     fn drop(&mut self) {
-        type PcapCloseFn = unsafe extern "C" fn(handle: *mut std::ffi::c_void);
-        let dll_name = CString::new("wpcap.dll").unwrap();
-        let h_module = unsafe {
-            windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_name.as_ptr() as *const u8)
-        };
-        if !h_module.is_null() {
-            let name = CString::new("pcap_close").unwrap();
-            let addr = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8) };
-            if let Some(f) = addr {
-                let close_fn: PcapCloseFn = unsafe { std::mem::transmute(f) };
-                unsafe { close_fn(self.handle) };
+        unsafe {
+            (self.close_fn)(self.handle);
+            if !self.h_module.is_null() {
+                crate::platform::free_library(self.h_module);
             }
         }
     }
