@@ -1,13 +1,17 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
 use colored::*;
 
-use crate::cli::table::render_hosts_table;
-use crate::limiter::TrafficLimiter;
-use crate::types::NetworkInterface;
+use crate::cli::table::{
+    render_findings_table, render_hosts_table, render_scope_table, render_services_table,
+};
+use crate::core::assessment::{AuditFinding, ServiceEntry};
+use crate::core::scope::{Ipv4Cidr, ScopeManager};
+use crate::limiter::{FaultProfile, TrafficLimiter};
 use crate::scanner::SubnetScanner;
 use crate::spoofer::ArpSpoofer;
-use crate::types::{BitRate, Direction, Host, HostStatus, MacAddress};
+use crate::types::{BitRate, Direction, Host, HostStatus, MacAddress, NetworkInterface};
 
 pub struct RustrictCli {
     #[allow(dead_code)]
@@ -18,7 +22,11 @@ pub struct RustrictCli {
     sniffer: crate::resolver::passive::PassiveIdentitySniffer,
     hosts: Vec<Host>,
     persistent_state: crate::state::PersistentState,
+    scope: ScopeManager,
+    services: HashMap<Ipv4Addr, Vec<ServiceEntry>>,
+    findings: Vec<AuditFinding>,
 }
+
 
 impl RustrictCli {
     pub fn new(iface: NetworkInterface) -> Self {
@@ -67,6 +75,13 @@ impl RustrictCli {
             spoofer_clone.stop();
         });
 
+        let mut scope = ScopeManager::default();
+        let prefix = u32::from(iface.netmask).count_ones() as u8;
+        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+            scope.add_cidr_direct(local_cidr);
+        }
+
+
         Self {
             iface,
             scanner,
@@ -75,8 +90,12 @@ impl RustrictCli {
             sniffer,
             hosts,
             persistent_state,
+            scope,
+            services: HashMap::new(),
+            findings: Vec::new(),
         }
     }
+
 
     pub fn shutdown(&mut self) {
         self.limiter.stop();
@@ -105,6 +124,11 @@ impl RustrictCli {
             match args[0].to_lowercase().as_str() {
                 "scan" => self.handle_scan(&args[1..]),
                 "hosts" => self.handle_hosts(),
+                "scope" => self.handle_scope(&args[1..]),
+                "ports" => self.handle_ports(&args[1..]),
+                "audit" => self.handle_audit(&args[1..]),
+                "simulate" => self.handle_simulate(&args[1..]),
+                "export" => self.handle_export(&args[1..]),
                 "limit" => self.handle_limit(&args[1..]),
                 "block" => self.handle_block(&args[1..]),
                 "free" => self.handle_free(&args[1..]),
@@ -121,6 +145,7 @@ impl RustrictCli {
                 }
                 cmd => println!("{}: command not found. Type 'help' for commands.", cmd),
             }
+
         }
     }
 
@@ -182,7 +207,27 @@ impl RustrictCli {
 
         self.reconcile_hosts(new_hosts, is_fresh);
         render_hosts_table(&self.hosts);
+
+        if args.contains(&"--ports") {
+            println!("\n{} Performing service enumeration on discovered hosts...", "[SCAN]".cyan().bold());
+            let online_ips: Vec<Ipv4Addr> = self.hosts.iter().filter(|h| h.online).map(|h| h.ip).collect();
+            let top_ports = crate::probes::get_top_port_numbers();
+            for ip in online_ips {
+                let open = crate::probes::scan_host_ports(
+                    ip,
+                    &top_ports,
+                    std::time::Duration::from_millis(500),
+                    |_, _| {},
+                );
+                if !open.is_empty() {
+                    render_services_table(ip, &open);
+                    self.services.insert(ip, open);
+                }
+            }
+        }
     }
+
+
 
     fn handle_hosts(&mut self) {
         // Merge passive discoveries from sniffer
@@ -252,6 +297,10 @@ impl RustrictCli {
 
         for id in ids {
             if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
+                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    continue;
+                }
                 host.status = HostStatus::Limited(rate, dir);
                 self.spoofer.add(host.clone());
                 self.limiter.limit(host.ip, dir, rate);
@@ -289,6 +338,10 @@ impl RustrictCli {
 
         for id in ids {
             if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
+                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    continue;
+                }
                 host.status = HostStatus::Blocked(dir);
                 host.persistent_block = true;
                 self.persistent_state.add_blocked(host, dir);
@@ -303,6 +356,7 @@ impl RustrictCli {
             }
         }
     }
+
 
     fn handle_free(&mut self, args: &[&str]) {
         if args.is_empty() {
@@ -437,21 +491,346 @@ impl RustrictCli {
         }
     }
 
+    fn handle_scope(&mut self, args: &[&str]) {
+        if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+            render_scope_table(&self.scope);
+            return;
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "add" => {
+                if args.len() < 2 {
+                    println!("Usage: scope add <cidr> (e.g. scope add 192.168.1.0/24)");
+                    return;
+                }
+                match args[1].parse::<Ipv4Cidr>() {
+                    Ok(cidr) => {
+                        self.scope.add_cidr_direct(cidr.clone());
+                        println!("{} Added CIDR {} to operational scope", "OK".green().bold(), cidr);
+                    }
+                    Err(e) => println!("{} Failed to parse CIDR: {}", "[ERR]".red().bold(), e),
+                }
+            }
+            "remove" | "rm" => {
+                if args.len() < 2 {
+                    println!("Usage: scope remove <cidr>");
+                    return;
+                }
+                match args[1].parse::<Ipv4Cidr>() {
+                    Ok(cidr) => {
+                        self.scope.remove_cidr_direct(&cidr);
+                        println!("{} Removed CIDR {} from scope", "OK".green().bold(), cidr);
+                    }
+                    Err(e) => println!("{} Failed to parse CIDR: {}", "[ERR]".red().bold(), e),
+                }
+            }
+            "exclude-ip" => {
+                if args.len() < 2 {
+                    println!("Usage: scope exclude-ip <ip>");
+                    return;
+                }
+                match args[1].parse::<Ipv4Addr>() {
+                    Ok(ip) => {
+                        self.scope.exclude_ip(ip);
+                        println!("{} Excluded IP {} from scope actions", "OK".green().bold(), ip);
+                    }
+                    Err(e) => println!("{} Failed to parse IP: {}", "[ERR]".red().bold(), e),
+                }
+            }
+            "exclude-mac" => {
+                if args.len() < 2 {
+                    println!("Usage: scope exclude-mac <mac>");
+                    return;
+                }
+                match args[1].parse::<MacAddress>() {
+                    Ok(mac) => {
+                        self.scope.exclude_mac(mac);
+                        println!("{} Excluded MAC {} from scope actions", "OK".green().bold(), mac);
+                    }
+                    Err(e) => println!("{} Failed to parse MAC: {}", "[ERR]".red().bold(), e),
+                }
+            }
+            "strict" => {
+                if args.len() < 2 {
+                    println!("Usage: scope strict <on|off>");
+                    return;
+                }
+                match args[1].to_lowercase().as_str() {
+                    "on" | "true" | "1" => {
+                        self.scope.set_strict(true);
+                        println!("{} Scope strict mode ENABLED (out-of-scope targets blocked)", "OK".green().bold());
+                    }
+                    "off" | "false" | "0" => {
+                        self.scope.set_strict(false);
+                        println!("{} Scope strict mode DISABLED", "OK".green().bold());
+                    }
+                    _ => println!("Invalid argument. Use 'scope strict on' or 'scope strict off'"),
+                }
+            }
+            _ => println!("Usage: scope [status | add <cidr> | remove <cidr> | exclude-ip <ip> | exclude-mac <mac> | strict <on|off>]"),
+        }
+    }
+
+    fn handle_ports(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: ports <id|ip|all> [ports-range] (e.g. ports 1 80,443,8000-8080)");
+            return;
+        }
+
+        let ids = match self.resolve_targets(args[0]) {
+            Ok(ids) => ids,
+            Err(e) => {
+                println!("{} {}", "[ERR]".red().bold(), e);
+                return;
+            }
+        };
+
+        let ports = if args.len() >= 2 {
+            match crate::probes::parse_ports_arg(args[1]) {
+                Ok(p) => p,
+                Err(e) => {
+                    println!("{} Error parsing ports: {}", "[ERR]".red().bold(), e);
+                    return;
+                }
+            }
+        } else {
+            crate::probes::get_top_port_numbers()
+        };
+
+        for id in ids {
+            if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
+                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    continue;
+                }
+
+                println!(
+                    "{} Scanning {} ports on {} ({}) with service identification...",
+                    "[SCAN]".cyan().bold(),
+                    ports.len(),
+                    host.ip,
+                    host.mac
+                );
+
+                let open_services = crate::probes::scan_host_ports(
+                    host.ip,
+                    &ports,
+                    std::time::Duration::from_millis(600),
+                    |_, _| {},
+                );
+                render_services_table(host.ip, &open_services);
+                self.services.insert(host.ip, open_services);
+            }
+        }
+    }
+
+    fn handle_audit(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: audit <id|ip|all>");
+            return;
+        }
+
+        let ids = match self.resolve_targets(args[0]) {
+            Ok(ids) => ids,
+            Err(e) => {
+                println!("{} {}", "[ERR]".red().bold(), e);
+                return;
+            }
+        };
+
+        for id in ids {
+            if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
+                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    continue;
+                }
+
+                println!(
+                    "{} Performing active protocol posture audit on {}...",
+                    "[AUDIT]".cyan().bold(),
+                    host.ip
+                );
+
+                let mut host_findings = Vec::new();
+
+                // TLS Audit on 443 + any discovered TLS ports
+                let mut tls_ports = vec![443];
+                if let Some(svcs) = self.services.get(&host.ip) {
+                    for s in svcs {
+                        let name_lower = s.service_name.to_lowercase();
+                        if (name_lower.contains("ssl") || name_lower.contains("https") || name_lower.contains("tls"))
+                            && !tls_ports.contains(&s.port)
+                        {
+                            tls_ports.push(s.port);
+                        }
+                    }
+                }
+
+                for p in tls_ports {
+                    let tf = crate::probes::audit_tls_posture(host.ip, p);
+                    host_findings.extend(tf);
+                }
+
+                // SMB Audit on 445
+                let sf = crate::probes::audit_smb_posture(host.ip);
+                host_findings.extend(sf);
+
+
+                render_findings_table(&host_findings);
+
+                for f in host_findings {
+                    if !self.findings.iter().any(|ex| ex.rule_id == f.rule_id && ex.target_ip == f.target_ip && ex.port == f.port) {
+                        self.findings.push(f);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_simulate(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: simulate <id|ip|all> [drop <0-100>] [delay <ms>] [jitter <ms>] OR simulate <id|ip|all> clear");
+            return;
+        }
+
+        let ids = match self.resolve_targets(args[0]) {
+            Ok(ids) => ids,
+            Err(e) => {
+                println!("{} {}", "[ERR]".red().bold(), e);
+                return;
+            }
+        };
+
+        if args.len() >= 2 && args[1].eq_ignore_ascii_case("clear") {
+            for id in ids {
+                if let Some(host) = self.hosts.iter().find(|h| h.id == id) {
+                    self.limiter.clear_fault(&host.ip);
+                    println!("{} Cleared fault simulation for {}", "OK".green().bold(), host.ip);
+                }
+            }
+            return;
+        }
+
+        let mut drop_pct: u8 = 0;
+        let mut delay_ms: u32 = 0;
+        let mut jitter_ms: u32 = 0;
+
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].to_lowercase().as_str() {
+                "drop" => {
+                    if let Some(val) = args.get(i + 1) {
+                        if let Ok(pct) = val.parse::<u8>() {
+                            drop_pct = pct.min(100);
+                        }
+                        i += 1;
+                    }
+                }
+                "delay" => {
+                    if let Some(val) = args.get(i + 1) {
+                        if let Ok(d) = val.parse::<u32>() {
+                            delay_ms = d;
+                        }
+                        i += 1;
+                    }
+                }
+                "jitter" => {
+                    if let Some(val) = args.get(i + 1) {
+                        if let Ok(j) = val.parse::<u32>() {
+                            jitter_ms = j;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        let profile = FaultProfile::new(drop_pct, delay_ms, jitter_ms);
+
+        for id in ids {
+            if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
+                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    continue;
+                }
+
+                self.spoofer.add(host.clone());
+                self.limiter.set_fault(host.ip, profile.clone());
+                println!(
+                    "{} Simulated network resilience profile on {}: drop={}% delay={}ms jitter={}ms",
+                    "OK".green().bold(),
+                    host.ip,
+                    drop_pct,
+                    delay_ms,
+                    jitter_ms
+                );
+            }
+        }
+
+    }
+
+    fn handle_export(&self, args: &[&str]) {
+        let fmt = args.first().map(|s| s.to_lowercase()).unwrap_or_else(|| "markdown".to_string());
+        let default_filename = match fmt.as_str() {
+            "json" => "rustrict-assessment.json",
+            "sarif" => "rustrict-assessment.sarif",
+            _ => "rustrict-assessment.md",
+        };
+        let target_file = args.get(1).unwrap_or(&default_filename);
+
+        let result = match fmt.as_str() {
+            "json" => crate::cli::export::export_json(&self.scope, &self.services, &self.findings)
+                .map_err(|e| e.to_string()),
+            "sarif" => crate::cli::export::export_sarif(&self.findings)
+                .map_err(|e| e.to_string()),
+            "markdown" | "md" => Ok(crate::cli::export::export_markdown(&self.scope, &self.services, &self.findings)),
+            _ => Ok(crate::cli::export::export_markdown(&self.scope, &self.services, &self.findings)),
+        };
+
+
+        match result {
+            Ok(content) => {
+                match crate::cli::export::save_report(target_file, &content) {
+                    Ok(_) => {
+                        println!(
+                            "{} Successfully exported assessment report to '{}' ({} bytes)",
+                            "OK".green().bold(),
+                            target_file,
+                            content.len()
+                        );
+                    }
+                    Err(e) => {
+                        println!("{} Failed to write report to '{}': {}", "[ERR]".red().bold(), target_file, e);
+                    }
+                }
+            }
+            Err(e) => println!("{} Failed to generate export: {}", "[ERR]".red().bold(), e),
+        }
+    }
+
     fn resolve_targets(&self, arg: &str) -> Result<Vec<usize>, String> {
         resolve_targets(&self.hosts, arg)
     }
 
     fn print_help(&self) {
         println!("{}", "rustrict Commands:".bright_yellow().bold());
-        println!("  scan [--range <start-end>] [--fresh]  Scans network (use --fresh to clear stale devices)");
-        println!("  hosts                                 Displays discovered hosts and live online/offline state");
-        println!("  limit <id|ip|all> <rate> [...]        Limits bandwidth (e.g. limit 1 200kbit, limit 192.168.18.50 1mbit)");
-        println!("  block <id|ip|all> [...]               Blocks host internet access [Persists across scans & restarts]");
-        println!("  free <id|ip|all>                      Removes limits and unblocks host [Removes persistent rule]");
-        println!("  add <ip> [--mac <mac>]                Manually adds a host to table");
-        println!("  clear                                 Clears screen");
-        println!("  quit / exit                           Exits rustrict and restores network\n");
+        println!("  scan [--range <start-end>] [--fresh] [--ports]  Scans network (use --ports for service enumeration)");
+        println!("  hosts                                           Displays discovered hosts and live online/offline state");
+        println!("  scope [status|add|remove|exclude-ip|strict]     Manages authorized targets and operational boundaries");
+        println!("  ports <id|ip|all> [port-range]                  Enumerates open TCP services and grabs service banners");
+        println!("  audit <id|ip|all>                               Performs active security posture checks (TLS & SMB)");
+        println!("  simulate <id|ip|all> [drop %] [delay ms] [...]  Simulates network resilience and fault injection");
+        println!("  export [markdown|json|sarif] [filename]         Exports structured assessment reports and evidence");
+        println!("  limit <id|ip|all> <rate> [...]                  Limits bandwidth (e.g. limit 1 200kbit, limit all 1mbit)");
+        println!("  block <id|ip|all> [...]                         Blocks host internet access [Persists across restarts]");
+        println!("  free <id|ip|all>                                Removes limits and unblocks host [Clears persistent rule]");
+        println!("  add <ip> [--mac <mac>]                          Manually adds a host to table");
+        println!("  clear                                           Clears screen");
+        println!("  quit / exit                                     Exits rustrict and restores network\n");
     }
+
 }
 
 impl Drop for RustrictCli {
