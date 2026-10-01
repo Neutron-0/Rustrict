@@ -4,6 +4,8 @@ version = "2.0.0"
 edition = "2021"
 authors = ["Neutron-0"]
 description = "High-performance Windows network bandwidth limiter, traffic shaper, and device manager"
+license = "MIT"
+repository = "https://github.com/Neutron-0/Rustrict"
 
 [dependencies]
 colored = "2.1"

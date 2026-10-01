@@ -1004,3 +1004,9 @@ cargo test
 | **Npcap** (`wpcap.dll`) | User-mode DLL | Raw Layer 2 Ethernet frame transmission (`pcap_sendpacket`) for ARP spoofing, promiscuous packet capture (`pcap_open_live` / `pcap_next_ex`) for passive DHCP snooping. |
 | **Windows iphlpapi.dll** | System DLL | Native `SendARP` API for synchronous kernel-level ARP resolution during subnet scanning. |
 | **PowerShell** | System utility | Network interface discovery (`Get-NetRoute`, `Get-NetIPAddress`, `Get-NetAdapter`) and IP forwarding management (`Set-NetIPInterface`). |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Docs: [Install](docs/INSTALL.md) · [Usage](docs/USAGE.md) · [Safety](docs/SAFETY.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md).
