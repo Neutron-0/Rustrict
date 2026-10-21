@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 /// Queries NetBIOS Name Service (UDP 137) to get the Windows/Samba machine name
@@ -31,11 +31,39 @@ pub fn query_netbios(ip: Ipv4Addr) -> Option<String> {
     socket.send_to(&packet, target).ok()?;
 
     let mut buf = [0u8; 1024];
-    let (len, _) = socket.recv_from(&mut buf).ok()?;
+    let (len, src) = socket.recv_from(&mut buf).ok()?;
 
-    if len > 57 {
-        let num_names = buf[56] as usize;
-        let mut offset = 57;
+    // Verify source IP matches targeted endpoint
+    if src != SocketAddr::V4(target) {
+        return None;
+    }
+
+    if len < 63 {
+        return None;
+    }
+
+    // Verify transaction ID matches
+    if buf[0] != 0x80 || buf[1] != 0x01 {
+        return None;
+    }
+
+    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+
+    if ancount == 0 {
+        return None;
+    }
+
+    // In standard Node Status responses with 1 echoed question:
+    // Header: 12 bytes
+    // Question: 38 bytes (1 + 32 + 1 + 2 + 2)
+    // Answer RR header: 2 (compressed name ptr) + 2 (type) + 2 (class) + 4 (ttl) + 2 (rdlen) = 12 bytes
+    // RDATA begins at byte 62. The first byte of RDATA is num_names.
+    let base_offset = if qdcount == 1 { 62 } else { 24 };
+
+    if len > base_offset {
+        let num_names = buf[base_offset] as usize;
+        let mut offset = base_offset + 1;
         for _ in 0..num_names {
             if offset + 18 <= len {
                 let name_bytes = &buf[offset..offset + 15];

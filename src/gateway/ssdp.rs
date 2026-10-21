@@ -149,8 +149,10 @@ impl SsdpScanner {
 
         for &svc in &known_services {
             if let Some(svc_pos) = xml.find(svc) {
-                // Find <controlURL> within the service block
-                let window = &xml[svc_pos..std::cmp::min(svc_pos + 1000, xml.len())];
+                // Safely slice window preventing multi-byte UTF-8 char boundary panics
+                let raw_end = std::cmp::min(svc_pos + 1000, xml.len());
+                let window_end = xml.floor_char_boundary(raw_end);
+                let window = &xml[svc_pos..window_end];
                 if let Some(ctrl) = crate::gateway::soap::SoapClient::extract_tag_value(window, "controlURL") {
                     let path = if ctrl.starts_with('/') {
                         ctrl

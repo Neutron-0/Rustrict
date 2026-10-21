@@ -9,102 +9,99 @@ pub fn audit_tls_posture(ip: Ipv4Addr, port: u16) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
     let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
 
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(1000)) else {
-        return findings;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(1000)));
+    // 1. Probe Modern TLS (TLS 1.2 / 1.3 ClientHello)
+    if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
 
-    // 1. Send TLS 1.0 ClientHello to test whether server accepts deprecated legacy versions
-    let client_hello = craft_tls_client_hello(0x03, 0x01); // TLS 1.0
-    if stream.write_all(&client_hello).is_err() {
-        return findings;
-    }
-
-    let mut buf = vec![0u8; 4096];
-    let Ok(n) = stream.read(&mut buf) else {
-        return findings;
-    };
-
-    if n < 9 {
-        return findings;
-    }
-
-    // Check TLS Record Header: ContentType = 22 (Handshake), Version = 0x0301/0x0302/0x0303
-    if buf[0] != 22 {
-        return findings;
-    }
-
-    // Handshake Type: 2 = ServerHello
-    if n > 5 && buf[5] == 2 {
-        // ServerHello version at offset 9..11
-        if n >= 11 {
-            let server_version = u16::from_be_bytes([buf[9], buf[10]]);
-            match server_version {
-                0x0300 => {
-                    findings.push(AuditFinding::new(
-                        "SEC-TLS-SSL3",
-                        "SSL 3.0 Deprecated Protocol Negotiated",
-                        ip,
-                        Some(port),
-                        AuditSeverity::Critical,
-                        "The server negotiated legacy SSL 3.0, vulnerable to POODLE and known cryptographic breaks.",
-                        "Disable SSL 3.0 in server schannel/openssl configurations. Enforce TLS 1.2 or TLS 1.3.",
-                    ));
-                }
-                0x0301 => {
-                    findings.push(AuditFinding::new(
-                        "SEC-TLS-1.0",
-                        "TLS 1.0 Deprecated Protocol Negotiated",
-                        ip,
-                        Some(port),
-                        AuditSeverity::High,
-                        "The server negotiated deprecated TLS 1.0, which lacks modern AEAD cipher suites and is prohibited by PCI-DSS.",
-                        "Disable TLS 1.0 and require TLS 1.2 or TLS 1.3.",
-                    ));
-                }
-                0x0302 => {
-                    findings.push(AuditFinding::new(
-                        "SEC-TLS-1.1",
-                        "TLS 1.1 Deprecated Protocol Negotiated",
-                        ip,
-                        Some(port),
-                        AuditSeverity::Medium,
-                        "The server negotiated deprecated TLS 1.1.",
-                        "Migrate to TLS 1.2 or TLS 1.3.",
-                    ));
-                }
-                0x0303 | 0x0304 => {
-                    findings.push(AuditFinding::new(
-                        "SEC-TLS-MODERN",
-                        "Modern TLS Protocol Supported",
-                        ip,
-                        Some(port),
-                        AuditSeverity::Info,
-                        "The server negotiated TLS 1.2 / TLS 1.3.",
-                        "Maintain current protocol configurations.",
-                    ));
-                }
-                _ => {}
-            }
-
-            // Check cipher suite at offset: SessionID length is at 43
-            if n > 43 {
-                let session_id_len = buf[43] as usize;
-                let cipher_offset = 44 + session_id_len;
-                if cipher_offset + 2 <= n {
-                    let cipher = u16::from_be_bytes([buf[cipher_offset], buf[cipher_offset + 1]]);
-                    // Check for RC4, 3DES, or NULL ciphers
-                    if is_weak_cipher(cipher) {
+        let modern_hello = craft_tls_client_hello(0x03, 0x03); // TLS 1.2
+        if stream.write_all(&modern_hello).is_ok() {
+            let mut buf = vec![0u8; 4096];
+            if let Ok(n) = stream.read(&mut buf) {
+                if n >= 11 && buf[0] == 22 && n > 5 && buf[5] == 2 {
+                    let server_version = u16::from_be_bytes([buf[9], buf[10]]);
+                    if server_version >= 0x0303 {
                         findings.push(AuditFinding::new(
-                            "SEC-TLS-WEAK-CIPHER",
-                            "Insecure / Weak Cipher Suite Accepted",
+                            "SEC-TLS-MODERN",
+                            "Modern TLS Protocol Supported",
                             ip,
                             Some(port),
-                            AuditSeverity::High,
-                            &format!("Server selected weak cipher suite (0x{:04x}) susceptible to known cryptanalytic attacks.", cipher),
-                            "Disable RC4, 3DES (Sweet32), and CBC-mode ciphers in favor of AES-GCM or CHACHA20-POLY1305.",
+                            AuditSeverity::Info,
+                            "The server negotiated modern TLS 1.2 / TLS 1.3.",
+                            "Maintain current protocol configurations.",
                         ));
+                    }
+
+                    // Check negotiated cipher suite
+                    if n > 43 {
+                        let session_id_len = buf[43] as usize;
+                        let cipher_offset = 44 + session_id_len;
+                        if cipher_offset + 2 <= n {
+                            let cipher = u16::from_be_bytes([buf[cipher_offset], buf[cipher_offset + 1]]);
+                            if is_weak_cipher(cipher) {
+                                findings.push(AuditFinding::new(
+                                    "SEC-TLS-WEAK-CIPHER",
+                                    "Insecure / Weak Cipher Suite Accepted",
+                                    ip,
+                                    Some(port),
+                                    AuditSeverity::High,
+                                    &format!("Server selected weak cipher suite (0x{:04x}) susceptible to known cryptanalytic attacks.", cipher),
+                                    "Disable RC4, 3DES (Sweet32), and CBC-mode ciphers in favor of AES-GCM or CHACHA20-POLY1305.",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Probe Legacy Deprecated TLS (TLS 1.0 ClientHello)
+    if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+
+        let legacy_hello = craft_tls_client_hello(0x03, 0x01); // TLS 1.0
+        if stream.write_all(&legacy_hello).is_ok() {
+            let mut buf = vec![0u8; 4096];
+            if let Ok(n) = stream.read(&mut buf) {
+                if n >= 11 && buf[0] == 22 && n > 5 && buf[5] == 2 {
+                    let server_version = u16::from_be_bytes([buf[9], buf[10]]);
+                    match server_version {
+                        0x0300 => {
+                            findings.push(AuditFinding::new(
+                                "SEC-TLS-SSL3",
+                                "SSL 3.0 Deprecated Protocol Negotiated",
+                                ip,
+                                Some(port),
+                                AuditSeverity::Critical,
+                                "The server negotiated legacy SSL 3.0, vulnerable to POODLE and known cryptographic breaks.",
+                                "Disable SSL 3.0 in server schannel/openssl configurations. Enforce TLS 1.2 or TLS 1.3.",
+                            ));
+                        }
+                        0x0301 => {
+                            findings.push(AuditFinding::new(
+                                "SEC-TLS-1.0",
+                                "TLS 1.0 Deprecated Protocol Negotiated",
+                                ip,
+                                Some(port),
+                                AuditSeverity::High,
+                                "The server negotiated deprecated TLS 1.0, which lacks modern AEAD cipher suites and is prohibited by PCI-DSS.",
+                                "Disable TLS 1.0 and require TLS 1.2 or TLS 1.3.",
+                            ));
+                        }
+                        0x0302 => {
+                            findings.push(AuditFinding::new(
+                                "SEC-TLS-1.1",
+                                "TLS 1.1 Deprecated Protocol Negotiated",
+                                ip,
+                                Some(port),
+                                AuditSeverity::Medium,
+                                "The server negotiated deprecated TLS 1.1.",
+                                "Migrate to TLS 1.2 or TLS 1.3.",
+                            ));
+                        }
+                        _ => {}
                     }
                 }
             }

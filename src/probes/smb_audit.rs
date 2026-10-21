@@ -136,11 +136,11 @@ fn craft_smb2_negotiate() -> Vec<u8> {
     packet.extend_from_slice(&[0xaa; 16]);         // ClientGuid (16 random bytes)
     packet.extend_from_slice(&0u64.to_le_bytes());  // ClientStartTime
 
-    // Dialects (SMB 2.0.2, 2.1, 3.0, 3.1.1)
+    // Dialects: SMB 2.0.2, 2.1, 3.0, 3.0.2 (Do not advertise 3.1.1 without negotiate contexts)
     packet.extend_from_slice(&0x0202u16.to_le_bytes());
     packet.extend_from_slice(&0x0210u16.to_le_bytes());
     packet.extend_from_slice(&0x0300u16.to_le_bytes());
-    packet.extend_from_slice(&0x0311u16.to_le_bytes());
+    packet.extend_from_slice(&0x0302u16.to_le_bytes());
 
     // Update NetBIOS Length (big-endian 3-byte integer at [1..4])
     let netbios_len = (packet.len() - 4) as u32;

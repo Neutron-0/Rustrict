@@ -65,7 +65,7 @@ impl SoapClient {
         None
     }
 
-    /// Queries a single host entry by numeric index (0..N) using GetGenericHostEntry
+    /// Queries a single host entry by numeric index (0..N) using GetGenericHostEntry per UPnP standard
     pub fn get_generic_host_entry(
         gateway_addr: SocketAddr,
         control_path: &str,
@@ -77,7 +77,7 @@ impl SoapClient {
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
     <u:GetGenericHostEntry xmlns:u="{service_urn}">
-      <NewHostNumberOfEntries>{entry_index}</NewHostNumberOfEntries>
+      <NewHostIndex>{entry_index}</NewHostIndex>
     </u:GetGenericHostEntry>
   </s:Body>
 </s:Envelope>"#

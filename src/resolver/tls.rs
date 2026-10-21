@@ -11,7 +11,7 @@ pub fn probe_tls_certificate(ip: Ipv4Addr) -> Option<String> {
             &std::net::SocketAddr::V4(addr),
             Duration::from_millis(60),
         ) {
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(80)));
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
             let _ = stream.set_write_timeout(Some(Duration::from_millis(80)));
 
             use std::io::{Read, Write};
@@ -59,45 +59,54 @@ pub fn probe_tls_certificate(ip: Ipv4Addr) -> Option<String> {
     None
 }
 
-/// Searches a TLS response buffer for the X.509 Common Name OID (2.5.4.3: 0x55, 0x04, 0x03)
+/// Searches a TLS response buffer for the X.509 Common Name OID (2.5.4.3: 0x55, 0x04, 0x03).
+/// Scans in reverse order to prefer the Subject CN (machine hostname) over earlier Issuer CNs (Certificate Authorities).
 pub fn extract_x509_cn(data: &[u8]) -> Option<String> {
     let cn_oid = &[0x55, 0x04, 0x03];
-    let pos = data.windows(cn_oid.len()).position(|w| w == cn_oid)?;
+    let matches: Vec<usize> = data
+        .windows(cn_oid.len())
+        .enumerate()
+        .filter_map(|(pos, w)| if w == cn_oid { Some(pos) } else { None })
+        .collect();
 
-    // After OID (3 bytes), ASN.1 specifies string tag (0x13 = PrintableString, 0x0c = UTF8String, 0x1e = BMPString)
-    let rem = &data[pos + 3..];
-    if rem.len() < 3 {
-        return None;
-    }
-
-    let tag = rem[0];
-    let len = rem[1] as usize;
-
-    if rem.len() < 2 + len || len == 0 || len > 64 {
-        return None;
-    }
-
-    let str_bytes = &rem[2..2 + len];
-
-    let name = match tag {
-        0x13 | 0x0c | 0x16 => {
-            // PrintableString / UTF8String / IA5String
-            String::from_utf8_lossy(str_bytes).trim().to_string()
+    // Iterate matches in reverse: in X.509 certificates, Subject DN follows Issuer DN
+    for &pos in matches.iter().rev() {
+        let rem = &data[pos + 3..];
+        if rem.len() < 3 {
+            continue;
         }
-        0x1e => {
-            // BMPString (UTF-16BE)
-            let u16_chars: Vec<u16> = str_bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect();
-            String::from_utf16_lossy(&u16_chars).trim().to_string()
-        }
-        _ => return None,
-    };
 
-    if !name.is_empty() && !name.contains('\0') {
-        Some(name)
-    } else {
-        None
+        let tag = rem[0];
+        let len = rem[1] as usize;
+
+        if rem.len() < 2 + len || len == 0 || len > 64 {
+            continue;
+        }
+
+        let str_bytes = &rem[2..2 + len];
+
+        let parsed = match tag {
+            0x13 | 0x0c | 0x16 => {
+                // PrintableString / UTF8String / IA5String
+                Some(String::from_utf8_lossy(str_bytes).trim().to_string())
+            }
+            0x1e => {
+                // BMPString (UTF-16BE)
+                let u16_chars: Vec<u16> = str_bytes
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                Some(String::from_utf16_lossy(&u16_chars).trim().to_string())
+            }
+            _ => None,
+        };
+
+        if let Some(name) = parsed {
+            if !name.is_empty() && !name.contains('\0') {
+                return Some(name);
+            }
+        }
     }
+
+    None
 }

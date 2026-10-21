@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -33,18 +33,25 @@ impl SubnetScanner {
 
         let network_u32 = ip_u32 & mask_u32;
         let broadcast_u32 = network_u32 | (!mask_u32);
+        let prefix_len = mask_u32.count_ones();
 
-        let first_ip = network_u32.saturating_add(1);
-        let last_ip = broadcast_u32.saturating_sub(1);
+        let (first_ip, last_ip) = match prefix_len {
+            32 => (network_u32, network_u32),
+            31 => (network_u32, broadcast_u32), // RFC 3021 point-to-point links
+            _ => (
+                network_u32.saturating_add(1),
+                broadcast_u32.saturating_sub(1),
+            ),
+        };
 
-        if first_ip >= last_ip {
+        if first_ip > last_ip {
             return Vec::new();
         }
 
         // Bound automatic subnet scan to at most /16 (65,534 hosts) to prevent memory exhaustion and network DOS
         let max_hosts = 65534u32;
-        let bounded_last = if last_ip - first_ip >= max_hosts {
-            first_ip + max_hosts - 1
+        let bounded_last = if last_ip.saturating_sub(first_ip) >= max_hosts {
+            first_ip.saturating_add(max_hosts).saturating_sub(1)
         } else {
             last_ip
         };
@@ -68,8 +75,8 @@ impl SubnetScanner {
         }
 
         let max_hosts = 65534u32;
-        let bounded_end = if end_u32 - start_u32 >= max_hosts {
-            start_u32 + max_hosts - 1
+        let bounded_end = if end_u32.saturating_sub(start_u32) >= max_hosts {
+            start_u32.saturating_add(max_hosts).saturating_sub(1)
         } else {
             end_u32
         };
@@ -100,11 +107,13 @@ impl SubnetScanner {
         let discovered_count = Arc::new(AtomicUsize::new(0));
 
         let mut host_map: HashMap<Ipv4Addr, MacAddress> = HashMap::new();
+        let mut cached_ips: HashSet<Ipv4Addr> = HashSet::new();
 
         // If not in fresh mode, seed with existing kernel ARP table cache for speed
         if !fresh {
             for (cached_ip, cached_mac) in platform::get_arp_cache() {
                 if ip_list.contains(&cached_ip) {
+                    cached_ips.insert(cached_ip);
                     host_map.insert(cached_ip, cached_mac);
                 }
             }
@@ -115,6 +124,7 @@ impl SubnetScanner {
         let scanned_clone = Arc::clone(&scanned);
         let disc_clone = Arc::clone(&discovered_count);
         let progress_ref = &on_progress;
+        let cached_ips_ref = &cached_ips;
 
         let mut probed_results: Vec<(Ipv4Addr, MacAddress)> = Vec::new();
         // Chunk into batches of 48 to avoid router ARP storm/flood drops
@@ -126,7 +136,9 @@ impl SubnetScanner {
                     let current_scanned = scanned_clone.fetch_add(1, Ordering::Relaxed) + 1;
 
                     if let Some(mac) = mac_opt {
-                        disc_clone.fetch_add(1, Ordering::Relaxed);
+                        if !cached_ips_ref.contains(&ip) {
+                            disc_clone.fetch_add(1, Ordering::Relaxed);
+                        }
                         let curr_disc = disc_clone.load(Ordering::Relaxed);
                         progress_ref(current_scanned, total, curr_disc);
                         Some((ip, mac))

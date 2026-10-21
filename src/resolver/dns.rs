@@ -1,25 +1,34 @@
 use std::net::Ipv4Addr;
-use std::process::Command;
 
-/// Attempts reverse DNS lookup using nslookup with short timeout
+/// Performs reverse DNS lookup using native Windows WinSock getnameinfo
 pub fn query_reverse_dns(ip: Ipv4Addr) -> Option<String> {
-    let output = Command::new("nslookup")
-        .arg(ip.to_string())
-        .output()
-        .ok()?;
+    use windows_sys::Win32::Networking::WinSock::{
+        getnameinfo, SOCKADDR, SOCKADDR_IN, NI_NAMEREQD,
+    };
 
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.starts_with("Name:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let name = parts[1].trim_end_matches('.').to_string();
-                    if !name.is_empty() {
-                        return Some(name);
-                    }
-                }
+    let mut sa: SOCKADDR_IN = unsafe { std::mem::zeroed() };
+    sa.sin_family = 2; // AF_INET
+    sa.sin_addr.S_un.S_addr = u32::from_ne_bytes(ip.octets());
+
+    let mut host_buf = [0u8; 256];
+
+    let res = unsafe {
+        getnameinfo(
+            &sa as *const _ as *const SOCKADDR,
+            std::mem::size_of::<SOCKADDR_IN>() as i32,
+            host_buf.as_mut_ptr(),
+            host_buf.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            NI_NAMEREQD as i32,
+        )
+    };
+
+    if res == 0 {
+        if let Some(pos) = host_buf.iter().position(|&b| b == 0) {
+            let s = String::from_utf8_lossy(&host_buf[..pos]).trim().to_string();
+            if !s.is_empty() && s != ip.to_string() {
+                return Some(s);
             }
         }
     }

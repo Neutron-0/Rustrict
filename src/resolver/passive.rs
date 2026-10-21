@@ -166,7 +166,7 @@ pub fn parse_dhcp_or_broadcast(data: &[u8]) -> Option<(Ipv4Addr, MacAddress, Str
         return None; // IPv4 only
     }
 
-    let src_mac = MacAddress([data[6], data[7], data[8], data[9], data[10], data[11]]);
+    let eth_src_mac = MacAddress([data[6], data[7], data[8], data[9], data[10], data[11]]);
 
     let ip_data = &data[14..];
     let ip_proto = ip_data[9];
@@ -190,16 +190,31 @@ pub fn parse_dhcp_or_broadcast(data: &[u8]) -> Option<(Ipv4Addr, MacAddress, Str
     if (src_port == 67 || src_port == 68 || dst_port == 67 || dst_port == 68) && udp_payload.len() > 240 {
         // DHCP Magic Cookie: 0x63, 0x82, 0x53, 0x63 at offset 236
         if udp_payload[236..240] == [0x63, 0x82, 0x53, 0x63] {
+            // Client Hardware Address (chaddr) in DHCP packet is at offset 28..34 in udp_payload
+            let chaddr = MacAddress([
+                udp_payload[28], udp_payload[29], udp_payload[30],
+                udp_payload[31], udp_payload[32], udp_payload[33],
+            ]);
+            let client_mac = if chaddr != MacAddress::ZERO && chaddr != MacAddress::BROADCAST {
+                chaddr
+            } else {
+                eth_src_mac
+            };
+
             // Client IP at offset 12 (ciaddr) or yiaddr at offset 16
             let ciaddr = Ipv4Addr::new(udp_payload[12], udp_payload[13], udp_payload[14], udp_payload[15]);
             let yiaddr = Ipv4Addr::new(udp_payload[16], udp_payload[17], udp_payload[18], udp_payload[19]);
-            let target_ip = if ciaddr != Ipv4Addr::UNSPECIFIED {
+            let mut target_ip = if ciaddr != Ipv4Addr::UNSPECIFIED {
                 ciaddr
             } else if yiaddr != Ipv4Addr::UNSPECIFIED {
                 yiaddr
-            } else {
+            } else if src_ip != Ipv4Addr::UNSPECIFIED {
                 src_ip
+            } else {
+                Ipv4Addr::UNSPECIFIED
             };
+
+            let mut hostname = None;
 
             // Traverse Options starting at offset 240
             let mut opt_idx = 240;
@@ -220,16 +235,32 @@ pub fn parse_dhcp_or_broadcast(data: &[u8]) -> Option<(Ipv4Addr, MacAddress, Str
                     break;
                 }
 
+                // Option 50: Requested IP Address (4 bytes)
+                if tag == 50 && opt_len == 4 && target_ip == Ipv4Addr::UNSPECIFIED {
+                    target_ip = Ipv4Addr::new(
+                        udp_payload[opt_idx],
+                        udp_payload[opt_idx + 1],
+                        udp_payload[opt_idx + 2],
+                        udp_payload[opt_idx + 3],
+                    );
+                }
+
                 // Option 12: Host Name
                 if tag == 12 && opt_len > 0 && opt_len < 64 {
                     let host_bytes = &udp_payload[opt_idx..opt_idx + opt_len];
                     let name = String::from_utf8_lossy(host_bytes).trim().to_string();
-                    if !name.is_empty() && target_ip != Ipv4Addr::UNSPECIFIED {
-                        return Some((target_ip, src_mac, name));
+                    if !name.is_empty() {
+                        hostname = Some(name);
                     }
                 }
 
                 opt_idx += opt_len;
+            }
+
+            if let Some(name) = hostname {
+                if target_ip != Ipv4Addr::UNSPECIFIED {
+                    return Some((target_ip, client_mac, name));
+                }
             }
         }
     }

@@ -114,7 +114,7 @@ pub fn resolve_identity_with_gateway(
         }
     }
 
-    // 3. Try SMB NTLMSSP Challenge Leak (Windows Laptops, PCs, Samba NAS)
+    // 4. Try SMB NTLMSSP Challenge Leak (Windows Laptops, PCs, Samba NAS)
     if let Some(name) = smb::probe_smb_ntlm(ip) {
         return HostIdentity {
             hostname: name,
@@ -123,7 +123,7 @@ pub fn resolve_identity_with_gateway(
         };
     }
 
-    // 4. Try TLS Certificate Common Name (Windows RDP, HTTPS servers)
+    // 5. Try TLS Certificate Common Name (Windows RDP, HTTPS servers)
     if let Some(name) = tls::probe_tls_certificate(ip) {
         return HostIdentity {
             hostname: name,
@@ -132,7 +132,7 @@ pub fn resolve_identity_with_gateway(
         };
     }
 
-    // 5. Try NetBIOS Name Service (Windows, Samba, NAS, Printers)
+    // 6. Try NetBIOS Name Service (Windows, Samba, NAS, Printers)
     if let Some(name) = netbios::query_netbios(ip) {
         return HostIdentity {
             hostname: name,
@@ -141,7 +141,7 @@ pub fn resolve_identity_with_gateway(
         };
     }
 
-    // 6. Try mDNS (Apple MacBooks, iPhones, Linux workstations, IoT)
+    // 7. Try mDNS (Apple MacBooks, iPhones, Linux workstations, IoT)
     if let Some(name) = mdns::query_mdns(ip) {
         return HostIdentity {
             hostname: name,
@@ -150,34 +150,34 @@ pub fn resolve_identity_with_gateway(
         };
     }
 
-    // 7. Try LLMNR (Windows Link-Local)
+    // 8. Try LLMNR (Windows Link-Local)
     if let Some(name) = llmnr::query_llmnr(ip) {
         return HostIdentity {
             hostname: name,
-            source: NameSource::NetBios,
+            source: NameSource::Llmnr,
             vendor,
         };
     }
 
-    // 8. Try HTTP banner / title probe (Routers, IP cams, Web consoles)
+    // 9. Try HTTP banner / title probe (Routers, IP cams, Web consoles)
     if let Some(title) = probe_http_title(ip) {
         return HostIdentity {
             hostname: title,
-            source: NameSource::Mdns,
+            source: NameSource::HttpTitle,
             vendor,
         };
     }
 
-    // 9. Try Reverse DNS
+    // 10. Try Reverse DNS
     if let Some(name) = dns::query_reverse_dns(ip) {
         return HostIdentity {
             hostname: name,
-            source: NameSource::Mdns,
+            source: NameSource::Dns,
             vendor,
         };
     }
 
-    // 10. No authentic hostname resolved - do NOT guess or fake a device name.
+    // 11. No authentic hostname resolved - do NOT guess or fake a device name.
     HostIdentity {
         hostname: String::new(),
         source: NameSource::Unresolved,
