@@ -120,7 +120,10 @@ impl ScopeManager {
                 return false;
             }
         }
-        if self.strict_mode && !self.allowed_cidrs.is_empty() {
+        if self.strict_mode {
+            if self.allowed_cidrs.is_empty() {
+                return false;
+            }
             return self.allowed_cidrs.iter().any(|c| c.contains(ip));
         }
         true
@@ -135,12 +138,16 @@ impl ScopeManager {
                 return Err(format!("Target MAC {} is explicitly excluded from assessment scope.", m));
             }
         }
-        if self.strict_mode && !self.allowed_cidrs.is_empty() && !self.allowed_cidrs.iter().any(|c| c.contains(ip)) {
-            return Err(format!("Target IP {} is out of authorized scope CIDR definitions (strict mode enabled).", ip));
+        if self.strict_mode {
+            if self.allowed_cidrs.is_empty() {
+                return Err("Target rejected: Strict mode is enabled but no authorized CIDR ranges are defined.".into());
+            }
+            if !self.allowed_cidrs.iter().any(|c| c.contains(ip)) {
+                return Err(format!("Target IP {} is out of authorized scope CIDR definitions (strict mode enabled).", ip));
+            }
         }
         Ok(())
     }
-
 
     pub fn clear(&mut self) {
         self.allowed_cidrs.clear();

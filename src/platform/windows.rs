@@ -223,14 +223,34 @@ pub fn get_arp_cache() -> Vec<(Ipv4Addr, MacAddress)> {
     entries
 }
 
+/// Resolves standard durable state file path in %ProgramData%\Rustrict or %APPDATA%\Rustrict
+pub fn get_state_file_path() -> std::path::PathBuf {
+    if let Ok(progdata) = std::env::var("ProgramData") {
+        let dir = std::path::PathBuf::from(progdata).join("Rustrict");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("rustrict_state.json");
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = std::path::PathBuf::from(appdata).join("Rustrict");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("rustrict_state.json");
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return dir.join("rustrict_state.json");
+        }
+    }
+    std::path::PathBuf::from("rustrict_state.json")
+}
+
 /// Discovers the active default IPv4 interface using Windows routing and netsh
 pub fn get_default_interface() -> Result<NetworkInterface, String> {
-    // Query route print to find active default gateway and interface IP
+    // Query route sorted by RouteMetric and InterfaceMetric to pick the lowest metric active route
     let output = Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            r#"Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1 -Property InterfaceAlias, NextHop, InterfaceMetric | ForEach-Object { "$($_.InterfaceAlias)|$($_.NextHop)" }"#,
+            r#"Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object -Property RouteMetric, InterfaceMetric | Select-Object -First 1 -Property InterfaceAlias, NextHop, InterfaceMetric | ForEach-Object { "$($_.InterfaceAlias)|$($_.NextHop)" }"#,
         ])
         .output()
         .map_err(|e| format!("Failed to query route: {}", e))?;
@@ -296,6 +316,22 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
             }
         }
     }
+    if gateway_mac == MacAddress::ZERO {
+        // Attempt an active ICMP echo to force Windows ARP resolution
+        let _ = Command::new("ping")
+            .args(["-n", "1", "-w", "500", &gateway_ip.to_string()])
+            .output();
+        if let Some(mac) = send_arp(gateway_ip) {
+            gateway_mac = mac;
+        }
+    }
+
+    if gateway_mac == MacAddress::ZERO {
+        return Err(format!(
+            "Failed to resolve MAC address for default gateway ({}) on interface '{}'. Ensure your network connection is active.",
+            gateway_ip, iface_name
+        ));
+    }
 
     // Query MAC address and GUID of local adapter
     let adapter_cmd = Command::new("powershell")
@@ -314,6 +350,10 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
     let parts: Vec<&str> = adapter_str.trim().split('|').collect();
     let mac_str = parts.first().unwrap_or(&"").replace('-', ":");
     let local_mac = mac_str.parse::<MacAddress>().unwrap_or(MacAddress::ZERO);
+
+    if local_mac == MacAddress::ZERO {
+        return Err(format!("Failed to query local MAC address for interface '{}'.", iface_name));
+    }
 
     let guid_str = parts.get(1).unwrap_or(&"").trim();
     let device_path = if !guid_str.is_empty() {

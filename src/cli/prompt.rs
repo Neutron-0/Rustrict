@@ -40,6 +40,18 @@ impl RustrictCli {
         let limiter = TrafficLimiter::new();
         let sniffer = crate::resolver::passive::PassiveIdentitySniffer::new(&iface.device_path);
         let persistent_state = crate::state::PersistentState::load();
+
+        let scope = if let Some(ref saved_scope) = persistent_state.scope {
+            saved_scope.clone()
+        } else {
+            let mut s = ScopeManager::default();
+            let prefix = u32::from(iface.netmask).count_ones() as u8;
+            if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+                s.add_cidr_direct(local_cidr);
+            }
+            s
+        };
+
         let mut hosts = Vec::new();
 
         if !persistent_state.blocked_hosts.is_empty() {
@@ -50,6 +62,19 @@ impl RustrictCli {
             );
             for (idx, b) in persistent_state.blocked_hosts.iter().enumerate() {
                 let mac = b.mac.parse::<MacAddress>().unwrap_or(MacAddress::ZERO);
+                if mac.is_zero() {
+                    continue;
+                }
+                if let Err(e) = scope.validate_target(&b.ip, Some(&mac)) {
+                    println!(
+                        "{} Skipping restored blocked device {} ({}) due to scope violation: {}",
+                        "[WARN]".yellow().bold(),
+                        b.ip,
+                        b.mac,
+                        e
+                    );
+                    continue;
+                }
                 let dir = persistent_state.get_direction(&b.ip);
                 let mut host = Host::with_source(
                     idx,
@@ -74,13 +99,6 @@ impl RustrictCli {
             limiter_clone.stop();
             spoofer_clone.stop();
         });
-
-        let mut scope = ScopeManager::default();
-        let prefix = u32::from(iface.netmask).count_ones() as u8;
-        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
-            scope.add_cidr_direct(local_cidr);
-        }
-
 
         Self {
             iface,
@@ -232,11 +250,17 @@ impl RustrictCli {
     fn handle_hosts(&mut self) {
         // Merge passive discoveries from sniffer
         for (ip, mac, name) in self.sniffer.get_all_entries() {
-            if let Some(existing) = self.hosts.iter_mut().find(|h| h.ip == ip || (mac != MacAddress::ZERO && h.mac == mac)) {
-                existing.name = name;
-                existing.name_source = crate::types::NameSource::Dhcp;
-                existing.online = true;
-            } else {
+            if ip == self.iface.gateway || (self.iface.gateway_mac != MacAddress::ZERO && mac == self.iface.gateway_mac) {
+                continue;
+            }
+            if let Some(existing) = self.hosts.iter_mut().find(|h| h.ip == ip) {
+                if existing.mac == mac || existing.mac.is_zero() {
+                    existing.mac = mac;
+                    existing.name = name;
+                    existing.name_source = crate::types::NameSource::Dhcp;
+                    existing.online = true;
+                }
+            } else if !mac.is_zero() {
                 let id = self.hosts.len();
                 let vendor = crate::resolver::oui::lookup_vendor(&mac).to_string();
                 let mut new_h = Host::with_source(
@@ -506,6 +530,8 @@ impl RustrictCli {
                 match args[1].parse::<Ipv4Cidr>() {
                     Ok(cidr) => {
                         self.scope.add_cidr_direct(cidr.clone());
+                        self.persistent_state.scope = Some(self.scope.clone());
+                        let _ = self.persistent_state.save();
                         println!("{} Added CIDR {} to operational scope", "OK".green().bold(), cidr);
                     }
                     Err(e) => println!("{} Failed to parse CIDR: {}", "[ERR]".red().bold(), e),
@@ -519,6 +545,8 @@ impl RustrictCli {
                 match args[1].parse::<Ipv4Cidr>() {
                     Ok(cidr) => {
                         self.scope.remove_cidr_direct(&cidr);
+                        self.persistent_state.scope = Some(self.scope.clone());
+                        let _ = self.persistent_state.save();
                         println!("{} Removed CIDR {} from scope", "OK".green().bold(), cidr);
                     }
                     Err(e) => println!("{} Failed to parse CIDR: {}", "[ERR]".red().bold(), e),
@@ -532,6 +560,8 @@ impl RustrictCli {
                 match args[1].parse::<Ipv4Addr>() {
                     Ok(ip) => {
                         self.scope.exclude_ip(ip);
+                        self.persistent_state.scope = Some(self.scope.clone());
+                        let _ = self.persistent_state.save();
                         println!("{} Excluded IP {} from scope actions", "OK".green().bold(), ip);
                     }
                     Err(e) => println!("{} Failed to parse IP: {}", "[ERR]".red().bold(), e),
@@ -545,6 +575,8 @@ impl RustrictCli {
                 match args[1].parse::<MacAddress>() {
                     Ok(mac) => {
                         self.scope.exclude_mac(mac);
+                        self.persistent_state.scope = Some(self.scope.clone());
+                        let _ = self.persistent_state.save();
                         println!("{} Excluded MAC {} from scope actions", "OK".green().bold(), mac);
                     }
                     Err(e) => println!("{} Failed to parse MAC: {}", "[ERR]".red().bold(), e),
@@ -558,10 +590,14 @@ impl RustrictCli {
                 match args[1].to_lowercase().as_str() {
                     "on" | "true" | "1" => {
                         self.scope.set_strict(true);
+                        self.persistent_state.scope = Some(self.scope.clone());
+                        let _ = self.persistent_state.save();
                         println!("{} Scope strict mode ENABLED (out-of-scope targets blocked)", "OK".green().bold());
                     }
                     "off" | "false" | "0" => {
                         self.scope.set_strict(false);
+                        self.persistent_state.scope = Some(self.scope.clone());
+                        let _ = self.persistent_state.save();
                         println!("{} Scope strict mode DISABLED", "OK".green().bold());
                     }
                     _ => println!("Invalid argument. Use 'scope strict on' or 'scope strict off'"),

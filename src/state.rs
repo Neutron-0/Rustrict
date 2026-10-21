@@ -1,10 +1,9 @@
 use std::fs;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use crate::types::{Direction, Host};
-
-const STATE_FILE: &str = "rustrict_state.json";
+use crate::core::scope::ScopeManager;
+use crate::types::{Direction, Host, MacAddress};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentBlockedHost {
@@ -17,12 +16,27 @@ pub struct PersistentBlockedHost {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PersistentState {
     pub blocked_hosts: Vec<PersistentBlockedHost>,
+    pub scope: Option<ScopeManager>,
 }
 
 impl PersistentState {
+    fn state_file_path() -> PathBuf {
+        crate::platform::get_state_file_path()
+    }
+
     pub fn load() -> Self {
-        if Path::new(STATE_FILE).exists() {
-            if let Ok(content) = fs::read_to_string(STATE_FILE) {
+        let path = Self::state_file_path();
+        // Check primary location, then fallback to relative current directory if present
+        let target_path = if path.exists() {
+            path
+        } else if std::path::Path::new("rustrict_state.json").exists() {
+            PathBuf::from("rustrict_state.json")
+        } else {
+            path
+        };
+
+        if target_path.exists() {
+            if let Ok(content) = fs::read_to_string(&target_path) {
                 if let Ok(state) = serde_json::from_str::<PersistentState>(&content) {
                     return state;
                 }
@@ -32,18 +46,23 @@ impl PersistentState {
     }
 
     pub fn save(&self) -> Result<(), String> {
+        let path = Self::state_file_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Serialization error: {}", e))?;
-        fs::write(STATE_FILE, json)
-            .map_err(|e| format!("Failed to write {}: {}", STATE_FILE, e))?;
+        fs::write(&path, json)
+            .map_err(|e| format!("Failed to write state file {}: {}", path.display(), e))?;
         Ok(())
     }
 
     pub fn add_blocked(&mut self, host: &Host, dir: Direction) {
-        self.blocked_hosts.retain(|b| b.ip != host.ip);
+        let mac_str = host.mac.to_string();
+        self.blocked_hosts.retain(|b| b.ip != host.ip && (host.mac == MacAddress::ZERO || b.mac != mac_str));
         self.blocked_hosts.push(PersistentBlockedHost {
             ip: host.ip,
-            mac: host.mac.to_string(),
+            mac: mac_str,
             name: host.name.clone(),
             direction: dir.pretty().to_string(),
         });
