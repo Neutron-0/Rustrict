@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 
 use crate::limiter::fault::FaultProfile;
@@ -48,7 +49,6 @@ impl TrafficLimiter {
             active_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
-
 
     pub fn limit(&self, ip: Ipv4Addr, direction: Direction, rate: BitRate) {
         let ul_bucket = if direction.includes_outgoing() {
@@ -131,8 +131,17 @@ impl TrafficLimiter {
 
 impl Drop for TrafficLimiter {
     fn drop(&mut self) {
-        self.stop();
+        // Only run destructive teardown when the last clone drops
+        if Arc::strong_count(&self.running) <= 1 {
+            self.stop();
+        }
     }
+}
+
+struct DelayedPacket {
+    data: Vec<u8>,
+    addr: [u8; 128],
+    send_at: Instant,
 }
 
 fn run_windivert_loop(
@@ -253,6 +262,36 @@ fn run_windivert_loop(
 
     *active_handle.lock() = Some((WinDivertHandle(handle), close_fn));
 
+    // Spawn non-blocking background worker for delayed packets so the main receive loop is never stalled
+    let (delay_tx, delay_rx) = std::sync::mpsc::channel::<DelayedPacket>();
+    let delay_running = Arc::clone(&running);
+    let handle_usize = handle as usize;
+    let delay_worker = thread::spawn(move || {
+        let h = handle_usize as *mut std::ffi::c_void;
+        while delay_running.load(Ordering::Relaxed) {
+            match delay_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(pkt) => {
+                    let now = Instant::now();
+                    if pkt.send_at > now {
+                        thread::sleep(pkt.send_at - now);
+                    }
+                    if delay_running.load(Ordering::Relaxed) {
+                        let _ = unsafe {
+                            send_fn(
+                                h,
+                                pkt.data.as_ptr(),
+                                pkt.data.len() as u32,
+                                pkt.addr.as_ptr(),
+                                std::ptr::null_mut(),
+                            )
+                        };
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    });
+
     let mut packet_buf = vec![0u8; 65535];
     let mut addr_buf = [0u8; 128]; // WinDivertAddress structure
     let mut read_len: u32 = 0;
@@ -349,14 +388,20 @@ fn run_windivert_loop(
         let delay = match (src_fault, dst_fault) {
             (Some(f1), Some(f2)) => f1.compute_delay().max(f2.compute_delay()),
             (Some(f), None) | (None, Some(f)) => f.compute_delay(),
-            (None, None) => std::time::Duration::ZERO,
+            (None, None) => Duration::ZERO,
         };
 
         if !delay.is_zero() {
-            std::thread::sleep(delay);
+            // Offload delayed packet to background queue without blocking the forward loop
+            let _ = delay_tx.send(DelayedPacket {
+                data: packet_buf[..read_len as usize].to_vec(),
+                addr: addr_buf,
+                send_at: Instant::now() + delay,
+            });
+            continue;
         }
 
-        // Forward allowed packet
+        // Forward allowed packet immediately
         let _ = unsafe {
             send_fn(
                 handle,
@@ -366,8 +411,9 @@ fn run_windivert_loop(
                 std::ptr::null_mut(),
             )
         };
-
     }
+
+    let _ = delay_worker.join();
 
     let should_close = active_handle.lock().take().is_some();
     if should_close {

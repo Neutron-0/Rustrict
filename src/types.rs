@@ -12,6 +12,10 @@ impl MacAddress {
     pub const BROADCAST: MacAddress = MacAddress([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
     pub const ZERO: MacAddress = MacAddress([0, 0, 0, 0, 0, 0]);
 
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0; 6]
+    }
+
     pub fn oui_prefix(&self) -> [u8; 3] {
         [self.0[0], self.0[1], self.0[2]]
     }
@@ -102,7 +106,7 @@ impl HostStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NameSource {
     Local,       // This machine
     Gateway,     // Default gateway / router
@@ -112,6 +116,9 @@ pub enum NameSource {
     Tls,         // Extracted from X.509 certificate CN
     Mdns,        // Resolved via mDNS service/PTR
     NetBios,     // Resolved via NBNS query
+    Llmnr,       // Resolved via LLMNR query
+    Dns,         // Resolved via Reverse DNS query
+    HttpTitle,   // Extracted from HTTP server title/banner
     Manual,      // Assigned by user via add command
     Unresolved,  // No authoritative hostname resolved
 }

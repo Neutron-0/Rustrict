@@ -114,6 +114,7 @@ impl RawL2Sender {
         }
 
         // Fallback 2: Enumerate all Npcap adapters using pcap_findalldevs safely
+        // Strictly verify adapter name or description matches iface_name to prevent binding wrong adapters
         let find_name = CString::new("pcap_findalldevs").unwrap();
         let find_addr = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, find_name.as_ptr() as *const u8) };
         let free_name = CString::new("pcap_freealldevs").unwrap();
@@ -127,10 +128,27 @@ impl RawL2Sender {
             if unsafe { find_fn(&mut alldevs, errbuf.as_mut_ptr()) } == 0 && !alldevs.is_null() {
                 let mut curr = alldevs;
                 let mut found_handle = std::ptr::null_mut();
+                let clean_iface = iface_name.trim_start_matches(r"\Device\NPF_").to_lowercase();
 
                 while !curr.is_null() {
                     let dev_name_ptr = unsafe { (*curr).name };
+                    let desc_ptr = unsafe { (*curr).description };
+
+                    let mut matches = false;
                     if !dev_name_ptr.is_null() {
+                        let dev_s = unsafe { std::ffi::CStr::from_ptr(dev_name_ptr) }.to_string_lossy().to_lowercase();
+                        if !clean_iface.is_empty() && (dev_s.contains(&clean_iface) || clean_iface.contains(dev_s.trim_start_matches(r"\device\npf_"))) {
+                            matches = true;
+                        }
+                    }
+                    if !matches && !desc_ptr.is_null() {
+                        let desc_s = unsafe { std::ffi::CStr::from_ptr(desc_ptr) }.to_string_lossy().to_lowercase();
+                        if !clean_iface.is_empty() && (desc_s.contains(&clean_iface) || clean_iface.contains(&desc_s)) {
+                            matches = true;
+                        }
+                    }
+
+                    if matches && !dev_name_ptr.is_null() {
                         let dev_h = unsafe { open_fn(dev_name_ptr, 65535, 1, 1000, errbuf.as_mut_ptr()) };
                         if !dev_h.is_null() {
                             found_handle = dev_h;
