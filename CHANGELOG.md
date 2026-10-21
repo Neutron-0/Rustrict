@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+- Added: Hardware Layer-2 Blackholing (`BLACKHOLE_MAC` `02:bf:00:00:00:01`) for blocked devices, dropping traffic at switch/AP level and eliminating adapter airtime saturation and local host bandwidth drop.
+- Added: Asynchronous background worker queue for WinDivert latency and jitter simulation, preventing packet processing loop stalls.
+- Added: Scope persistence across CLI restarts saved to `%ProgramData%\Rustrict\rustrict_state.json`.
+- Added: Native Windows WinSock `getnameinfo` reverse DNS resolution replacing `nslookup.exe`.
+- Added: DHCP `chaddr` client hardware address parsing from BOOTP/DHCP payload and Option 50 requested IP handling.
+- Fixed: SMB negotiate dialect rejection on Windows 10/11 targets (`0xC000000D`).
+- Fixed: TLS posture probe order to prioritize modern TLS 1.2 before testing legacy handshakes.
+- Fixed: Subnet scanning boundary calculation for RFC 3021 `/31` and `/32` networks.
+- Fixed: Mermaid architecture diagrams in `README.md` to prevent "Unable to render rich display" failures across GitHub and markdown viewers.
+- Fixed: Protected router gateway identity from being overwritten by passive sniffer traffic.
 - Added: MIT license, security policy, install/usage/safety docs.
 
 ## [2.0.0] - 2026-09-09

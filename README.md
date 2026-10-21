@@ -70,7 +70,7 @@ Rustrict is organized into modular architectural layers, each responsible for a 
 ## System Architecture Diagram
 
 ```mermaid
-graph TB
+flowchart TD
     subgraph USER["User Terminal (Administrator PowerShell)"]
         CLI["rustrict.exe"]
     end
@@ -121,8 +121,8 @@ graph TB
     REPL --> Table
     REPL --> TargetRes
     REPL -->|scan| Scanner
-    REPL -->|limit / block| Spoofer
-    REPL -->|limit / block| Limiter
+    REPL -->|limit or block| Spoofer
+    REPL -->|limit or block| Limiter
     REPL -->|block| State
     REPL -->|free| State
 
@@ -155,7 +155,7 @@ graph TB
 ## Module Dependency Graph
 
 ```mermaid
-graph LR
+flowchart LR
     subgraph main_bin["Binary (src/main.rs)"]
         main["main()"]
     end
@@ -174,8 +174,8 @@ graph LR
         wireless_mod["wireless"]
     end
 
-    main -->|"use rustrict::cli"| cli_mod
-    main -->|"use rustrict::platform"| platform_mod
+    main -->|use rustrict::cli| cli_mod
+    main -->|use rustrict::platform| platform_mod
 
     cli_mod --> scanner_mod
     cli_mod --> spoofer_mod
@@ -236,13 +236,13 @@ The scanner (`src/scanner/arp.rs`) performs high-speed parallel ARP sweeps acros
 
 ```mermaid
 sequenceDiagram
-    participant User as User (scan command)
-    participant CLI as RustrictCli
-    participant Scanner as SubnetScanner
-    participant GW as GatewayClient (Background)
-    participant Rayon as Rayon Thread Pool
-    participant Kernel as Windows SendARP API
-    participant Resolver as Identity Resolver
+    participant User as "User (scan command)"
+    participant CLI as "RustrictCli"
+    participant Scanner as "SubnetScanner"
+    participant GW as "GatewayClient (Background)"
+    participant Rayon as "Rayon Thread Pool"
+    participant Kernel as "Windows SendARP API"
+    participant Resolver as "Identity Resolver"
 
     User->>CLI: scan (--fresh, --range)
     CLI->>Scanner: scan_subnet() / scan_range()
@@ -302,25 +302,19 @@ flowchart TD
     mDNS -->|Found| mDNSResult[".local Hostname (NameSource::Mdns)"]
     mDNS -->|Not Found| LLMNR["6. LLMNR PTR Query (UDP 5355)"]
 
-    LLMNR -->|Found| LLMNRResult["Link-Local Name (NameSource::Local)"]
+    LLMNR -->|Found| LLMNRResult["Link-Local Name (NameSource::Llmnr)"]
     LLMNR -->|Not Found| HTTP["7. HTTP Banner/Title (TCP 80, 8080)"]
 
-    HTTP -->|Found| HTTPResult["Page Title (NameSource::Local)"]
-    HTTP -->|Not Found| RDNS["8. Reverse DNS (nslookup)"]
+    HTTP -->|Found| HTTPResult["Page Title (NameSource::HttpTitle)"]
+    HTTP -->|Not Found| RDNS["8. Reverse DNS (Native WinSock)"]
 
-    RDNS -->|Found| RDNSResult["PTR Record (NameSource::Local)"]
+    RDNS -->|Found| RDNSResult["PTR Record (NameSource::Dns)"]
     RDNS -->|Not Found| OUI["9. OUI Vendor-Only Identification"]
 
     OUI --> Unresolved["NameSource::Unresolved (vendor still resolved)"]
 
-    style UPnP fill:#2d5016,color:#fff
-    style SMB fill:#2d5016,color:#fff
-    style TLS fill:#2d5016,color:#fff
-    style NetBIOS fill:#2d5016,color:#fff
-    style mDNS fill:#2d5016,color:#fff
-    style LLMNR fill:#2d5016,color:#fff
-    style HTTP fill:#2d5016,color:#fff
-    style RDNS fill:#2d5016,color:#fff
+    classDef resolved fill:#2d5016,stroke:#4ade80,color:#fff;
+    class UPnP,SMB,TLS,NetBIOS,mDNS,LLMNR,HTTP,RDNS resolved;
 ```
 
 **Additionally**, a **passive background sniffer** (`PassiveIdentitySniffer`) runs continuously in a separate thread, capturing broadcast DHCP packets via Npcap promiscuous mode and extracting **DHCP Option 12 (Host Name)** from BOOTP/DHCP exchanges. These passively discovered identities are merged into the host table on every `hosts` command.
@@ -335,15 +329,15 @@ The gateway module (`src/gateway/`) queries the local router's UPnP `LANHostConf
 
 ```mermaid
 sequenceDiagram
-    participant Scanner as SubnetScanner
-    participant GW as GatewayClient
-    participant SSDP as SsdpScanner
-    participant Router as Router (192.168.x.1)
-    participant SOAP as SoapClient
+    participant Scanner as "SubnetScanner"
+    participant GW as "GatewayClient"
+    participant SSDP as "SsdpScanner"
+    participant Router as "Router (192.168.x.1)"
+    participant SOAP as "SoapClient"
 
     Scanner->>GW: refresh_hosts() [background thread]
 
-    Note over GW,SSDP: Phase 1: Service Discovery
+    Note over GW, SSDP: Phase 1: Service Discovery
     GW->>SSDP: discover(gateway_ip)
 
     alt Multicast Discovery
@@ -351,7 +345,7 @@ sequenceDiagram
         Note right of SSDP: Target: InternetGatewayDevice:1
         Router-->>SSDP: HTTP 200 (LOCATION header)
     else Unicast Fallback (Wi-Fi isolation)
-        loop Ports: 1900, 49152, 49153, 5000, 80, 8080
+        loop Unicast Ports 1900, 49152, 49153, 5000, 80, 8080
             SSDP->>Router: HTTP GET /rootDesc.xml
             SSDP->>Router: HTTP GET /desc.xml
             SSDP->>Router: HTTP GET /igd.xml
@@ -364,8 +358,8 @@ sequenceDiagram
     SSDP->>SSDP: Parse XML for controlURL and serviceType
     SSDP-->>GW: GatewayServiceInfo (addr, control_url, service_urn)
 
-    Note over GW,SOAP: Phase 2: DHCP Lease Enumeration
-    loop Index 0..N (until Error 714)
+    Note over GW, SOAP: Phase 2: DHCP Lease Enumeration
+    loop Index 0 to N until Error 714
         GW->>SOAP: get_generic_host_entry(index)
         SOAP->>Router: SOAP POST (GetGenericHostEntry)
         alt Valid Entry
@@ -388,40 +382,41 @@ sequenceDiagram
 The traffic control system operates through three tightly coordinated subsystems:
 
 ```mermaid
-flowchart TB
-    subgraph ARP_POISONING["ARP Cache Poisoning (src/spoofer/)"]
-        direction TB
+flowchart TD
+    subgraph ARP_POISONING["ARP Poisoning Engine (src/spoofer/)"]
         SpooferEngine["ArpSpoofer Engine"]
         WorkerThread["Background Worker Thread (2s interval)"]
         L2Sender["RawL2Sender (wpcap.dll)"]
 
-        SpooferEngine -->|"add(host)"| WorkerThread
-        WorkerThread -->|"Every 2 seconds"| PoisonTarget["Poison Target: 'Gateway IP is at MY MAC'"]
-        WorkerThread -->|"Every 2 seconds"| PoisonGW["Poison Gateway: 'Target IP is at MY MAC'"]
-        PoisonTarget --> L2Sender
-        PoisonGW --> L2Sender
+        SpooferEngine -->|add host| WorkerThread
+        WorkerThread -->|Every 2s: Blocked Host| PoisonBlackhole["Poison Target & Gateway to BLACKHOLE_MAC"]
+        WorkerThread -->|Every 2s: Limited Host| PoisonLocal["Poison Target & Gateway to Local NIC MAC"]
+        PoisonBlackhole --> L2Sender
+        PoisonLocal --> L2Sender
+    end
+
+    subgraph HARDWARE_DROP["L2 Network Fabric (Switch / AP)"]
+        L2Sender -->|Blackholed Frame| SwitchDrop["Switch / Router Drops Packet in Hardware (0% Host Load)"]
     end
 
     subgraph PACKET_FILTER["Kernel Packet Interception (src/limiter/)"]
-        direction TB
-        WinDivert["WinDivert Layer 1 (NETWORK_FORWARD)"]
-        IPParse["IPv4 Header Parser (src/dst IP extraction)"]
-        RuleCheck{"Rule Lookup"}
+        WinDivert["WinDivert (NETWORK_FORWARD)"]
+        IPParse["IPv4 Header Parser (src/dst IP)"]
+        RuleCheck{"Active Rule?"}
         ULBucket["Upload TokenBucket"]
         DLBucket["Download TokenBucket"]
-        Drop["DROP Packet"]
+        DivertDrop["DROP Packet"]
         Forward["FORWARD Packet (WinDivertSend)"]
 
-        WinDivert -->|"Intercepted Packet"| IPParse
+        WinDivert -->|Intercepted Packet| IPParse
         IPParse --> RuleCheck
-        RuleCheck -->|"Blocked"| Drop
-        RuleCheck -->|"Limited (outbound)"| ULBucket
-        RuleCheck -->|"Limited (inbound)"| DLBucket
-        ULBucket -->|"Tokens available"| Forward
-        ULBucket -->|"Tokens exhausted"| Drop
-        DLBucket -->|"Tokens available"| Forward
-        DLBucket -->|"Tokens exhausted"| Drop
-        RuleCheck -->|"No rule"| Forward
+        RuleCheck -->|Limited: Outbound| ULBucket
+        RuleCheck -->|Limited: Inbound| DLBucket
+        ULBucket -->|Tokens Available| Forward
+        ULBucket -->|Tokens Exhausted| DivertDrop
+        DLBucket -->|Tokens Available| Forward
+        DLBucket -->|Tokens Exhausted| DivertDrop
+        RuleCheck -->|No Rule| Forward
     end
 
     subgraph MONITORING["Traffic Monitoring (src/monitor/)"]
@@ -430,7 +425,7 @@ flowchart TB
         Meter --> AtomicCounters
     end
 
-    L2Sender -->|"Poisoned ARP traffic redirected"| WinDivert
+    L2Sender -->|MITM Traffic Redirected| WinDivert
     Forward --> Meter
 ```
 
@@ -462,11 +457,11 @@ When a device is freed (`free` command) or Rustrict exits (`quit`/`exit`), the s
 flowchart TD
     subgraph STARTUP["Application Launch & Re-Arming"]
         Start(["rustrict.exe Launched"]) --> CheckState{"rustrict_state.json exists?"}
-        CheckState -->|"Yes"| LoadState["PersistentState::load()"]
-        CheckState -->|"No"| Ready["Interactive REPL Shell Ready"]
+        CheckState -->|Yes| LoadState["PersistentState::load()"]
+        CheckState -->|No| Ready["Interactive REPL Shell Ready"]
 
-        LoadState --> ParseBlocked["Parse Persisted Block Rules"]
-        ParseBlocked --> RestoreSpoof["ArpSpoofer::add() - Resume ARP Poisoning"]
+        LoadState --> ParseBlocked["Parse Persisted Block Rules & Scope"]
+        ParseBlocked --> RestoreSpoof["ArpSpoofer::add() - Resume Blackhole Poisoning"]
         ParseBlocked --> RestoreDrop["TrafficLimiter::block() - Re-install Drop Filter"]
         RestoreSpoof --> Ready
         RestoreDrop --> Ready
@@ -475,31 +470,31 @@ flowchart TD
     subgraph RUNTIME["Interactive Runtime State"]
         Ready --> WaitCmd["rustrict prompt: Waiting for Command"]
 
-        WaitCmd -->|"block target"| ExecBlock["Add Host to PersistentState"]
-        ExecBlock --> WriteSave1["Write to rustrict_state.json"]
-        WriteSave1 --> EngageBlock["Engage Poisoning & WinDivert Drop"]
+        WaitCmd -->|block target| ExecBlock["Add Host to PersistentState"]
+        ExecBlock --> WriteSave1["Write to ProgramData rustrict_state.json"]
+        WriteSave1 --> EngageBlock["Engage L2 Blackhole & WinDivert Drop"]
         EngageBlock --> WaitCmd
 
-        WaitCmd -->|"free target"| ExecFree["Remove Host from PersistentState"]
+        WaitCmd -->|free target| ExecFree["Remove Host from PersistentState"]
         ExecFree --> WriteSave2["Update rustrict_state.json"]
         WriteSave2 --> RestoreTarget["Send Authentic ARP Burst & Remove Drop"]
         RestoreTarget --> WaitCmd
 
-        WaitCmd -->|"scan --fresh"| Sweep["Subnet Sweep"]
+        WaitCmd -->|scan fresh| Sweep["Subnet Sweep"]
         Sweep --> Reconcile["reconcile_hosts()"]
         Reconcile --> PreserveRule["Purge stale entries but PRESERVE all blocked hosts"]
         PreserveRule --> WaitCmd
     end
 
     subgraph SHUTDOWN["Clean Termination"]
-        WaitCmd -->|"quit / exit"| StopEngine["Stop Spoofer & Limiter"]
+        WaitCmd -->|quit or exit| StopEngine["Stop Spoofer & Limiter"]
         StopEngine --> Unpoison["Send 3-Burst Authentic ARP Replies"]
         Unpoison --> DisableFwd["Disable Windows IP Forwarding"]
         DisableFwd --> Exit(["Process Exited (Rules Preserved on Disk)"])
     end
 ```
 
-**Persistence format** (`rustrict_state.json`):
+**Persistence format** (`%ProgramData%\Rustrict\rustrict_state.json` or `%USERPROFILE%\rustrict_state.json`):
 ```json
 {
   "blocked_hosts": [
@@ -556,7 +551,7 @@ flowchart LR
     end
 
     RawFrame --> Radiotap
-    Radiotap -->|"Payload after header"| Dot11
+    Radiotap -->|Payload after header| Dot11
     Dot11 --> TypeCheck
 
     TypeCheck -->|Management| Beacon
@@ -639,19 +634,22 @@ The Resilience engine (`src/limiter/fault.rs`, `src/limiter/divert.rs`) injects 
 
 ```mermaid
 sequenceDiagram
-    participant App as Target Device Traffic
-    participant WD as WinDivert Driver (Forward Layer)
-    participant Fault as FaultProfile Engine
-    participant Wire as Network Interface
+    participant App as "Target Device Traffic"
+    participant WD as "WinDivert Driver (Forward Layer)"
+    participant Fault as "FaultProfile Engine"
+    participant Queue as "Async Delayed Worker Queue"
+    participant Wire as "Network Interface"
 
     App->>WD: Packet Forwarded
     WD->>Fault: Evaluate Host Fault Profile
-    alt should_drop() == true
-        Fault-->>WD: Drop Packet (Simulated Loss)
-    else should_drop() == false
-        Fault->>Fault: Compute delay = latency_ms ± jitter_ms
-        Note over Fault: Sleep for computed delay duration
-        Fault->>Wire: Forward packet
+    alt Packet is dropped (Simulated Loss)
+        Fault-->>WD: Drop Packet
+    else Packet is delayed
+        Fault->>Queue: Enqueue DelayedPacket (delay_ms +/- jitter_ms)
+        Note over Queue: Non-blocking background worker delay
+        Queue->>Wire: Forward packet after timer expires
+    else Normal Forward
+        Fault->>Wire: WinDivertSend packet immediately
     end
 ```
 
@@ -679,7 +677,7 @@ The Export subsystem (`src/cli/export.rs`) generates structured assessment artif
 
 ```mermaid
 flowchart TD
-    A["User: 'scan --fresh'"] --> B["RustrictCli::handle_scan()"]
+    A["User: scan --fresh"] --> B["RustrictCli::handle_scan()"]
     B --> C["Parse --fresh and --range flags"]
     C --> D["SubnetScanner::scan_subnet()"]
 
@@ -692,7 +690,7 @@ flowchart TD
     G --> I["Spawn background thread: GatewayClient::refresh_hosts()"]
     H --> I
 
-    I --> J["SSDP M-SEARCH + Unicast Probe → SOAP GetGenericHostEntry"]
+    I --> J["SSDP M-SEARCH + Unicast Probe to SOAP GetGenericHostEntry"]
     J --> K["Cache router DHCP lease table"]
 
     I --> L["Rayon parallel ARP sweep (batches of 48, 10ms throttle)"]
@@ -713,42 +711,42 @@ flowchart TD
 
     W --> Y["Re-index IDs, sort by IP"]
     X --> Y
-    Y --> Z["render_hosts_table() → Terminal output"]
+    Y --> Z["render_hosts_table() to Terminal output"]
 ```
 
 ### Traffic Throttling & MITM Pipeline
 
 ```mermaid
 sequenceDiagram
-    participant User as User
-    participant CLI as RustrictCli
-    participant Resolve as Target Resolver
-    participant Spoofer as ArpSpoofer
-    participant L2 as RawL2Sender (Npcap)
-    participant Target as Target Device
-    participant Gateway as Network Gateway
-    participant Limiter as TrafficLimiter
-    participant WD as WinDivert Kernel Driver
-    participant TB as TokenBucket
+    participant User as "User"
+    participant CLI as "RustrictCli"
+    participant Resolve as "Target Resolver"
+    participant Spoofer as "ArpSpoofer"
+    participant L2 as "RawL2Sender (Npcap)"
+    participant Target as "Target Device"
+    participant Gateway as "Network Gateway"
+    participant Limiter as "TrafficLimiter"
+    participant WD as "WinDivert Kernel Driver"
+    participant TB as "TokenBucket"
 
     User->>CLI: limit 1 500kbit --download
-    CLI->>Resolve: resolve_targets("1")
+    CLI->>Resolve: resolve_targets(1)
     Resolve-->>CLI: Host at 192.168.18.50
 
     Note over CLI: Phase 1: Establish MITM Position
     CLI->>Spoofer: add(host)
     loop Every 2 seconds
-        Spoofer->>L2: craft_arp_reply(target, "gateway is MY MAC")
+        Spoofer->>L2: craft_arp_reply(target, gateway is Local MAC)
         L2->>Target: Poisoned ARP Reply
-        Spoofer->>L2: craft_arp_reply(gateway, "target is MY MAC")
+        Spoofer->>L2: craft_arp_reply(gateway, target is Local MAC)
         L2->>Gateway: Poisoned ARP Reply
     end
-    Note over Target,Gateway: All traffic now routes through local machine
+    Note over Target, Gateway: All traffic now routes through local machine
 
     Note over CLI: Phase 2: Install Rate Limiter
     CLI->>Limiter: limit(ip, Incoming, 500kbit)
     Limiter->>Limiter: Create HostLimitRule with DL TokenBucket(500kbps)
-    Limiter->>WD: WinDivertOpen("ip", NETWORK_FORWARD)
+    Limiter->>WD: WinDivertOpen(ip, NETWORK_FORWARD)
 
     Note over WD: Phase 3: Runtime Packet Processing
     loop Every forwarded packet
@@ -773,34 +771,34 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A["User: 'block 1'"] --> B["resolve_targets('1') → Host at 192.168.18.50"]
+    A["User: block 1"] --> B["resolve_targets(1) to Host at 192.168.18.50"]
     B --> C["host.status = Blocked(Both)"]
     C --> D["host.persistent_block = true"]
 
     D --> E["PersistentState::add_blocked(host, Both)"]
-    E --> F["Write rustrict_state.json to disk"]
+    E --> F["Write ProgramData rustrict_state.json to disk"]
 
-    D --> G["ArpSpoofer::add(host) — Start ARP poisoning"]
-    D --> H["TrafficLimiter::block(ip, Both) — DROP all packets"]
+    D --> G["ArpSpoofer::add(host) - Start L2 Blackhole Poisoning"]
+    D --> H["TrafficLimiter::block(ip, Both) - Drop Fallback"]
 
     F --> I["User closes Rustrict (quit)"]
-    I --> J["ArpSpoofer::stop() — Restore ARP tables (3-burst)"]
-    I --> K["TrafficLimiter::stop() — Close WinDivert handle"]
+    I --> J["ArpSpoofer::stop() - Restore ARP tables (3-burst)"]
+    I --> K["TrafficLimiter::stop() - Close WinDivert handle"]
     I --> L["platform::disable_ip_forwarding()"]
 
     L --> M["User relaunches rustrict.exe"]
     M --> N["PersistentState::load() reads rustrict_state.json"]
     N --> O["For each blocked_host in state:"]
-    O --> P["platform::send_arp(ip) → Resolve current MAC"]
-    O --> Q["ArpSpoofer::add(host) — Resume poisoning"]
-    O --> R["TrafficLimiter::block(ip, dir) — Resume dropping"]
+    O --> P["platform::send_arp(ip) to Resolve current MAC"]
+    O --> Q["ArpSpoofer::add(host) - Resume Blackhole Poisoning"]
+    O --> R["TrafficLimiter::block(ip, dir) - Resume Drop Filter"]
 
     Q --> S["Device is blocked again without user intervention"]
     R --> S
 
-    S --> T["User: 'free 1'"]
-    T --> U["ArpSpoofer::remove(ip) — Restore ARP + stop poisoning"]
-    T --> V["TrafficLimiter::unlimit(ip) — Remove WinDivert rule"]
+    S --> T["User: free 1"]
+    T --> U["ArpSpoofer::remove(ip) - Restore authentic ARP"]
+    T --> V["TrafficLimiter::unlimit(ip) - Remove WinDivert rule"]
     T --> W["PersistentState::remove_blocked(ip)"]
     W --> X["Write updated rustrict_state.json"]
     X --> Y["Block permanently removed"]
