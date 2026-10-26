@@ -24,6 +24,10 @@
 - **Scope**: `src/gateway/admin/diagnostics.rs`, `src/gateway/admin/engine.rs`, `src/gateway/admin/mod.rs`, `src/cli/prompt.rs`, `tests/test_diagnostics.rs`, `tests/test_cli_confirmation.rs`
 - **Description**: Implements `PolicyExecutionEngine::validate_evidence_file` and CLI `router validate-evidence <path>` to validate exported evidence bundles offline without router contact. Enforces JSON schema versioning, timestamp sanity, size limits, and secret leakage detection. Adds 5 diagnostics unit tests and CLI integration test.
 
-### 5. (Current) — `docs(lab): prepare source-traced Stage 1 operator packet`
+### 5. `e091ea7` — `docs(audit): record Phase 17 protocol integration and Stage 1 packet`
 - **Scope**: `audit/phase-16-runtime-reliability-2026-10-26/REMAINING_RISKS.md`, `audit/phase-16-runtime-reliability-2026-10-26/IMPLEMENTATION_REPORT.md`, `audit/phase-17-protocol-integration-2026-10-26/`
 - **Description**: Documents the Stage 1 physical lab operator packet, protocol coverage matrix, failure simulation report, remaining hardware risks, and reconstructed fresh test evidence (257 passing tests).
+
+### 6. `7af23a0` — `fix(test): eliminate duplicate socket handle and drain sleep in emulator`
+- **Scope**: `tests/support/router_emulator/mod.rs`
+- **Description**: Resolves socket handle duplication and removes blocking receive drain in the test emulator. Ensures seamless Windows Winsock TCP teardown across both native Windows MSVC and GitHub Actions runner environments for MSRV 1.88.0 and stable Rust.
