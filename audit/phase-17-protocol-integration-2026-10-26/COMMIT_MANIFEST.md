@@ -36,6 +36,6 @@
 - **Scope**: `audit/phase-17-protocol-integration-2026-10-26/COMMIT_MANIFEST.md`
 - **Description**: Records completed Phase 17 commits up through the emulator socket handle and drain sleep remediation.
 
-### 8. (Pending) — `fix(transport): add transient retry and socket lingering to curl router adapters`
+### 8. `957f086` — `fix(transport): add transient retry and socket lingering to curl router adapters`
 - **Scope**: `src/gateway/admin/avm.rs`, `src/gateway/admin/mikrotik.rs`, `src/gateway/admin/unifi.rs`, `tests/support/router_emulator/mod.rs`
 - **Description**: Configures `--retry 2 --retry-delay 0 --retry-connrefused --retry-all-errors` across AVM TR-064, UniFi Network, and MikroTik REST curl adapters to ensure resilience against transient Windows loopback connection aborts (Winsock 10053/10054 / exit code 56). Sets `SO_LINGER` on simulated router streams to guarantee graceful TCP teardown without abrupt connection resets.
