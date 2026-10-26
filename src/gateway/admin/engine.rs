@@ -187,6 +187,7 @@ fn sanitize_key_values_in_place(out: &mut String) {
         b"password",
         b"passwd",
         b"pwd",
+        b"pass",
         b"token",
         b"secret",
         b"api_key",
