@@ -161,6 +161,7 @@ impl RouterEmulator {
         fail_mode: Arc<Mutex<Option<FailMode>>>,
         mutation_count: Arc<Mutex<usize>>,
     ) {
+        let _ = stream.set_nodelay(true);
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
@@ -353,7 +354,7 @@ impl RouterEmulator {
 
         let _ = stream.flush();
         let _ = stream.shutdown(std::net::Shutdown::Write);
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
         let mut drain = [0u8; 1024];
         while let Ok(n) = stream.read(&mut drain) {
             if n == 0 {
