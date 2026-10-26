@@ -21,91 +21,318 @@ use crate::gateway::admin::views::{
 };
 
 /// Sanitizes text strings by redacting potential passwords, authorization headers, tokens, and keys
+/// while preserving exact UTF-8 byte boundaries and non-secret Unicode content.
 pub fn sanitize_text(text: &str) -> String {
     let mut out = text.to_string();
+    sanitize_urls_in_place(&mut out);
+    sanitize_auth_headers_in_place(&mut out);
+    sanitize_key_values_in_place(&mut out);
+    out
+}
 
-    // Redact password and secret parameters
-    let patterns = [
-        "password", "passwd", "pwd", "token", "secret", "api_key", "apikey",
-    ];
+fn sanitize_urls_in_place(out: &mut String) {
+    let mut search_from = 0;
+    while search_from < out.len() {
+        let bytes = out.as_bytes();
+        let proto_match = bytes[search_from..].windows(3).position(|w| w == b"://");
 
-    for pattern in patterns {
-        loop {
-            let lower = out.to_lowercase();
-            let mut found = None;
-            let mut search_from = 0;
+        let pos = match proto_match {
+            Some(p) => search_from + p,
+            None => break,
+        };
 
-            while let Some(pos) = lower[search_from..].find(pattern) {
-                let actual_pos = search_from + pos;
-                let after_pat = &out[actual_pos + pattern.len()..];
-                let trimmed = after_pat.trim_start();
-                if trimmed.starts_with('=') || trimmed.starts_with(':') {
-                    let after_delim = &trimmed[1..];
-                    let val_trimmed = after_delim
-                        .trim_start_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'');
-                    let val_offset = out.len() - val_trimmed.len();
-                    let val_len = val_trimmed
-                        .find(|c: char| {
-                            c.is_whitespace()
-                                || c == '&'
-                                || c == ','
-                                || c == '"'
-                                || c == '\''
-                                || c == '}'
-                                || c == ';'
-                        })
-                        .unwrap_or(val_trimmed.len());
-
-                    if val_len > 0 {
-                        let current_val = &out[val_offset..val_offset + val_len];
-                        if current_val != "[REDACTED]" {
-                            found = Some((val_offset, val_len));
-                            break;
-                        }
-                    }
-                }
-                search_from = actual_pos + pattern.len();
-            }
-
-            if let Some((offset, len)) = found {
-                out.replace_range(offset..offset + len, "[REDACTED]");
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Redact HTTP Basic and Bearer auth headers
-    for auth_prefix in &["bearer ", "basic "] {
-        loop {
-            let lower = out.to_lowercase();
-            if let Some(pos) = lower.find(auth_prefix) {
-                let val_start = pos + auth_prefix.len();
-                let rest = &out[val_start..];
-                let trimmed = rest.trim_start_matches(['"', '\'']);
-                let actual_val_start = out.len() - trimmed.len();
-                let val_len = trimmed
-                    .find(|c: char| {
-                        c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == ';'
-                    })
-                    .unwrap_or(trimmed.len());
-
-                if val_len > 0 {
-                    let current_val = &out[actual_val_start..actual_val_start + val_len];
-                    if current_val != "[REDACTED]" {
-                        out.replace_range(
-                            actual_val_start..actual_val_start + val_len,
-                            "[REDACTED]",
-                        );
-                        continue;
-                    }
-                }
-            }
+        let auth_start = pos + 3;
+        if auth_start >= out.len() {
             break;
         }
-    }
 
-    out
+        let auth_len = out[auth_start..]
+            .find(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace())
+            .unwrap_or(out[auth_start..].len());
+        let auth_end = auth_start + auth_len;
+
+        if let Some(at_rel) = out[auth_start..auth_end].find('@') {
+            let at_idx = auth_start + at_rel;
+            let userinfo = &out[auth_start..at_idx];
+            if let Some(colon_rel) = userinfo.find(':') {
+                let pass_start = auth_start + colon_rel + 1;
+                let pass_end = at_idx;
+                if pass_start < pass_end && &out[pass_start..pass_end] != "[REDACTED]" {
+                    out.replace_range(pass_start..pass_end, "[REDACTED]");
+                    search_from = pass_start + "[REDACTED]".len();
+                    continue;
+                }
+            }
+        }
+
+        search_from = auth_end;
+    }
+}
+
+fn sanitize_auth_headers_in_place(out: &mut String) {
+    const AUTH_PREFIXES: &[&[u8]] = &[b"bearer ", b"basic "];
+
+    let mut search_from = 0;
+    'outer: while search_from < out.len() {
+        let lower_bytes: Vec<u8> = out.as_bytes()[search_from..]
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+
+        // Find the earliest matching prefix among all prefixes
+        let mut earliest: Option<(usize, usize)> = None;
+        for prefix in AUTH_PREFIXES {
+            if let Some(pos) = lower_bytes.windows(prefix.len()).position(|w| w == *prefix) {
+                match earliest {
+                    Some((min_pos, _)) if pos < min_pos => {
+                        earliest = Some((pos, prefix.len()));
+                    }
+                    None => {
+                        earliest = Some((pos, prefix.len()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (rel_pos, pat_len) = match earliest {
+            Some(m) => m,
+            None => break,
+        };
+
+        let actual_pos = search_from + rel_pos;
+
+        // Ensure boundary before prefix (not preceded by alphanumeric)
+        if actual_pos > 0 {
+            let prev = out.as_bytes()[actual_pos - 1];
+            if prev.is_ascii_alphanumeric() {
+                search_from = actual_pos + pat_len;
+                continue 'outer;
+            }
+        }
+
+        let val_start_candidate = actual_pos + pat_len;
+        if val_start_candidate >= out.len() {
+            break 'outer;
+        }
+
+        // Trim leading spaces
+        let trimmed_spaces = out[val_start_candidate..]
+            .find(|c: char| !c.is_ascii_whitespace())
+            .unwrap_or(out[val_start_candidate..].len());
+        let val_start = val_start_candidate + trimmed_spaces;
+        if val_start >= out.len() {
+            search_from = out.len();
+            continue 'outer;
+        }
+
+        let first_char = out.as_bytes()[val_start];
+        if first_char == b'"' || first_char == b'\'' {
+            let quote = first_char as char;
+            let inner_start = val_start + 1;
+            let rel_end = out[inner_start..]
+                .find([quote, '\n'])
+                .unwrap_or(out[inner_start..].len());
+            let inner_end = inner_start + rel_end;
+            if inner_start < inner_end && &out[inner_start..inner_end] != "[REDACTED]" {
+                out.replace_range(inner_start..inner_end, "[REDACTED]");
+                search_from = inner_start + "[REDACTED]".len();
+                continue 'outer;
+            } else {
+                search_from = inner_end
+                    + if inner_end < out.len() && out.as_bytes()[inner_end] == first_char {
+                        1
+                    } else {
+                        0
+                    };
+                continue 'outer;
+            }
+        } else if out[val_start..].starts_with("[REDACTED]") {
+            search_from = val_start + "[REDACTED]".len();
+            continue 'outer;
+        } else {
+            let val_len = out[val_start..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    c.is_whitespace()
+                        || c == '"'
+                        || c == '\''
+                        || c == ','
+                        || c == ';'
+                        || c == '}'
+                        || c == ']'
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(out[val_start..].len());
+            let val_end = val_start + val_len;
+            if val_start < val_end && &out[val_start..val_end] != "[REDACTED]" {
+                out.replace_range(val_start..val_end, "[REDACTED]");
+                search_from = val_start + "[REDACTED]".len();
+                continue 'outer;
+            } else {
+                search_from = if val_end > val_start {
+                    val_end
+                } else {
+                    val_start + 1
+                };
+                continue 'outer;
+            }
+        }
+    }
+}
+
+fn sanitize_key_values_in_place(out: &mut String) {
+    const SECRET_PATTERNS: &[&[u8]] = &[
+        b"password",
+        b"passwd",
+        b"pwd",
+        b"token",
+        b"secret",
+        b"api_key",
+        b"apikey",
+        b"api-key",
+    ];
+
+    let mut search_from = 0;
+    'outer: while search_from < out.len() {
+        let lower_bytes: Vec<u8> = out.as_bytes()[search_from..]
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+
+        // Find the earliest matching pattern
+        let mut earliest: Option<(usize, usize)> = None;
+        for pattern in SECRET_PATTERNS {
+            if let Some(pos) = lower_bytes
+                .windows(pattern.len())
+                .position(|w| w == *pattern)
+            {
+                match earliest {
+                    Some((min_pos, _)) if pos < min_pos => {
+                        earliest = Some((pos, pattern.len()));
+                    }
+                    None => {
+                        earliest = Some((pos, pattern.len()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (rel_pos, pat_len) = match earliest {
+            Some(m) => m,
+            None => break,
+        };
+
+        let pat_start = search_from + rel_pos;
+        let pat_end = pat_start + pat_len;
+
+        // 1. Boundary check before pat_start
+        if pat_start > 0 {
+            let prev = out.as_bytes()[pat_start - 1];
+            if prev.is_ascii_alphanumeric() {
+                search_from = pat_end;
+                continue 'outer;
+            }
+        }
+
+        // 2. Boundary check after pat_end
+        if pat_end < out.len() {
+            let next = out.as_bytes()[pat_end];
+            if next.is_ascii_alphanumeric() || next == b'_' || next == b'-' {
+                search_from = pat_end;
+                continue 'outer;
+            }
+        }
+
+        // 3. Scan for delimiter = or :
+        let mut scan = pat_end;
+        if scan < out.len() && (out.as_bytes()[scan] == b'"' || out.as_bytes()[scan] == b'\'') {
+            scan += 1;
+        }
+        while scan < out.len() && (out.as_bytes()[scan] == b' ' || out.as_bytes()[scan] == b'\t') {
+            scan += 1;
+        }
+
+        if scan >= out.len() || (out.as_bytes()[scan] != b'=' && out.as_bytes()[scan] != b':') {
+            search_from = pat_end;
+            continue 'outer;
+        }
+
+        scan += 1; // skip delimiter
+
+        while scan < out.len() && (out.as_bytes()[scan] == b' ' || out.as_bytes()[scan] == b'\t') {
+            scan += 1;
+        }
+
+        if scan >= out.len() {
+            search_from = out.len();
+            continue 'outer;
+        }
+
+        // 4. Value extraction
+        let first_byte = out.as_bytes()[scan];
+        let val_start = if first_byte == b'"' || first_byte == b'\'' {
+            scan + 1
+        } else {
+            scan
+        };
+
+        if first_byte == b'"' || first_byte == b'\'' {
+            let quote = first_byte as char;
+            let rel_end = out[val_start..]
+                .find([quote, '\n'])
+                .unwrap_or(out[val_start..].len());
+            let val_end = val_start + rel_end;
+
+            if val_start < val_end && &out[val_start..val_end] != "[REDACTED]" {
+                out.replace_range(val_start..val_end, "[REDACTED]");
+                search_from = val_start + "[REDACTED]".len();
+                continue 'outer;
+            } else {
+                search_from = val_end
+                    + if val_end < out.len() && out.as_bytes()[val_end] == first_byte {
+                        1
+                    } else {
+                        0
+                    };
+                continue 'outer;
+            }
+        } else if out[val_start..].starts_with("[REDACTED]") {
+            search_from = val_start + "[REDACTED]".len();
+            continue 'outer;
+        } else {
+            let val_len = out[val_start..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    c.is_whitespace()
+                        || c == '&'
+                        || c == ','
+                        || c == '"'
+                        || c == '\''
+                        || c == '}'
+                        || c == ']'
+                        || c == ';'
+                        || c == '#'
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(out[val_start..].len());
+            let val_end = val_start + val_len;
+
+            if val_start < val_end && &out[val_start..val_end] != "[REDACTED]" {
+                out.replace_range(val_start..val_end, "[REDACTED]");
+                search_from = val_start + "[REDACTED]".len();
+                continue 'outer;
+            } else {
+                search_from = if val_end > val_start {
+                    val_end
+                } else {
+                    val_start + 1
+                };
+                continue 'outer;
+            }
+        }
+    }
 }
 
 /// Sanitizes strongly typed errors to ensure sensitive authentication credentials are never exposed

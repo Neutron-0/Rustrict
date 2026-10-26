@@ -300,6 +300,172 @@ fn test_credential_sanitization_in_errors_and_text() {
 }
 
 #[test]
+fn test_unicode_safe_redaction_and_offset_preservation() {
+    let secret_markers = [
+        "SecretPass123",
+        "TurkishSecret123",
+        "GermanSecret456",
+        "GreekSecret789",
+        "EmojiSecret999",
+        "EndOfStringSecret",
+        "PassOne",
+        "TokenTwo",
+        "SecretThree",
+        "QuotedSecret",
+        "SingleQuotedSecret",
+        "SpacedSecret",
+        "BearerSecretToken",
+        "BasicEncodedSecret",
+        "BearerInQuotes",
+        "UrlPassword123",
+        "QuerySecret456",
+    ];
+
+    // 1. ASCII preceded
+    let t1 = "router=ok&password=SecretPass123";
+    let s1 = sanitize_text(t1);
+    assert!(s1.contains("password=[REDACTED]"));
+    assert!(!s1.contains("SecretPass123"));
+
+    // 2. Unicode characters whose lowercase conversion alters byte lengths
+    // Turkish \u{0130} (İ) -> i\u{0307} in Unicode to_lowercase (2 bytes -> 3 bytes)
+    let t2 = "Hata \u{0130}stanbul router: password=TurkishSecret123";
+    let s2 = sanitize_text(t2);
+    assert!(s2.contains("password=[REDACTED]"));
+    assert!(s2.contains("\u{0130}stanbul"));
+    assert!(!s2.contains("TurkishSecret123"));
+
+    // German capital sharp S \u{1E9E} (ẞ) -> ß in Unicode to_lowercase (3 bytes -> 2 bytes)
+    let t3 = "Fehler GRO\u{1E9E}: token=GermanSecret456";
+    let s3 = sanitize_text(t3);
+    assert!(s3.contains("token=[REDACTED]"));
+    assert!(s3.contains("GRO\u{1E9E}"));
+    assert!(!s3.contains("GermanSecret456"));
+
+    // Greek capital Sigma \u{03A3}
+    let t4 = "Router \u{03A3}: api_key=GreekSecret789";
+    let s4 = sanitize_text(t4);
+    assert!(s4.contains("api_key=[REDACTED]"));
+    assert!(s4.contains("\u{03A3}"));
+    assert!(!s4.contains("GreekSecret789"));
+
+    // 3. Emoji and multibyte in adjacent diagnostic text
+    let t5 = "🔑 Router auth failed: auth_token=EmojiSecret999 🚀 Please retry";
+    let s5 = sanitize_text(t5);
+    assert!(s5.contains("🔑 Router auth failed: auth_token=[REDACTED] 🚀 Please retry"));
+    assert!(!s5.contains("EmojiSecret999"));
+
+    // 4. Secret at the end of a string
+    let t6 = "status=fail&pwd=EndOfStringSecret";
+    let s6 = sanitize_text(t6);
+    assert_eq!(s6, "status=fail&pwd=[REDACTED]");
+    assert!(!s6.contains("EndOfStringSecret"));
+
+    // 5. Multiple credentials in one message
+    let t7 = "user=admin&password=PassOne&token=TokenTwo&secret=SecretThree&status=ok";
+    let s7 = sanitize_text(t7);
+    assert_eq!(
+        s7,
+        "user=admin&password=[REDACTED]&token=[REDACTED]&secret=[REDACTED]&status=ok"
+    );
+    assert!(!s7.contains("PassOne"));
+    assert!(!s7.contains("TokenTwo"));
+    assert!(!s7.contains("SecretThree"));
+
+    // 6. Case variations and spacing variations
+    let t8 = "Config: PASSWORD  :   \"QuotedSecret\", PassWd = 'SingleQuotedSecret', apikey = SpacedSecret";
+    let s8 = sanitize_text(t8);
+    assert!(s8.contains("PASSWORD  :   \"[REDACTED]\""));
+    assert!(s8.contains("PassWd = '[REDACTED]'"));
+    assert!(s8.contains("apikey = [REDACTED]"));
+    assert!(!s8.contains("QuotedSecret"));
+    assert!(!s8.contains("SingleQuotedSecret"));
+    assert!(!s8.contains("SpacedSecret"));
+
+    // 7. Authorization Bearer and Basic headers
+    let t9 = "Headers: Authorization: Bearer BearerSecretToken, Authorization: Basic BasicEncodedSecret, BEARER \"BearerInQuotes\"";
+    let s9 = sanitize_text(t9);
+    assert!(s9.contains("Authorization: Bearer [REDACTED]"));
+    assert!(s9.contains("Authorization: Basic [REDACTED]"));
+    assert!(s9.contains("BEARER \"[REDACTED]\""));
+    assert!(!s9.contains("BearerSecretToken"));
+    assert!(!s9.contains("BasicEncodedSecret"));
+    assert!(!s9.contains("BearerInQuotes"));
+
+    // 8. URL userinfo credentials and query parameters
+    let t10 = "Endpoint: https://admin:UrlPassword123@192.168.1.1:8443/api?token=QuerySecret456";
+    let s10 = sanitize_text(t10);
+    assert!(s10.contains("https://admin:[REDACTED]@192.168.1.1:8443/api?token=[REDACTED]"));
+    assert!(!s10.contains("UrlPassword123"));
+    assert!(!s10.contains("QuerySecret456"));
+
+    // 9. Repeated sanitization (idempotency check)
+    let s10_repeated = sanitize_text(&s10);
+    assert_eq!(s10, s10_repeated);
+
+    let repeated_raw = "password=[REDACTED]&token=[REDACTED]&secret=[REDACTED]";
+    assert_eq!(sanitize_text(repeated_raw), repeated_raw);
+
+    // Verify non-secret words containing substrings are preserved
+    let non_secret = "Tokenizer processing 42 tokens for stakeholder with token_id=100";
+    let s_non_secret = sanitize_text(non_secret);
+    assert_eq!(s_non_secret, non_secret);
+
+    // Double check none of the secret markers survived in any sanitized string
+    let all_sanitized = format!("{s1} {s2} {s3} {s4} {s5} {s6} {s7} {s8} {s9} {s10}");
+    for marker in &secret_markers {
+        assert!(
+            !all_sanitized.contains(marker),
+            "Secret marker '{}' survived sanitization!",
+            marker
+        );
+    }
+}
+
+#[test]
+fn test_admin_error_sanitization_covers_all_variants_no_panic() {
+    let variants = vec![
+        AdminError::UnsupportedOperation("Unsupported: password=Secret1".to_string()),
+        AdminError::AuthenticationFailed("Auth failed: token=Secret2".to_string()),
+        AdminError::SessionExpired("Session expired: Bearer Secret3".to_string()),
+        AdminError::IdentityMismatch("Mismatch at https://user:Secret4@router/".to_string()),
+        AdminError::Timeout("Timeout with secret=Secret5".to_string()),
+        AdminError::CommunicationError("Comm error: Basic Secret6".to_string()),
+        AdminError::ScopeViolation("Scope invalid: api_key=Secret7".to_string()),
+        AdminError::LockoutPrevented("Lockout check: pwd=Secret8".to_string()),
+        AdminError::DuplicatePolicy("Duplicate: apikey=Secret9".to_string()),
+        AdminError::PolicyNotFound("Policy 404: token=Secret10".to_string()),
+        AdminError::TransactionFailed("Tx failed: password=Secret11".to_string()),
+        AdminError::RollbackFailed {
+            applied_targets: vec!["192.168.1.100?token=Secret12".to_string()],
+            failed_target: "192.168.1.101?password=Secret13".to_string(),
+            original_error: "Fail with Bearer Secret14".to_string(),
+            rollback_errors: vec!["Rollback timeout: secret=Secret15".to_string()],
+        },
+        AdminError::SecurityViolation("Security violation: api-key=Secret16".to_string()),
+    ];
+
+    for err in variants {
+        let sanitized = sanitize_error(err);
+        let err_str = sanitized.to_string();
+        for i in 1..=16 {
+            let secret = format!("Secret{i}");
+            assert!(
+                !err_str.contains(&secret),
+                "Secret '{}' leaked in AdminError display: {}",
+                secret,
+                err_str
+            );
+        }
+        assert!(
+            err_str.contains("[REDACTED]"),
+            "Sanitized error did not contain [REDACTED]: {}",
+            err_str
+        );
+    }
+}
+
+#[test]
 fn test_engine_lifecycle_tracking_through_full_cycle() {
     let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
     let registry = Arc::new(RouterRegistry::new(gateway_ip));

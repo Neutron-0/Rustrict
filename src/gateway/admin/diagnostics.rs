@@ -178,9 +178,16 @@ pub struct NormalizedRouterInventoryItem {
 /// Sanitizes management endpoints to ensure embedded user credentials or tokens are never leaked
 pub fn sanitize_endpoint(endpoint: &str) -> String {
     let sanitized = sanitize_text(endpoint);
-    if let Some(at_idx) = sanitized.find('@') {
-        if let Some(proto_idx) = sanitized.find("://") {
-            let prefix = &sanitized[..proto_idx + 3];
+    if let Some(proto_idx) = sanitized.find("://") {
+        let auth_start = proto_idx + 3;
+        let auth_len = sanitized[auth_start..]
+            .find(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace())
+            .unwrap_or(sanitized[auth_start..].len());
+        let auth_end = auth_start + auth_len;
+
+        if let Some(at_rel) = sanitized[auth_start..auth_end].find('@') {
+            let at_idx = auth_start + at_rel;
+            let prefix = &sanitized[..auth_start];
             let rest = &sanitized[at_idx + 1..];
             return format!("{}[REDACTED]@{}", prefix, rest);
         }

@@ -59,6 +59,14 @@ fn test_endpoint_sanitization() {
     assert!(!sanitized_tok.contains("secret_token_12345"));
     assert!(sanitized_tok.contains("[REDACTED]"));
     assert!(sanitized_tok.contains("site=default"));
+
+    // Verify @ in query string does not mangle endpoint authority or path
+    let email_param =
+        "https://192.168.1.1:8443/api?user_email=admin@company.com&api_key=my_secret_key";
+    let sanitized_email = sanitize_endpoint(email_param);
+    assert!(sanitized_email.contains("user_email=admin@company.com"));
+    assert!(sanitized_email.contains("api_key=[REDACTED]"));
+    assert!(!sanitized_email.contains("my_secret_key"));
 }
 
 #[test]
