@@ -1041,9 +1041,9 @@ impl RustrictCli {
             println!("  router refresh / router reconcile               Safely verify active router policies without mutating router rules");
             println!("  router history / router records                 Display persistent audit records of policy executions on Windows");
             println!("  router preview <all|id|ip> [options]            Dry-run preview of an administrative policy without executing it");
-            println!("  router pause <all|id|ip> [options]              Enforce an internet pause on the router (requires auth)");
-            println!("  router resume <all|id|ip>                       Revoke router-enforced pause and resume internet access");
-            println!("  router adjust <all|id|ip> --duration <secs>     Extend or shorten an existing policy's expiration");
+            println!("  router pause <all|id|ip> [options] [--yes]      Enforce an internet pause on the router (requires auth)");
+            println!("  router resume <all|id|ip> [--yes]               Revoke router-enforced pause and resume internet access");
+            println!("  router adjust <all|id|ip> --duration <s|indef> [--yes] Extend or shorten an existing policy's expiration");
             println!("  router connect <provider> [endpoint] [options]  Connect to a router provider explicitly");
             println!("  router disconnect                               Cleanly disconnect active provider (no fallback to ARP poisoning)");
             println!("  router connect http [endpoint] [--user <user>]  Connect to OpenWrt via authenticated HTTP JSON-RPC");
@@ -1472,7 +1472,7 @@ impl RustrictCli {
             }
             "pause" => {
                 if args.len() < 2 {
-                    println!("Usage: router pause <all|id|ip> [--duration <secs>] [--persistent]");
+                    println!("Usage: router pause <all|id|ip> [--duration <secs>] [--persistent] [--yes]");
                     return;
                 }
 
@@ -1491,26 +1491,9 @@ impl RustrictCli {
                 let target_arg = args[1];
                 let is_all = target_arg.eq_ignore_ascii_case("all");
 
-                if is_all {
-                    print!(
-                        "{} WARNING: You are requesting to pause internet transit for ALL network devices.\nConfirm network-wide router enforcement? [yes/N]: ",
-                        "[CONFIRMATION REQUIRED]".bright_red().bold()
-                    );
-                    let _ = io::stdout().flush();
-                    let mut confirm = String::new();
-                    if io::stdin().read_line(&mut confirm).is_err()
-                        || !confirm.trim().eq_ignore_ascii_case("yes")
-                    {
-                        println!(
-                            "{} Network-wide pause cancelled by administrator.",
-                            "[INFO]".cyan().bold()
-                        );
-                        return;
-                    }
-                }
-
                 let mut duration = PolicyDuration::Indefinite;
                 let mut persistence = PolicyPersistence::VolatileSession;
+                let mut auto_confirm = false;
 
                 let mut idx = 2;
                 while idx < args.len() {
@@ -1540,6 +1523,10 @@ impl RustrictCli {
                         }
                         "--persistent" | "-p" => {
                             persistence = PolicyPersistence::RouterPersistent;
+                            idx += 1;
+                        }
+                        "--yes" | "-y" => {
+                            auto_confirm = true;
                             idx += 1;
                         }
                         _ => {
@@ -1583,6 +1570,71 @@ impl RustrictCli {
                     persistence,
                     target_macs,
                 };
+
+                let plan = match self.policy_engine.plan_policy(&req) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        println!(
+                            "{} Preflight validation failed: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                        return;
+                    }
+                };
+
+                println!(
+                    "{} Preflight Inspection for Router Firewall Mutation:",
+                    "[PREFLIGHT]".cyan().bold()
+                );
+                println!("  • Provider:       {}", plan.provider_name);
+                println!(
+                    "  • Router Identity: {}",
+                    plan.router_identity.display_summary()
+                );
+                println!(
+                    "  • Scope:          {} (Target Count: {})",
+                    plan.target_scope, plan.target_count
+                );
+                println!("  • Duration:       {}", plan.duration);
+                println!("  • Persistence:    {}", plan.persistence);
+                println!("  • Recovery:       {}", plan.recovery_mechanism);
+
+                for risk in &plan.uncertainties_and_risks {
+                    println!("  • {} {}", "[RISK/WARNING]".yellow().bold(), risk);
+                }
+
+                let is_mock = self.router_registry.active_provider_id().as_deref() == Some("mock");
+                if is_mock {
+                    println!(
+                        "  • Notice:         {}",
+                        "[SIMULATED] Mock router test mode active — no physical hardware will be modified."
+                            .bright_yellow()
+                            .bold()
+                    );
+                } else if !auto_confirm {
+                    let prompt_text = if is_all {
+                        "WARNING: You are requesting to pause internet transit for ALL network devices.\nConfirm network-wide router enforcement? [yes/N]: "
+                    } else {
+                        "Confirm policy enforcement on physical router? [yes/N]: "
+                    };
+                    print!(
+                        "{} {}",
+                        "[CONFIRMATION REQUIRED]".bright_red().bold(),
+                        prompt_text
+                    );
+                    let _ = io::stdout().flush();
+                    let mut confirm = String::new();
+                    if io::stdin().read_line(&mut confirm).is_err()
+                        || !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y")
+                    {
+                        println!(
+                            "{} Policy enforcement cancelled by administrator. Zero router mutations performed.",
+                            "[INFO]".cyan().bold()
+                        );
+                        return;
+                    }
+                }
 
                 println!(
                     "{} Applying policy via router firewall provider: {} (Enforcement: Router-side transit rejection)",
@@ -1644,7 +1696,7 @@ impl RustrictCli {
             }
             "resume" => {
                 if args.len() < 2 {
-                    println!("Usage: router resume <all|id|ip>");
+                    println!("Usage: router resume <all|id|ip> [--yes]");
                     return;
                 }
 
@@ -1658,6 +1710,20 @@ impl RustrictCli {
 
                 let target_arg = args[1];
                 let is_all = target_arg.eq_ignore_ascii_case("all");
+
+                let mut auto_confirm = false;
+                let mut idx = 2;
+                while idx < args.len() {
+                    match args[idx].to_lowercase().as_str() {
+                        "--yes" | "-y" => {
+                            auto_confirm = true;
+                            idx += 1;
+                        }
+                        _ => {
+                            idx += 1;
+                        }
+                    }
+                }
 
                 let scope = if is_all {
                     PolicyScope::NetworkWide
@@ -1694,6 +1760,58 @@ impl RustrictCli {
                         }
                     }
                 };
+
+                let unreconciled = self.policy_engine.check_unreconciled_failures();
+                if !unreconciled.is_empty() {
+                    println!(
+                        "{} Prior unresolved partial failure or ambiguous router state detected:",
+                        "[RISK/WARNING]".yellow().bold()
+                    );
+                    for w in &unreconciled {
+                        println!("  • {}", w);
+                    }
+                }
+
+                println!(
+                    "{} Preflight Inspection for Router Policy Revocation:",
+                    "[PREFLIGHT]".cyan().bold()
+                );
+                println!("  • Provider:       {}", self.admin_provider.name());
+                let router_summary = self
+                    .router_registry
+                    .get_status()
+                    .verified_identity
+                    .map(|id| id.display_summary())
+                    .unwrap_or_else(|| "Unknown Router".to_string());
+                println!("  • Router Identity: {}", router_summary);
+                println!("  • Scope:          {}", scope);
+                println!("  • Action:         Revoke router transit drop rules (restore internet access)");
+
+                let is_mock = self.router_registry.active_provider_id().as_deref() == Some("mock");
+                if is_mock {
+                    println!(
+                        "  • Notice:         {}",
+                        "[SIMULATED] Mock router test mode active — no physical hardware will be modified."
+                            .bright_yellow()
+                            .bold()
+                    );
+                } else if !auto_confirm {
+                    print!(
+                        "{} Confirm policy revocation on physical router? [yes/N]: ",
+                        "[CONFIRMATION REQUIRED]".bright_red().bold()
+                    );
+                    let _ = io::stdout().flush();
+                    let mut confirm = String::new();
+                    if io::stdin().read_line(&mut confirm).is_err()
+                        || !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y")
+                    {
+                        println!(
+                            "{} Policy revocation cancelled by administrator. Zero router mutations performed.",
+                            "[INFO]".cyan().bold()
+                        );
+                        return;
+                    }
+                }
 
                 println!(
                     "{} Revoking router policy rules via {}...",
@@ -1733,7 +1851,7 @@ impl RustrictCli {
             }
             "adjust" => {
                 if args.len() < 2 {
-                    println!("Usage: router adjust <all|id|ip> --duration <secs>");
+                    println!("Usage: router adjust <all|id|ip> --duration <secs> [--yes]");
                     return;
                 }
 
@@ -1749,6 +1867,7 @@ impl RustrictCli {
                 let is_all = target_arg.eq_ignore_ascii_case("all");
 
                 let mut duration = None;
+                let mut auto_confirm = false;
                 let mut idx = 2;
                 while idx < args.len() {
                     match args[idx].to_lowercase().as_str() {
@@ -1774,6 +1893,10 @@ impl RustrictCli {
                             duration = Some(PolicyDuration::Indefinite);
                             idx += 1;
                         }
+                        "--yes" | "-y" => {
+                            auto_confirm = true;
+                            idx += 1;
+                        }
                         _ => {
                             idx += 1;
                         }
@@ -1783,7 +1906,7 @@ impl RustrictCli {
                 let new_duration = match duration {
                     Some(d) => d,
                     None => {
-                        println!("Usage: router adjust <all|id|ip> --duration <secs>");
+                        println!("Usage: router adjust <all|id|ip> --duration <secs> [--yes]");
                         return;
                     }
                 };
@@ -1823,6 +1946,58 @@ impl RustrictCli {
                         }
                     }
                 };
+
+                let unreconciled = self.policy_engine.check_unreconciled_failures();
+                if !unreconciled.is_empty() {
+                    println!(
+                        "{} Prior unresolved partial failure or ambiguous router state detected:",
+                        "[RISK/WARNING]".yellow().bold()
+                    );
+                    for w in &unreconciled {
+                        println!("  • {}", w);
+                    }
+                }
+
+                println!(
+                    "{} Preflight Inspection for Router Policy Adjustment:",
+                    "[PREFLIGHT]".cyan().bold()
+                );
+                println!("  • Provider:       {}", self.admin_provider.name());
+                let router_summary = self
+                    .router_registry
+                    .get_status()
+                    .verified_identity
+                    .map(|id| id.display_summary())
+                    .unwrap_or_else(|| "Unknown Router".to_string());
+                println!("  • Router Identity: {}", router_summary);
+                println!("  • Scope:          {}", scope);
+                println!("  • New Duration:   {}", new_duration);
+
+                let is_mock = self.router_registry.active_provider_id().as_deref() == Some("mock");
+                if is_mock {
+                    println!(
+                        "  • Notice:         {}",
+                        "[SIMULATED] Mock router test mode active — no physical hardware will be modified."
+                            .bright_yellow()
+                            .bold()
+                    );
+                } else if !auto_confirm {
+                    print!(
+                        "{} Confirm adjusting policy duration on physical router? [yes/N]: ",
+                        "[CONFIRMATION REQUIRED]".bright_red().bold()
+                    );
+                    let _ = io::stdout().flush();
+                    let mut confirm = String::new();
+                    if io::stdin().read_line(&mut confirm).is_err()
+                        || !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y")
+                    {
+                        println!(
+                            "{} Policy adjustment cancelled by administrator. Zero router mutations performed.",
+                            "[INFO]".cyan().bold()
+                        );
+                        return;
+                    }
+                }
 
                 println!(
                     "{} Adjusting policy duration via {}...",

@@ -513,3 +513,136 @@ fn test_engine_lifecycle_tracking_through_full_cycle() {
     assert_eq!(history[2].operation, "resume");
     assert_eq!(history[2].final_state, PolicyLifecycleState::Recovered);
 }
+
+#[test]
+fn test_plan_policy_makes_zero_mutating_calls_and_preserves_clean_state() {
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let engine = PolicyExecutionEngine::new(registry.clone());
+
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock, "internal://mock")
+        .expect("Connect mock");
+
+    let req = OperationPlanRequest::new(
+        PolicyScope::SpecificTargets(vec![Ipv4Addr::new(192, 168, 1, 100)]),
+        PolicyDuration::Temporary(Duration::from_secs(300)),
+        PolicyPersistence::VolatileSession,
+    );
+
+    // Run plan
+    let plan = engine.plan_policy(&req).expect("Plan should succeed");
+    assert!(plan.is_dry_run);
+    assert_eq!(plan.target_count, 1);
+
+    // Verify zero mutations occurred
+    assert!(engine.query_active_policies().expect("query").is_empty());
+    assert!(engine.execution_history().is_empty());
+    assert!(engine.store().historical_policies().is_empty());
+}
+
+#[test]
+fn test_preflight_surfaces_prior_partial_failure_and_unknown_state() {
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let engine = PolicyExecutionEngine::new(registry.clone());
+
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock, "internal://mock")
+        .expect("Connect mock");
+
+    // Manually record an un-reconciled partial failure in store
+    let partial_failure_policy = rustrict::gateway::admin::ActivePolicyStatus::new(
+        "pol-unresolved-123",
+        PolicyScope::SpecificTargets(vec![Ipv4Addr::new(192, 168, 1, 101)]),
+        1700000000,
+        None,
+        false,
+        "Firewall",
+        false,
+    )
+    .with_state(PolicyLifecycleState::PartialFailure {
+        applied_targets: vec!["192.168.1.101".into()],
+        failed_target: "192.168.1.102".into(),
+        rollback_errors: vec!["SSH timeout during rollback".into()],
+    });
+
+    engine
+        .store()
+        .update_policy_status(&partial_failure_policy)
+        .expect("Record partial failure");
+
+    let req = OperationPlanRequest::new(
+        PolicyScope::SpecificTargets(vec![Ipv4Addr::new(192, 168, 1, 200)]),
+        PolicyDuration::Indefinite,
+        PolicyPersistence::VolatileSession,
+    );
+
+    let plan = engine.plan_policy(&req).expect("Plan succeeds");
+    let has_partial_warning = plan.uncertainties_and_risks.iter().any(|w| {
+        w.contains("PRIOR UNRESOLVED PARTIAL FAILURE") && w.contains("pol-unresolved-123")
+    });
+    assert!(
+        has_partial_warning,
+        "Expected prior partial failure warning in plan risks: {:?}",
+        plan.uncertainties_and_risks
+    );
+
+    let preflight = engine.preflight_mutation(&req).expect("Preflight succeeds");
+    assert!(preflight.has_unreconciled_partial_failure);
+    assert_eq!(preflight.prior_failures.len(), 1);
+    assert!(preflight.prior_failures[0].contains("pol-unresolved-123"));
+}
+
+#[test]
+fn test_preflight_surfaces_target_overlap_conflicts() {
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let engine = PolicyExecutionEngine::new(registry.clone());
+
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock, "internal://mock")
+        .expect("Connect mock");
+
+    // Apply an active policy on 192.168.1.100
+    let target = Ipv4Addr::new(192, 168, 1, 100);
+    let req1 = OperationPlanRequest::new(
+        PolicyScope::SpecificTargets(vec![target]),
+        PolicyDuration::Indefinite,
+        PolicyPersistence::VolatileSession,
+    );
+    let active = engine.apply_policy(&req1).expect("Apply policy 1");
+    assert_eq!(active.lifecycle_state, PolicyLifecycleState::Active);
+
+    // Preflight for a second request that targets the same IP
+    let plan = engine.plan_policy(&req1).expect("Plan policy");
+    let has_overlap = plan
+        .uncertainties_and_risks
+        .iter()
+        .any(|w| w.contains("TARGET OVERLAP") && w.contains("192.168.1.100"));
+    assert!(
+        has_overlap,
+        "Expected TARGET OVERLAP warning in plan risks: {:?}",
+        plan.uncertainties_and_risks
+    );
+
+    // Preflight for a network-wide request which overlaps with existing target
+    let req_net = OperationPlanRequest::new(
+        PolicyScope::NetworkWide,
+        PolicyDuration::Indefinite,
+        PolicyPersistence::VolatileSession,
+    );
+    let plan_net = engine.plan_policy(&req_net).expect("Plan net");
+    let has_net_overlap = plan_net
+        .uncertainties_and_risks
+        .iter()
+        .any(|w| w.contains("TARGET OVERLAP: Network-wide policy will overlap"));
+    assert!(
+        has_net_overlap,
+        "Expected network-wide overlap warning in plan risks: {:?}",
+        plan_net.uncertainties_and_risks
+    );
+}

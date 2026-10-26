@@ -392,6 +392,22 @@ pub struct PolicyExecutionRecord {
     pub error: Option<String>,
 }
 
+/// Preflight evaluation report prior to executing a router firewall mutation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationPreflightReport {
+    pub provider_name: String,
+    pub router_identity: RouterIdentity,
+    pub target_scope: PolicyScope,
+    pub target_count: usize,
+    pub duration: PolicyDuration,
+    pub persistence: PolicyPersistence,
+    pub recovery_mechanism: String,
+    pub has_unreconciled_partial_failure: bool,
+    pub prior_failures: Vec<String>,
+    pub target_overlaps: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 /// Unified, capability-driven policy execution engine.
 ///
 /// Dispatches administrative network control requests through a common,
@@ -533,7 +549,130 @@ impl PolicyExecutionEngine {
             }
         }
 
-        active_provider.plan_operation(req)
+        let mut plan = active_provider.plan_operation(req)?;
+        plan.is_dry_run = true;
+
+        // Check for prior unresolved partial failures or unknown states from store
+        for p in self.store.historical_policies() {
+            match &p.lifecycle_state {
+                PolicyLifecycleState::PartialFailure {
+                    applied_targets,
+                    failed_target,
+                    rollback_errors,
+                } => {
+                    plan.uncertainties_and_risks.push(format!(
+                        "PRIOR UNRESOLVED PARTIAL FAILURE: Policy '{}' failed on target '{}' (applied: {:?}, rollback errors: {:?}). Firewall may be in an inconsistent state.",
+                        p.policy_id, failed_target, applied_targets, rollback_errors
+                    ));
+                }
+                PolicyLifecycleState::Unknown => {
+                    plan.uncertainties_and_risks.push(format!(
+                        "PRIOR UNKNOWN STATE: Policy '{}' has unknown lifecycle state on the router. Reconciliation is recommended before mutating.",
+                        p.policy_id
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // Check for target overlap or conflicts with active policies
+        let active_policies: Vec<_> = self
+            .store
+            .historical_policies()
+            .into_iter()
+            .filter(|p| p.lifecycle_state == PolicyLifecycleState::Active)
+            .collect();
+
+        match &req.scope {
+            PolicyScope::NetworkWide => {
+                for ap in &active_policies {
+                    plan.uncertainties_and_risks.push(format!(
+                        "TARGET OVERLAP: Network-wide policy will overlap with existing active policy '{}' (scope: {})",
+                        ap.policy_id, ap.scope
+                    ));
+                }
+            }
+            PolicyScope::SpecificTargets(targets) => {
+                for target in targets {
+                    for ap in &active_policies {
+                        match &ap.scope {
+                            PolicyScope::NetworkWide => {
+                                plan.uncertainties_and_risks.push(format!(
+                                    "TARGET OVERLAP: Target {} is already covered by active Network-Wide policy '{}'",
+                                    target, ap.policy_id
+                                ));
+                            }
+                            PolicyScope::SpecificTargets(existing_targets) => {
+                                if existing_targets.contains(target) {
+                                    plan.uncertainties_and_risks.push(format!(
+                                        "TARGET OVERLAP: Target {} is already subject to active policy '{}'",
+                                        target, ap.policy_id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(plan)
+    }
+
+    /// Checks the policy store and router history for any unresolved partial failures or unknown states
+    pub fn check_unreconciled_failures(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for p in self.store.historical_policies() {
+            match &p.lifecycle_state {
+                PolicyLifecycleState::PartialFailure {
+                    applied_targets,
+                    failed_target,
+                    rollback_errors,
+                } => {
+                    warnings.push(format!(
+                        "Policy '{}' has unresolved partial failure (failed target: {}, applied: {:?}, rollback errors: {:?})",
+                        p.policy_id, failed_target, applied_targets, rollback_errors
+                    ));
+                }
+                PolicyLifecycleState::Unknown => {
+                    warnings.push(format!(
+                        "Policy '{}' is in an ambiguous/unknown lifecycle state",
+                        p.policy_id
+                    ));
+                }
+                _ => {}
+            }
+        }
+        warnings
+    }
+
+    /// Performs preflight inspection for a policy mutation, returning a structured summary of risks and conflicts
+    pub fn preflight_mutation(
+        &self,
+        req: &OperationPlanRequest,
+    ) -> Result<MutationPreflightReport, AdminError> {
+        let plan = self.plan_policy(req)?;
+        let unreconciled = self.check_unreconciled_failures();
+        let mut target_overlaps = Vec::new();
+        for risk in &plan.uncertainties_and_risks {
+            if risk.starts_with("TARGET OVERLAP:") {
+                target_overlaps.push(risk.clone());
+            }
+        }
+
+        Ok(MutationPreflightReport {
+            provider_name: plan.provider_name,
+            router_identity: plan.router_identity,
+            target_scope: plan.target_scope,
+            target_count: plan.target_count,
+            duration: plan.duration,
+            persistence: plan.persistence,
+            recovery_mechanism: plan.recovery_mechanism,
+            has_unreconciled_partial_failure: !unreconciled.is_empty(),
+            prior_failures: unreconciled,
+            target_overlaps,
+            warnings: plan.uncertainties_and_risks,
+        })
     }
 
     /// Applies a network access policy through the capability-driven execution pipeline
@@ -619,6 +758,19 @@ impl PolicyExecutionEngine {
 
         // 4. Duplicate policy check
         self.registry.check_duplicate_policy(&req.scope)?;
+
+        // 4b. Check and warn on active partial failure or unknown states before mutating
+        for p in self.store.historical_policies() {
+            if matches!(
+                p.lifecycle_state,
+                PolicyLifecycleState::PartialFailure { .. } | PolicyLifecycleState::Unknown
+            ) {
+                eprintln!(
+                    "[WARN] Active partial failure or unknown router state detected for policy '{}'. Proceeding with mutation may compound router state divergence.",
+                    p.policy_id
+                );
+            }
+        }
 
         // 5. Track state transition: PendingApplication
         let now = SystemTime::now()

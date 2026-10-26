@@ -30,7 +30,10 @@ pub use diagnostics::{
     NormalizedRouterInventoryItem, ProviderConnectionState, RouterDeviceEntry,
     RouterDiagnosticReport,
 };
-pub use engine::{sanitize_error, sanitize_text, PolicyExecutionEngine, PolicyExecutionRecord};
+pub use engine::{
+    sanitize_error, sanitize_text, MutationPreflightReport, PolicyExecutionEngine,
+    PolicyExecutionRecord,
+};
 pub use mikrotik::{
     base64_encode, HttpsMikroTikTransport, MikroTikAdminProvider, MikroTikTransport,
     MockMikroTikTransport,
