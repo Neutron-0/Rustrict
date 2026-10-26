@@ -758,21 +758,22 @@ impl PolicyExecutionEngine {
             )));
         }
 
-        // 4. Duplicate policy check
-        self.registry.check_duplicate_policy(&req.scope)?;
-
-        // 4b. Check and warn on active partial failure or unknown states before mutating
+        // 4. Check and block conflicting mutations if an active partial failure or unknown state exists
         for p in self.store.historical_policies() {
             if matches!(
                 p.lifecycle_state,
                 PolicyLifecycleState::PartialFailure { .. } | PolicyLifecycleState::Unknown
-            ) {
-                eprintln!(
-                    "[WARN] Active partial failure or unknown router state detected for policy '{}'. Proceeding with mutation may compound router state divergence.",
-                    p.policy_id
-                );
+            ) && p.scope.conflicts_with(&req.scope)
+            {
+                return Err(AdminError::TransactionFailed(format!(
+                    "Mutation rejected: Conflicting policy '{}' has unresolved state '{}'. Follow-up mutations are blocked until router state is verified or resolved by an operator.",
+                    p.policy_id, p.lifecycle_state
+                )));
             }
         }
+
+        // 4b. Duplicate policy check
+        self.registry.check_duplicate_policy(&req.scope)?;
 
         // 5. Track state transition: PendingApplication
         let now = SystemTime::now()
@@ -822,6 +823,7 @@ impl PolicyExecutionEngine {
             }
             Err(e) => {
                 let sanitized_err = sanitize_error(e);
+                let is_ambiguous = sanitized_err.is_ambiguous_outcome();
                 let final_state = match &sanitized_err {
                     AdminError::RollbackFailed {
                         applied_targets,
@@ -833,7 +835,33 @@ impl PolicyExecutionEngine {
                         failed_target: failed_target.clone(),
                         rollback_errors: rollback_errors.clone(),
                     },
+                    _ if is_ambiguous => PolicyLifecycleState::Unknown,
                     _ => PolicyLifecycleState::Failed(sanitized_err.to_string()),
+                };
+
+                let policy_id_opt = if matches!(
+                    final_state,
+                    PolicyLifecycleState::Unknown | PolicyLifecycleState::PartialFailure { .. }
+                ) {
+                    let unconfirmed_policy_id = format!("unconfirmed_{}_{}", desc.id, now);
+                    let unconfirmed_status = ActivePolicyStatus::new(
+                        unconfirmed_policy_id.clone(),
+                        req.scope.clone(),
+                        now,
+                        None,
+                        req.persistence == PolicyPersistence::RouterPersistent,
+                        format!("{}:unconfirmed", desc.id),
+                        false,
+                    )
+                    .with_provider(desc.name.clone())
+                    .with_state(final_state.clone())
+                    .with_error(sanitized_err.to_string());
+
+                    let res_stat = self.store.update_policy_status(&unconfirmed_status);
+                    self.record_persistence_result(res_stat);
+                    Some(unconfirmed_policy_id)
+                } else {
+                    None
                 };
 
                 let record = PolicyExecutionRecord {
@@ -848,7 +876,7 @@ impl PolicyExecutionEngine {
                     duration: req.duration.clone(),
                     persistence: req.persistence.clone(),
                     autonomous_recovery_guaranteed: false,
-                    policy_id: None,
+                    policy_id: policy_id_opt,
                     error: Some(sanitized_err.to_string()),
                 };
                 let res = self.store.append_record(&record);
@@ -918,6 +946,12 @@ impl PolicyExecutionEngine {
             }
             Err(e) => {
                 let sanitized_err = sanitize_error(e);
+                let is_ambiguous = sanitized_err.is_ambiguous_outcome();
+                let final_state = if is_ambiguous {
+                    PolicyLifecycleState::Unknown
+                } else {
+                    PolicyLifecycleState::Failed(sanitized_err.to_string())
+                };
                 let record = PolicyExecutionRecord {
                     execution_id,
                     timestamp_unix: now,
@@ -926,7 +960,7 @@ impl PolicyExecutionEngine {
                     provider_name: desc.name.clone(),
                     target_scope: scope.clone(),
                     initial_state: PolicyLifecycleState::RecoveryInProgress,
-                    final_state: PolicyLifecycleState::Failed(sanitized_err.to_string()),
+                    final_state,
                     duration: PolicyDuration::Indefinite,
                     persistence: PolicyPersistence::VolatileSession,
                     autonomous_recovery_guaranteed: false,
