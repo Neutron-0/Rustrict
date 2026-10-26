@@ -1,13 +1,80 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::gateway::admin::engine::{sanitize_text, PolicyExecutionRecord};
 use crate::gateway::admin::plan::{ActivePolicyStatus, PolicyLifecycleState, PolicyScope};
+
+/// Maximum duration to wait when acquiring a cross-process policy store lock.
+pub const POLICY_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cross-process lockfile guard that releases the OS-level exclusive file lock upon drop.
+#[derive(Debug)]
+pub struct PolicyStoreLockGuard {
+    _file: File,
+    _path: PathBuf,
+}
+
+impl PolicyStoreLockGuard {
+    /// Attempts to acquire an exclusive cross-process lock on the specified lockfile.
+    /// Retries boundedly until `timeout` expires, preventing indefinite hangs or deadlocks.
+    pub fn acquire(lock_path: &Path, timeout: Duration) -> io::Result<Self> {
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+
+        let start = Instant::now();
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => {
+                    return Ok(Self {
+                        _file: file,
+                        _path: lock_path.to_path_buf(),
+                    });
+                }
+                Err(err) => {
+                    // On Windows, OS error 33 (ERROR_LOCK_VIOLATION) or WouldBlock indicates the lock is currently held.
+                    let is_contended =
+                        err.kind() == io::ErrorKind::WouldBlock || err.raw_os_error() == Some(33);
+
+                    if is_contended {
+                        if start.elapsed() >= timeout {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "Timed out after {:?} waiting for policy store lock '{}'",
+                                    timeout,
+                                    lock_path.display()
+                                ),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PolicyStoreLockGuard {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
+}
 
 /// Current schema version of the persistent router policy state file
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -417,6 +484,34 @@ impl PolicyStore {
         }
     }
 
+    /// Resolves the companion lockfile path for cross-process synchronization.
+    pub fn lock_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|p| {
+            let mut lock_name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("policy_store")
+                .to_string();
+            lock_name.push_str(".lock");
+            match p.parent() {
+                Some(parent) => parent.join(lock_name),
+                None => PathBuf::from(lock_name),
+            }
+        })
+    }
+
+    /// Acquires an exclusive cross-process lock for the duration of a store transaction.
+    /// In-memory stores return `Ok(None)`.
+    pub fn acquire_lock(&self) -> Result<Option<PolicyStoreLockGuard>, String> {
+        if let Some(lock_path) = self.lock_path() {
+            PolicyStoreLockGuard::acquire(&lock_path, POLICY_STORE_LOCK_TIMEOUT)
+                .map(Some)
+                .map_err(|e| format!("Failed to acquire cross-process policy store lock: {}", e))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Atomically persists the in-memory state to disk, merging concurrent on-disk changes
     fn persist_internal(&self, state: &mut PersistentPolicyState) -> Result<(), String> {
         state.sanitize_all_secrets();
@@ -467,8 +562,9 @@ impl PolicyStore {
         }
     }
 
-    /// Appends a sanitized execution record and persists to disk
+    /// Appends a sanitized execution record and persists to disk under cross-process locking
     pub fn append_record(&self, record: &PolicyExecutionRecord) -> Result<(), String> {
+        let _proc_lock = self.acquire_lock()?;
         self.sync_from_disk_if_present();
         let mut sanitized = record.clone();
         if let Some(err) = &sanitized.error {
@@ -485,8 +581,9 @@ impl PolicyStore {
         self.persist_internal(&mut lock)
     }
 
-    /// Inserts or updates an active policy status in historical records and persists to disk
+    /// Inserts or updates an active policy status in historical records and persists to disk under cross-process locking
     pub fn update_policy_status(&self, policy: &ActivePolicyStatus) -> Result<(), String> {
+        let _proc_lock = self.acquire_lock()?;
         self.sync_from_disk_if_present();
         let mut sanitized = policy.clone();
         if let Some(err) = &sanitized.last_error {
@@ -512,11 +609,12 @@ impl PolicyStore {
         self.persist_internal(&mut lock)
     }
 
-    /// Updates historical policies based on live provider reconciliation results
+    /// Updates historical policies based on live provider reconciliation results under cross-process locking
     pub fn update_policies_from_reconcile(
         &self,
         live_policies: &[ActivePolicyStatus],
     ) -> Result<(), String> {
+        let _proc_lock = self.acquire_lock()?;
         self.sync_from_disk_if_present();
         let mut lock = self.state.write().unwrap();
 
@@ -559,8 +657,9 @@ impl PolicyStore {
         self.persist_internal(&mut lock)
     }
 
-    /// Marks matching historical policies as recovered when resumed
+    /// Marks matching historical policies as recovered when resumed under cross-process locking
     pub fn mark_scope_recovered(&self, scope: &PolicyScope) -> Result<(), String> {
+        let _proc_lock = self.acquire_lock()?;
         self.sync_from_disk_if_present();
         let mut lock = self.state.write().unwrap();
         for policy in &mut lock.historical_policies {
@@ -601,8 +700,9 @@ impl PolicyStore {
         self.state.read().unwrap().clone()
     }
 
-    /// Clears execution history and historical policies, persisting an empty state
+    /// Clears execution history and historical policies, persisting an empty state under cross-process locking
     pub fn clear(&self) -> Result<(), String> {
+        let _proc_lock = self.acquire_lock()?;
         let mut lock = self.state.write().unwrap();
         lock.records.clear();
         lock.historical_policies.clear();

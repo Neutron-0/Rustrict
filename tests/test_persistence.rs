@@ -321,3 +321,88 @@ fn test_recovery_metadata_and_preflight_rejection() {
     let status = RecoveryVerificationStatus::Confirmed(mech);
     assert_eq!(format!("{}", status), "Confirmed (OpenWrt Cron Scheduler)");
 }
+
+#[test]
+fn test_cross_process_locking_contention_and_timeout() {
+    use rustrict::gateway::admin::persistence::{PolicyStoreLockGuard, POLICY_STORE_LOCK_TIMEOUT};
+
+    let temp_dir = TestTempDir::new("lock_contention");
+    let lock_file = temp_dir.path().join("test_contention.json.lock");
+
+    // Process 1 acquires lock
+    let guard1 = PolicyStoreLockGuard::acquire(&lock_file, POLICY_STORE_LOCK_TIMEOUT)
+        .expect("First lock acquisition must succeed");
+
+    // Process 2 tries to acquire with short timeout; must timeout
+    let start = std::time::Instant::now();
+    let err = PolicyStoreLockGuard::acquire(&lock_file, Duration::from_millis(100))
+        .expect_err("Second lock acquisition during contention must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert!(start.elapsed() >= Duration::from_millis(90));
+
+    // Release lock 1
+    drop(guard1);
+
+    // Process 2 can now acquire lock immediately
+    let guard2 = PolicyStoreLockGuard::acquire(&lock_file, Duration::from_millis(500));
+    assert!(
+        guard2.is_ok(),
+        "Must acquire lock after previous holder released"
+    );
+}
+
+#[test]
+fn test_cross_process_concurrent_disjoint_writers() {
+    use rustrict::gateway::admin::plan::{PolicyDuration, PolicyPersistence};
+
+    let temp_dir = TestTempDir::new("concurrent_writers");
+    let state_file = temp_dir.path().join("shared_policies.json");
+
+    let num_writers = 4;
+    let ops_per_writer = 10;
+    let mut handles = Vec::new();
+
+    for w_idx in 0..num_writers {
+        let path = state_file.clone();
+        handles.push(std::thread::spawn(move || {
+            let store = PolicyStore::with_path(&path);
+            for op in 0..ops_per_writer {
+                let rec = PolicyExecutionRecord {
+                    execution_id: format!("exec_{}_{}", w_idx, op),
+                    timestamp_unix: 1000 + (w_idx * 100) as u64 + op as u64,
+                    operation: "apply".to_string(),
+                    provider_id: "test".to_string(),
+                    provider_name: "Test Provider".to_string(),
+                    target_scope: PolicyScope::SpecificTargets(vec![Ipv4Addr::new(
+                        192,
+                        168,
+                        1,
+                        10 + w_idx as u8,
+                    )]),
+                    initial_state: PolicyLifecycleState::Planned,
+                    final_state: PolicyLifecycleState::Active,
+                    duration: PolicyDuration::Indefinite,
+                    persistence: PolicyPersistence::VolatileSession,
+                    autonomous_recovery_guaranteed: false,
+                    policy_id: Some(format!("pol_{}_{}", w_idx, op)),
+                    error: None,
+                };
+                store
+                    .append_record(&rec)
+                    .expect("Append must succeed under lock");
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let final_store = PolicyStore::with_path(&state_file);
+    let records = final_store.records();
+    assert_eq!(
+        records.len(),
+        (num_writers * ops_per_writer) as usize,
+        "All disjoint writes from concurrent processes must be preserved without loss"
+    );
+}
