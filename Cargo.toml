@@ -28,3 +28,4 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation"
 ] }
 fs2 = "0.4.3"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }

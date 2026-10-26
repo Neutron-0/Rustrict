@@ -1,22 +1,19 @@
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::gateway::admin::plan::AdminError;
 
-/// Securely zeroes a byte slice in memory using volatile writes
-/// to prevent compiler dead-store elimination.
+/// Securely zeroes a byte slice in memory using the audited `zeroize` engine,
+/// preventing compiler dead-store elimination.
 pub fn zero_slice(slice: &mut [u8]) {
-    for byte in slice.iter_mut() {
-        unsafe {
-            std::ptr::write_volatile(byte, 0);
-        }
-    }
+    slice.zeroize();
 }
 
 /// A security-hardened byte buffer that zeroes its memory on Drop
-/// and redacts itself in Debug and Display formatting.
-#[derive(Clone, Eq)]
+/// using the audited `zeroize` engine and redacts itself in Debug and Display formatting.
+#[derive(Clone, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ProtectedBuffer {
     inner: Vec<u8>,
 }
@@ -51,14 +48,8 @@ impl ProtectedBuffer {
     }
 
     pub fn clear(&mut self) {
-        zero_slice(&mut self.inner);
+        self.inner.zeroize();
         self.inner.clear();
-    }
-}
-
-impl Drop for ProtectedBuffer {
-    fn drop(&mut self) {
-        zero_slice(&mut self.inner);
     }
 }
 
@@ -118,8 +109,8 @@ impl PartialEq<Vec<u8>> for ProtectedBuffer {
 }
 
 /// A security-hardened string wrapper that zeroes its allocated memory on Drop
-/// and prevents accidental leak via Debug or Display formatting.
-#[derive(Clone, PartialEq, Eq)]
+/// using the audited `zeroize` engine and prevents accidental leak via Debug or Display formatting.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ProtectedString {
     inner: Vec<u8>,
 }
@@ -149,14 +140,8 @@ impl ProtectedString {
     }
 
     pub fn clear(&mut self) {
-        zero_slice(&mut self.inner);
+        self.inner.zeroize();
         self.inner.clear();
-    }
-}
-
-impl Drop for ProtectedString {
-    fn drop(&mut self) {
-        zero_slice(&mut self.inner);
     }
 }
 
@@ -245,7 +230,7 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, AdminError> {
 
 #[cfg(not(windows))]
 pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, AdminError> {
-    // Fallback for non-Windows mock compilation: XOR-masked obfuscation
+    // Non-Windows test mock fallback only: XOR-masked obfuscation (NOT production encryption)
     let masked: Vec<u8> = plaintext.iter().map(|b| b ^ 0x5A).collect();
     Ok(masked)
 }
@@ -288,11 +273,10 @@ pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<ProtectedBuffer, AdminError> {
     let slice = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
     let decrypted = ProtectedBuffer::new(slice.to_vec());
 
-    // Volatile zero DPAPI memory before freeing back to Windows LocalAlloc heap
+    // Securely zero DPAPI unmanaged memory using zeroize before freeing back to Windows LocalAlloc heap
     unsafe {
-        for i in 0..(out_blob.cbData as usize) {
-            std::ptr::write_volatile(out_blob.pbData.add(i), 0);
-        }
+        let raw_slice = std::slice::from_raw_parts_mut(out_blob.pbData, out_blob.cbData as usize);
+        raw_slice.zeroize();
         LocalFree(out_blob.pbData as _);
     }
 
@@ -301,8 +285,11 @@ pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<ProtectedBuffer, AdminError> {
 
 #[cfg(not(windows))]
 pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<ProtectedBuffer, AdminError> {
-    let unmasked: Vec<u8> = ciphertext.iter().map(|b| b ^ 0x5A).collect();
-    Ok(ProtectedBuffer::new(unmasked))
+    // Non-Windows test mock fallback only: XOR-masked obfuscation (NOT production encryption)
+    let mut unmasked: Vec<u8> = ciphertext.iter().map(|b| b ^ 0x5A).collect();
+    let buf = ProtectedBuffer::new(&unmasked);
+    unmasked.zeroize();
+    Ok(buf)
 }
 
 /// Persists router credentials protected at rest using Windows DPAPI.
@@ -341,11 +328,14 @@ pub fn load_protected_credentials(path: &Path) -> Result<RouterCredentials, Admi
         )));
     }
 
-    let encrypted = fs::read(path).map_err(|e| {
+    let mut encrypted = fs::read(path).map_err(|e| {
         AdminError::CommunicationError(format!("Failed to read protected credential store: {}", e))
     })?;
 
-    let decrypted = dpapi_decrypt(&encrypted)?;
+    let decrypted = dpapi_decrypt(&encrypted);
+    encrypted.zeroize();
+    let decrypted = decrypted?;
+
     let colon_pos = decrypted.iter().position(|&b| b == b':');
     let pos = match colon_pos {
         Some(p) => p,

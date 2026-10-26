@@ -317,3 +317,52 @@ fn test_protected_credentials_file_roundtrip_with_zeroization() {
     assert_eq!(loaded.username, "sec_admin");
     assert_eq!(loaded.password.expose(), "UltraStrongPassphrase!#492");
 }
+
+#[test]
+fn test_protected_buffer_clone_and_zeroize_independence() {
+    use rustrict::gateway::admin::{ProtectedBuffer, ProtectedString};
+    use zeroize::Zeroize;
+
+    let secret = "IndependentSecretKey999";
+    let mut pbuf1 = ProtectedBuffer::new(secret.as_bytes().to_vec());
+    let mut pbuf2 = pbuf1.clone();
+
+    assert_eq!(&*pbuf1, &*pbuf2);
+    assert_eq!(&*pbuf1, secret.as_bytes());
+
+    // Zeroizing pbuf1 independently must not corrupt pbuf2
+    pbuf1.zeroize();
+    assert!(pbuf1.iter().all(|&b| b == 0));
+    assert_eq!(&*pbuf2, secret.as_bytes());
+
+    pbuf2.clear();
+    assert_eq!(pbuf2.len(), 0);
+
+    // ProtectedString clone isolation
+    let mut pstr1 = ProtectedString::new(secret);
+    let pstr2 = pstr1.clone();
+
+    assert_eq!(pstr1.expose(), pstr2.expose());
+    pstr1.zeroize();
+    assert_ne!(pstr1.expose(), secret);
+    assert_eq!(pstr2.expose(), secret);
+}
+
+#[test]
+fn test_dpapi_decrypt_corrupted_data_fails_safely() {
+    use rustrict::gateway::admin::{dpapi_decrypt, AdminError};
+
+    let corrupt_ciphertext = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
+    let res = dpapi_decrypt(&corrupt_ciphertext);
+    assert!(res.is_err(), "Decrypting corrupted ciphertext must fail");
+    match res {
+        Err(AdminError::AuthenticationFailed(msg)) => {
+            assert!(
+                msg.contains("Failed to decrypt") || msg.contains("DPAPI"),
+                "Error message must be sanitized: {}",
+                msg
+            );
+        }
+        other => panic!("Expected AuthenticationFailed, got {:?}", other),
+    }
+}

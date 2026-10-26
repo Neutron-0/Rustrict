@@ -1,7 +1,8 @@
 //! Safe native curl execution and temporary payload helpers for Windows.
 //!
-//! Provides secure execution of native `curl.exe` without leaking credentials
-//! on the command line or keeping persistent temporary files on disk.
+//! Provides execution of native `curl.exe` without leaking credentials
+//! on the command line, using protected stdin pipes for authentication configuration
+//! and isolated temporary files with best-effort sanitization and immediate RAII cleanup on drop.
 
 use crate::gateway::admin::plan::AdminError;
 use std::fs::File;
@@ -93,7 +94,9 @@ impl AutoCleanFile {
 
 impl Drop for AutoCleanFile {
     fn drop(&mut self) {
-        // Securely zero file contents on disk before unlinking
+        // Best-effort in-place overwrite before removal to reduce plaintext remnants
+        // in unallocated filesystem sectors. Note: this does NOT guarantee cryptographic
+        // erasure on wear-leveling SSDs, copy-on-write filesystems, or storage snapshots.
         if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&self.path) {
             if let Ok(meta) = f.metadata() {
                 let len = meta.len() as usize;
