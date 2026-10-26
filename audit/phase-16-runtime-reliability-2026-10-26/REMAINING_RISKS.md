@@ -35,3 +35,10 @@
    - OpenWrt `firewall4` (nftables) rules injected by Rustrict use dedicated named chains and priority offsets.
    - Routers running conflicting packages (e.g. `mwan3`, `sqm-scripts`, or custom raw iptables scripts) might intercept or override chain evaluation order.
    - **Mitigation**: Preflight diagnostic checks and `router reconcile` verify chain integrity.
+
+
+---
+
+## Phase 17 Addendum (2026-10-26)
+
+**Progress Beyond Synthetic Mocks**: The synthetic mock transports referenced in Section 1 have now been supplemented by the Phase 17 loopback router protocol simulation harness (`tests/support/router_emulator/` and `tests/test_protocol_integration.rs`). This validates actual byte-level request construction, HTTP headers, SOAP XML payloads, REST JSON parsing, curl process integration, and failure injection against live TCP sockets on `127.0.0.1:0`. Staged physical lab testing remains mandatory for verifying vendor-specific hardware behaviors, physical interface drops, and firmware variations.

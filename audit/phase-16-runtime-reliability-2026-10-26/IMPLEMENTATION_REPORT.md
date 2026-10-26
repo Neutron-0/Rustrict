@@ -69,3 +69,11 @@ Five major engineering work packages were implemented, tested, and verified:
 - Proved unauthenticated mutations are rejected before dispatch.
 - Proved credential redaction across all error variants.
 - Proved multi-target partial failure reporting preserves targets without panicking.
+
+
+---
+
+## Phase 17 Addendum (2026-10-26)
+
+**Protocol Integration and Simulation Hardening**:
+Following the Phase 16 hardening baseline, Phase 17 introduced a local, deterministic router protocol integration harness (`tests/support/router_emulator/` and `tests/test_protocol_integration.rs`). This supplements unit tests and synthetic mocks by exercising real HTTP JSON-RPC, SOAP XML, REST HTTPS, and SSH request-response lifecycles over actual local TCP loopback sockets (`127.0.0.1:0`). It verifies fail-closed security behaviors on timeouts, invalid/malformed JSON or XML responses, HTTP redirects, and multi-target partial enforcement rollbacks.

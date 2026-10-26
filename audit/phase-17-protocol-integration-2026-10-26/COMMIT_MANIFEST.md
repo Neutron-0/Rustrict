@@ -1,0 +1,29 @@
+# Rustrict Phase 17 — Git Commit Manifest
+
+**Date:** 2026-10-26  
+**Target Branch:** `main`  
+**Starting Commit:** `7bd9428 docs(audit): record Phase 16 runtime reliability results`  
+
+---
+
+## Commit Sequence
+
+### 1. `cf559b9` — `test(router): add loopback protocol simulation harness`
+- **Scope**: `tests/support/mod.rs`, `tests/support/router_emulator/mod.rs`
+- **Description**: Introduces deterministic, in-process TCP server on `127.0.0.1:0` emulating OpenWrt ubus JSON-RPC, AVM TR-064 SOAP, UniFi REST, and MikroTik REST API. Handles Winsock TCP reset avoidance (`Expect: 100-continue`, orderly TCP shutdown, and receive buffer draining).
+
+### 2. `32cc64a` — `test(router): exercise provider request and rollback flows`
+- **Scope**: `tests/test_protocol_integration.rs`
+- **Description**: Implements 11 protocol integration tests exercising production adapters over live TCP loopback sockets. Tests authentication, request formatting, failure injection (timeouts, malformed JSON/XML, redirects), multi-target partial enforcement rollbacks, and SSH executor pipelines.
+
+### 3. `8222e1b` — `test(cli): cover mutation confirmation end to end`
+- **Scope**: `src/cli/prompt.rs`, `src/resolver/passive.rs`, `src/spoofer/engine.rs`, `tests/test_cli_confirmation.rs`, `tests/support/router_emulator/mod.rs`, `tests/test_protocol_integration.rs`
+- **Description**: Connects interactive CLI mutation confirmation prompts (`[yes/N]`) for `pause`, `resume`, and `adjust` to a testable `read_confirmation_input()` harness. Adds inactive test constructors for `ArpSpoofer` and `PassiveIdentitySniffer` to prevent driver locks during CI testing. Tests confirmed, cancelled, empty, and `--yes` flag execution paths.
+
+### 4. `bbbda5a` — `feat(diagnostics): validate exported evidence bundles offline`
+- **Scope**: `src/gateway/admin/diagnostics.rs`, `src/gateway/admin/engine.rs`, `src/gateway/admin/mod.rs`, `src/cli/prompt.rs`, `tests/test_diagnostics.rs`, `tests/test_cli_confirmation.rs`
+- **Description**: Implements `PolicyExecutionEngine::validate_evidence_file` and CLI `router validate-evidence <path>` to validate exported evidence bundles offline without router contact. Enforces JSON schema versioning, timestamp sanity, size limits, and secret leakage detection. Adds 5 diagnostics unit tests and CLI integration test.
+
+### 5. (Current) — `docs(lab): prepare source-traced Stage 1 operator packet`
+- **Scope**: `audit/phase-16-runtime-reliability-2026-10-26/REMAINING_RISKS.md`, `audit/phase-16-runtime-reliability-2026-10-26/IMPLEMENTATION_REPORT.md`, `audit/phase-17-protocol-integration-2026-10-26/`
+- **Description**: Documents the Stage 1 physical lab operator packet, protocol coverage matrix, failure simulation report, remaining hardware risks, and reconstructed fresh test evidence (257 passing tests).
