@@ -24,7 +24,7 @@ pub use credentials::{
     dpapi_decrypt, dpapi_encrypt, load_protected_credentials, save_protected_credentials,
     zero_slice, ProtectedBuffer, ProtectedString, RouterCredentials,
 };
-pub use curl_util::{find_curl, AutoCleanFile};
+pub use curl_util::{execute_with_operation_retry, find_curl, AutoCleanFile};
 pub use diagnostics::{
     sanitize_endpoint, unix_to_iso8601, ConnectionDiagnostic, DataSource, DiagnosticResult,
     EvidenceValidationReport, NormalizedRouterInventoryItem, ProviderConnectionState,
@@ -47,8 +47,8 @@ pub use persistence::{
     RecoveryMechanism, RecoveryVerificationStatus, CURRENT_SCHEMA_VERSION,
 };
 pub use plan::{
-    ActivePolicyStatus, AdminError, OperationPlan, OperationPlanRequest, PolicyDuration,
-    PolicyLifecycleState, PolicyPersistence, PolicyScope, RouterIdentity,
+    ActivePolicyStatus, AdminError, OperationPlan, OperationPlanRequest, OperationSemantics,
+    PolicyDuration, PolicyLifecycleState, PolicyPersistence, PolicyScope, RouterIdentity,
 };
 pub use provider::RouterAdminProvider;
 pub use registry::{ProviderDescriptor, RegistryStatus, RouterRegistry};

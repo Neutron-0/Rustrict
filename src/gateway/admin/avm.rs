@@ -180,6 +180,31 @@ impl Default for HttpAvmTransport {
     }
 }
 
+/// Classifies an AVM TR-064 SOAP action by operation semantics
+pub fn classify_avm_action(
+    service_urn: &str,
+    action: &str,
+) -> crate::gateway::admin::plan::OperationSemantics {
+    use crate::gateway::admin::plan::OperationSemantics;
+    match (service_urn, action) {
+        ("urn:dslforum-org:service:Hosts:1", "GetGenericHostEntry") => OperationSemantics::ReadOnly,
+        ("urn:dslforum-org:service:Hosts:1", "GetSpecificHostEntry") => {
+            OperationSemantics::ReadOnly
+        }
+        ("urn:dslforum-org:service:Hosts:1", "X_AVM-DE_GetHostList") => {
+            OperationSemantics::ReadOnly
+        }
+        ("urn:dslforum-org:service:DeviceInfo:1", "GetInfo") => OperationSemantics::ReadOnly,
+        ("urn:dslforum-org:service:X_AVM-DE_HostFilter:1", "GetWANAccessByIP") => {
+            OperationSemantics::ReadOnly
+        }
+        ("urn:dslforum-org:service:X_AVM-DE_HostFilter:1", "DisallowWANAccessByIP") => {
+            OperationSemantics::StateChanging
+        }
+        _ => OperationSemantics::Unknown,
+    }
+}
+
 impl AvmTransport for HttpAvmTransport {
     fn execute_soap(
         &self,
@@ -189,8 +214,13 @@ impl AvmTransport for HttpAvmTransport {
         args_xml: &str,
         credentials: Option<&RouterCredentials>,
     ) -> Result<String, AdminError> {
-        let soap_envelope = format!(
-            r#"<?xml version="1.0" encoding="utf-8"?>
+        let semantics = classify_avm_action(service_urn, action);
+        crate::gateway::admin::curl_util::execute_with_operation_retry(
+            semantics,
+            action,
+            |_attempt| {
+                let soap_envelope = format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
     <u:{} xmlns:u="{}">
@@ -198,112 +228,107 @@ impl AvmTransport for HttpAvmTransport {
     </u:{}>
   </s:Body>
 </s:Envelope>"#,
-            action, service_urn, args_xml, action
-        );
+                    action, service_urn, args_xml, action
+                );
 
-        let mut curl_cfg = format!(
-            "url = \"{}\"\n\
-             request = \"POST\"\n\
-             header = \"Content-Type: text/xml; charset=\\\"utf-8\\\"\"\n\
-             header = \"SOAPAction: \\\"{}#{}\\\"\"\n\
-             digest\n\
-             max-time = {}\n\
-             silent\n\
-             show-error\n",
-            full_control_url,
-            service_urn,
-            action,
-            self.connect_timeout.as_secs()
-        );
+                let mut curl_cfg = format!(
+                    "url = \"{}\"\n\
+                     request = \"POST\"\n\
+                     header = \"Content-Type: text/xml; charset=\\\"utf-8\\\"\"\n\
+                     header = \"SOAPAction: \\\"{}#{}\\\"\"\n\
+                     digest\n\
+                     max-time = {}\n\
+                     silent\n\
+                     show-error\n",
+                    full_control_url,
+                    service_urn,
+                    action,
+                    self.connect_timeout.as_secs()
+                );
 
-        if let Some(creds) = credentials {
-            curl_cfg.push_str(&format!(
-                "user = \"{}:{}\"\n",
-                creds.username.replace('\"', "\\\""),
-                creds.password.expose().replace('\"', "\\\"")
-            ));
-        }
+                if let Some(creds) = credentials {
+                    curl_cfg.push_str(&format!(
+                        "user = \"{}:{}\"\n",
+                        creds.username.replace('\"', "\\\""),
+                        creds.password.expose().replace('\"', "\\\"")
+                    ));
+                }
 
-        if let Some(ca) = &self.ca_cert_path {
-            curl_cfg.push_str(&format!("cacert = \"{}\"\n", ca.display()));
-        }
+                if let Some(ca) = &self.ca_cert_path {
+                    curl_cfg.push_str(&format!("cacert = \"{}\"\n", ca.display()));
+                }
 
-        let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
-        let payload_file = crate::gateway::admin::curl_util::AutoCleanFile::create(
-            "rustrict_avm",
-            ".xml",
-            soap_envelope.as_bytes(),
-        )?;
+                let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
+                let payload_file = crate::gateway::admin::curl_util::AutoCleanFile::create(
+                    "rustrict_avm",
+                    ".xml",
+                    soap_envelope.as_bytes(),
+                )?;
 
-        let mut child = Command::new(&curl_bin)
-            .arg("--retry")
-            .arg("2")
-            .arg("--retry-delay")
-            .arg("0")
-            .arg("--retry-connrefused")
-            .arg("--retry-all-errors")
-            .arg("--config")
-            .arg("-")
-            .arg("--data-binary")
-            .arg(format!("@{}", payload_file.path().display()))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                AdminError::CommunicationError(format!(
-                    "Failed to invoke native curl.exe for AVM TR-064 SOAP request: {}",
-                    e
-                ))
-            })?;
+                let mut child = Command::new(&curl_bin)
+                    .arg("--config")
+                    .arg("-")
+                    .arg("--data-binary")
+                    .arg(format!("@{}", payload_file.path().display()))
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| {
+                        AdminError::CommunicationError(format!(
+                            "Failed to invoke native curl.exe for AVM TR-064 SOAP request: {}",
+                            e
+                        ))
+                    })?;
 
-        let mut curl_cfg_bytes = curl_cfg.into_bytes();
-        if let Some(mut stdin) = child.stdin.take() {
-            // Send only curl config lines on stdin; payload is delivered via temporary file
-            let _ = stdin.write_all(&curl_cfg_bytes);
-        }
-        crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
+                let mut curl_cfg_bytes = curl_cfg.into_bytes();
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(&curl_cfg_bytes);
+                }
+                crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
 
-        let output = crate::gateway::admin::curl_util::wait_child_bounded(
-            child,
-            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
-            self.connect_timeout + std::time::Duration::from_secs(5),
-            "AVM TR-064 Challenge",
-        )?;
+                let output = crate::gateway::admin::curl_util::wait_child_bounded(
+                    child,
+                    crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+                    self.connect_timeout + std::time::Duration::from_secs(5),
+                    "AVM TR-064 Challenge",
+                )?;
 
-        if output.stdout_truncated {
-            return Err(AdminError::CommunicationError(
-                "AVM challenge response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
-            ));
-        }
+                if output.stdout_truncated {
+                    return Err(AdminError::CommunicationError(
+                        "AVM challenge response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+                    ));
+                }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        if output.exit_code != 0 {
-            if stderr.contains("SSL")
-                || stderr.contains("certificate")
-                || stderr.contains("schannel")
-            {
-                return Err(AdminError::CommunicationError(format!(
-                    "TLS certificate validation failed for FRITZ!Box at '{}': {}. Connection rejected to protect administrative credentials.",
-                    full_control_url, stderr.trim()
-                )));
-            }
-            if stderr.contains("timed out") || stderr.contains("Operation timed out") {
-                return Err(AdminError::Timeout(format!(
-                    "AVM TR-064 SOAP request timed out: {}",
-                    stderr.trim()
-                )));
-            }
-            return Err(AdminError::CommunicationError(format!(
-                "AVM TR-064 SOAP request failed (curl exit code {:?}): {}",
-                output.exit_code,
-                stderr.trim()
-            )));
-        }
+                if output.exit_code != 0 {
+                    if stderr.contains("SSL")
+                        || stderr.contains("certificate")
+                        || stderr.contains("schannel")
+                    {
+                        return Err(AdminError::CommunicationError(format!(
+                            "TLS certificate validation failed for FRITZ!Box at '{}': {}. Connection rejected to protect administrative credentials.",
+                            full_control_url, stderr.trim()
+                        )));
+                    }
+                    if stderr.contains("timed out") || stderr.contains("Operation timed out") {
+                        return Err(AdminError::Timeout(format!(
+                            "AVM TR-064 SOAP request timed out: {}",
+                            stderr.trim()
+                        )));
+                    }
+                    return Err(AdminError::CommunicationError(format!(
+                        "AVM TR-064 SOAP request failed (curl exit code {:?}): {}",
+                        output.exit_code,
+                        stderr.trim()
+                    )));
+                }
 
-        Ok(stdout)
+                Ok(stdout)
+            },
+        )
     }
 
     fn fetch_description(
@@ -311,92 +336,96 @@ impl AvmTransport for HttpAvmTransport {
         description_url: &str,
         credentials: Option<&RouterCredentials>,
     ) -> Result<String, AdminError> {
-        let mut curl_cfg = format!(
-            "url = \"{}\"\n\
-             request = \"GET\"\n\
-             digest\n\
-             max-time = {}\n\
-             silent\n\
-             show-error\n",
-            description_url,
-            self.connect_timeout.as_secs()
-        );
+        crate::gateway::admin::curl_util::execute_with_operation_retry(
+            crate::gateway::admin::plan::OperationSemantics::ReadOnly,
+            "fetch_description",
+            |_attempt| {
+                let mut curl_cfg = format!(
+                    "url = \"{}\"\n\
+                     request = \"GET\"\n\
+                     digest\n\
+                     max-time = {}\n\
+                     silent\n\
+                     show-error\n",
+                    description_url,
+                    self.connect_timeout.as_secs()
+                );
 
-        if let Some(creds) = credentials {
-            curl_cfg.push_str(&format!(
-                "user = \"{}:{}\"\n",
-                creds.username.replace('\"', "\\\""),
-                creds.password.expose().replace('\"', "\\\"")
-            ));
-        }
+                if let Some(creds) = credentials {
+                    curl_cfg.push_str(&format!(
+                        "user = \"{}:{}\"\n",
+                        creds.username.replace('\"', "\\\""),
+                        creds.password.expose().replace('\"', "\\\"")
+                    ));
+                }
 
-        if let Some(ca) = &self.ca_cert_path {
-            curl_cfg.push_str(&format!("cacert = \"{}\"\n", ca.display()));
-        }
+                if let Some(ca) = &self.ca_cert_path {
+                    curl_cfg.push_str(&format!("cacert = \"{}\"\n", ca.display()));
+                }
 
-        let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
-        let mut child = Command::new(&curl_bin)
-            .arg("--retry")
-            .arg("2")
-            .arg("--retry-delay")
-            .arg("0")
-            .arg("--retry-connrefused")
-            .arg("--retry-all-errors")
-            .arg("--config")
-            .arg("-")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                AdminError::CommunicationError(format!(
-                    "Failed to invoke native curl.exe for AVM device description: {}",
-                    e
-                ))
-            })?;
+                let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
+                let mut child = Command::new(&curl_bin)
+                    .arg("--config")
+                    .arg("-")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| {
+                        AdminError::CommunicationError(format!(
+                            "Failed to invoke native curl.exe for AVM device description: {}",
+                            e
+                        ))
+                    })?;
 
-        let mut curl_cfg_bytes = curl_cfg.into_bytes();
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(&curl_cfg_bytes);
-        }
-        crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
+                let mut curl_cfg_bytes = curl_cfg.into_bytes();
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(&curl_cfg_bytes);
+                }
+                crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
 
-        let output = crate::gateway::admin::curl_util::wait_child_bounded(
-            child,
-            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
-            self.connect_timeout + std::time::Duration::from_secs(5),
-            "AVM TR-064 Device Description",
-        )?;
+                let output = crate::gateway::admin::curl_util::wait_child_bounded(
+                    child,
+                    crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+                    self.connect_timeout + std::time::Duration::from_secs(5),
+                    "AVM TR-064 Device Description",
+                )?;
 
-        if output.stdout_truncated {
-            return Err(AdminError::CommunicationError(
-                "AVM device description response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
-            ));
-        }
+                if output.stdout_truncated {
+                    return Err(AdminError::CommunicationError(
+                        "AVM device description exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+                    ));
+                }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        if output.exit_code != 0 {
-            if stderr.contains("SSL") || stderr.contains("certificate") {
-                return Err(AdminError::CommunicationError(format!(
-                    "TLS certificate validation failed for FRITZ!Box: {}",
-                    stderr.trim()
-                )));
-            }
-            if stderr.contains("timed out") {
-                return Err(AdminError::Timeout(
-                    "Device description fetch timed out".into(),
-                ));
-            }
-            return Err(AdminError::CommunicationError(format!(
-                "Failed to fetch AVM device description (curl exit code {:?}): {}",
-                output.exit_code,
-                stderr.trim()
-            )));
-        }
+                if output.exit_code != 0 {
+                    if stderr.contains("SSL")
+                        || stderr.contains("certificate")
+                        || stderr.contains("schannel")
+                    {
+                        return Err(AdminError::CommunicationError(format!(
+                            "TLS certificate validation failed for FRITZ!Box description at '{}': {}. Connection rejected.",
+                            description_url, stderr.trim()
+                        )));
+                    }
+                    if stderr.contains("timed out") || stderr.contains("Operation timed out") {
+                        return Err(AdminError::Timeout(format!(
+                            "AVM TR-064 device description request timed out: {}",
+                            stderr.trim()
+                        )));
+                    }
+                    return Err(AdminError::CommunicationError(format!(
+                        "AVM TR-064 device description request failed (curl exit code {:?}): {}",
+                        output.exit_code,
+                        stderr.trim()
+                    )));
+                }
 
-        Ok(stdout)
+                Ok(stdout)
+            },
+        )
     }
 }
 
@@ -1369,10 +1398,14 @@ impl RouterAdminProvider for AvmAdminProvider {
                                 }
                             }
                             if rollback_errors.is_empty() {
-                                return Err(AdminError::TransactionFailed(format!(
-                                    "Failed to disallow WAN access for target {} on AVM (all {} prior targets rolled back): {}",
-                                    target_ip, applied_targets.len(), e
-                                )));
+                                if applied_targets.is_empty() {
+                                    return Err(e);
+                                } else {
+                                    return Err(AdminError::TransactionFailed(format!(
+                                        "Failed to disallow WAN access for target {} on AVM (prior targets rolled back, but target {} outcome uncertain): {}",
+                                        target_ip, target_ip, e
+                                    )));
+                                }
                             } else {
                                 let applied_strs: Vec<String> =
                                     applied_targets.iter().map(|ip| ip.to_string()).collect();

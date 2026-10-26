@@ -230,6 +230,47 @@ pub fn wait_child_bounded(
     })
 }
 
+/// Executes an administrative operation closure with explicit operation-aware retry semantics.
+/// `StateChanging` and `Unknown` operations are strictly single-attempt (zero automatic retries).
+/// `ReadOnly` operations may execute up to 2 attempts using fresh process invocations
+/// to ensure complete buffer isolation and avoid piped stdout corruption.
+pub fn execute_with_operation_retry<F, T>(
+    semantics: crate::gateway::admin::plan::OperationSemantics,
+    desc: &str,
+    mut execute_attempt: F,
+) -> Result<T, AdminError>
+where
+    F: FnMut(usize) -> Result<T, AdminError>,
+{
+    let max_attempts = semantics.max_attempts();
+    let mut last_err = None;
+
+    for attempt in 1..=max_attempts {
+        match execute_attempt(attempt) {
+            Ok(val) => return Ok(val),
+            Err(e) => {
+                if !semantics.allows_retry() {
+                    return Err(e);
+                }
+                match &e {
+                    AdminError::CommunicationError(_) | AdminError::Timeout(_) => {
+                        last_err = Some(e);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    _ => return Err(e),
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        AdminError::CommunicationError(format!(
+            "Operation '{}' failed after {} attempts",
+            desc, max_attempts
+        ))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

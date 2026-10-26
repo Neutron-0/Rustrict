@@ -88,6 +88,20 @@ impl HttpsMikroTikTransport {
     }
 }
 
+/// Classifies a MikroTik REST operation by operation semantics
+pub fn classify_mikrotik_operation(
+    method: &str,
+    _path: &str,
+) -> crate::gateway::admin::plan::OperationSemantics {
+    use crate::gateway::admin::plan::OperationSemantics;
+    let method_upper = method.to_ascii_uppercase();
+    match method_upper.as_str() {
+        "GET" => OperationSemantics::ReadOnly,
+        "POST" | "PUT" | "PATCH" | "DELETE" => OperationSemantics::StateChanging,
+        _ => OperationSemantics::Unknown,
+    }
+}
+
 impl MikroTikTransport for HttpsMikroTikTransport {
     fn request(
         &self,
@@ -115,144 +129,148 @@ impl MikroTikTransport for HttpsMikroTikTransport {
         };
 
         let target_url = format!("{}{}", base_url, path);
-        let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
+        let semantics = classify_mikrotik_operation(method, path);
 
-        // Build curl command without credentials on command line
-        let mut cmd = Command::new(&curl_bin);
-        cmd.arg("-s");
-        cmd.arg("-S");
-        cmd.arg("--retry")
-            .arg("2")
-            .arg("--retry-delay")
-            .arg("0")
-            .arg("--retry-connrefused")
-            .arg("--retry-all-errors");
-        cmd.arg("-X").arg(method);
-        cmd.arg("--connect-timeout")
-            .arg(self.connect_timeout.as_secs().max(1).to_string());
-        cmd.arg("--max-time")
-            .arg(self.request_timeout.as_secs().max(1).to_string());
+        crate::gateway::admin::curl_util::execute_with_operation_retry(
+            semantics,
+            path,
+            |_attempt| {
+                let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
 
-        if let Some(ref ca) = self.ca_cert_path {
-            cmd.arg("--cacert").arg(ca);
-        }
+                // Build curl command without credentials on command line
+                let mut cmd = Command::new(&curl_bin);
+                cmd.arg("-s");
+                cmd.arg("-S");
+                cmd.arg("-X").arg(method);
+                cmd.arg("--connect-timeout")
+                    .arg(self.connect_timeout.as_secs().max(1).to_string());
+                cmd.arg("--max-time")
+                    .arg(self.request_timeout.as_secs().max(1).to_string());
 
-        // Pass headers and secret authorization via stdin config to prevent process sniffing
-        cmd.arg("--config").arg("-");
-        cmd.arg(&target_url);
+                if let Some(ref ca) = self.ca_cert_path {
+                    cmd.arg("--cacert").arg(ca);
+                }
 
-        let mut stdin_config = String::new();
-        stdin_config.push_str("header = \"Accept: application/json\"\n");
+                // Pass headers and secret authorization via stdin config to prevent process sniffing
+                cmd.arg("--config").arg("-");
+                cmd.arg(&target_url);
 
-        if let Some(creds) = credentials {
-            let auth_plain = format!("{}:{}", creds.username, creds.password.expose());
-            let mut auth_bytes = auth_plain.into_bytes();
-            let auth_b64 = base64_encode(&auth_bytes);
-            crate::gateway::admin::credentials::zero_slice(&mut auth_bytes);
-            stdin_config.push_str(&format!("header = \"Authorization: Basic {}\"\n", auth_b64));
-        }
+                let mut stdin_config = String::new();
+                stdin_config.push_str("header = \"Accept: application/json\"\n");
 
-        if let Some(ref b) = body {
-            stdin_config.push_str("header = \"Content-Type: application/json\"\n");
-            let json_body = serde_json::to_string(b).unwrap_or_else(|_| "{}".to_string());
-            // Format body for curl config
-            stdin_config.push_str(&format!("data = \"{}\"\n", json_body.replace('"', "\\\"")));
-        }
+                if let Some(creds) = credentials {
+                    let auth_plain = format!("{}:{}", creds.username, creds.password.expose());
+                    let mut auth_bytes = auth_plain.into_bytes();
+                    let auth_b64 = base64_encode(&auth_bytes);
+                    crate::gateway::admin::credentials::zero_slice(&mut auth_bytes);
+                    stdin_config
+                        .push_str(&format!("header = \"Authorization: Basic {}\"\n", auth_b64));
+                }
 
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+                if let Some(ref b) = body {
+                    stdin_config.push_str("header = \"Content-Type: application/json\"\n");
+                    let json_body = serde_json::to_string(b).unwrap_or_else(|_| "{}".to_string());
+                    // Format body for curl config
+                    stdin_config
+                        .push_str(&format!("data = \"{}\"\n", json_body.replace('"', "\\\"")));
+                }
 
-        let mut child = cmd.spawn().map_err(|e| {
-            AdminError::CommunicationError(format!("Failed to spawn HTTPS client: {}", e))
-        })?;
+                cmd.stdin(std::process::Stdio::piped());
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
 
-        let mut stdin_bytes = stdin_config.into_bytes();
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(&stdin_bytes);
-        }
-        crate::gateway::admin::credentials::zero_slice(&mut stdin_bytes);
+                let mut child = cmd.spawn().map_err(|e| {
+                    AdminError::CommunicationError(format!("Failed to spawn HTTPS client: {}", e))
+                })?;
 
-        let output = crate::gateway::admin::curl_util::wait_child_bounded(
-            child,
-            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
-            self.request_timeout + std::time::Duration::from_secs(5),
-            "MikroTik REST HTTPS",
-        )?;
+                let mut stdin_bytes = stdin_config.into_bytes();
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(&stdin_bytes);
+                }
+                crate::gateway::admin::credentials::zero_slice(&mut stdin_bytes);
 
-        if output.stdout_truncated {
-            return Err(AdminError::CommunicationError(
-                "MikroTik REST response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
-            ));
-        }
+                let output = crate::gateway::admin::curl_util::wait_child_bounded(
+                    child,
+                    crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+                    self.request_timeout + std::time::Duration::from_secs(5),
+                    "MikroTik REST HTTPS",
+                )?;
 
-        let exit_code = output.exit_code;
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                if output.stdout_truncated {
+                    return Err(AdminError::CommunicationError(
+                        "MikroTik REST response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+                    ));
+                }
 
-        if exit_code != 0 {
-            if exit_code == 60 || stderr.contains("certificate") || stderr.contains("SSL") {
-                return Err(AdminError::CommunicationError(
-                    "TLS certificate validation failed: MikroTik router presented an untrusted, self-signed, or expired certificate. Connection rejected to protect administrative credentials.".into(),
-                ));
-            }
-            if exit_code == 28 || stderr.contains("timed out") {
-                return Err(AdminError::Timeout(
-                    "Connection or request to MikroTik router timed out.".into(),
-                ));
-            }
-            if exit_code == 7 || stderr.contains("Failed to connect") {
-                return Err(AdminError::Timeout(
-                    "Failed to connect to MikroTik host (connection refused or endpoint unreachable).".into(),
-                ));
-            }
-            return Err(AdminError::CommunicationError(format!(
-                "MikroTik HTTPS request failed (curl exit code {}): {}",
-                exit_code,
-                stderr.trim()
-            )));
-        }
+                let exit_code = output.exit_code;
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
-        let trimmed_stdout = stdout.trim();
-        if trimmed_stdout.is_empty() {
-            return Ok(json!({}));
-        }
-
-        let parsed: Value = serde_json::from_str(trimmed_stdout).map_err(|e| {
-            AdminError::CommunicationError(format!(
-                "Failed to parse JSON response from MikroTik REST API: {}. Raw: '{}'",
-                e, trimmed_stdout
-            ))
-        })?;
-
-        // Handle RouterOS error responses: {"error": 401, "message": "Unauthorized"}
-        if let Some(err_obj) = parsed.as_object() {
-            if let Some(err_code) = err_obj.get("error").and_then(|c| c.as_i64()) {
-                let msg = err_obj
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Unknown error");
-                if err_code == 401 || err_code == 403 {
-                    return Err(AdminError::AuthenticationFailed(format!(
-                        "MikroTik REST authentication failed (HTTP {}): {}",
-                        err_code, msg
-                    )));
-                } else if err_code == 404 {
-                    return Err(AdminError::PolicyNotFound(format!(
-                        "MikroTik REST resource not found (HTTP 404): {}",
-                        msg
-                    )));
-                } else {
+                if exit_code != 0 {
+                    if exit_code == 60 || stderr.contains("certificate") || stderr.contains("SSL") {
+                        return Err(AdminError::CommunicationError(
+                            "TLS certificate validation failed: MikroTik router presented an untrusted, self-signed, or expired certificate. Connection rejected to protect administrative credentials.".into(),
+                        ));
+                    }
+                    if exit_code == 28 || stderr.contains("timed out") {
+                        return Err(AdminError::Timeout(
+                            "Connection or request to MikroTik router timed out.".into(),
+                        ));
+                    }
+                    if exit_code == 7 || stderr.contains("Failed to connect") {
+                        return Err(AdminError::Timeout(
+                            "Failed to connect to MikroTik host (connection refused or endpoint unreachable).".into(),
+                        ));
+                    }
                     return Err(AdminError::CommunicationError(format!(
-                        "MikroTik REST API error (HTTP {}): {}",
-                        err_code, msg
+                        "MikroTik HTTPS request failed (curl exit code {}): {}",
+                        exit_code,
+                        stderr.trim()
                     )));
                 }
-            }
-        }
 
-        Ok(parsed)
+                let trimmed_stdout = stdout.trim();
+                if trimmed_stdout.is_empty() {
+                    return Ok(json!({}));
+                }
+
+                let parsed: Value = serde_json::from_str(trimmed_stdout).map_err(|e| {
+                    AdminError::CommunicationError(format!(
+                        "Failed to parse JSON response from MikroTik REST API: {}. Raw: '{}'",
+                        e, trimmed_stdout
+                    ))
+                })?;
+
+                // Handle RouterOS error responses: {"error": 401, "message": "Unauthorized"}
+                if let Some(err_obj) = parsed.as_object() {
+                    if let Some(err_code) = err_obj.get("error").and_then(|c| c.as_i64()) {
+                        let msg = err_obj
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown error");
+                        if err_code == 401 || err_code == 403 {
+                            return Err(AdminError::AuthenticationFailed(format!(
+                                "MikroTik REST authentication failed (HTTP {}): {}",
+                                err_code, msg
+                            )));
+                        } else if err_code == 404 {
+                            return Err(AdminError::PolicyNotFound(format!(
+                                "MikroTik REST resource not found (HTTP 404): {}",
+                                msg
+                            )));
+                        } else {
+                            return Err(AdminError::CommunicationError(format!(
+                                "MikroTik REST API error (HTTP {}): {}",
+                                err_code, msg
+                            )));
+                        }
+                    }
+                }
+
+                Ok(parsed)
+            },
+        )
     }
 }
 
@@ -1107,10 +1125,7 @@ impl RouterAdminProvider for MikroTikAdminProvider {
                             expires_at.is_some(),
                         ))
                     }
-                    Err(e) => Err(AdminError::TransactionFailed(format!(
-                        "Failed to commit firewall policy rule on MikroTik: {}",
-                        e
-                    ))),
+                    Err(e) => Err(e),
                 }
             }
             PolicyScope::SpecificTargets(targets) => {
@@ -1161,10 +1176,14 @@ impl RouterAdminProvider for MikroTikAdminProvider {
                                 }
                             }
                             if rollback_errors.is_empty() {
-                                return Err(AdminError::TransactionFailed(format!(
-                                    "Failed to commit firewall policy rule for target {} on MikroTik (all {} prior rules rolled back): {}",
-                                    target_ip, created_ids.len(), e
-                                )));
+                                if created_ids.is_empty() {
+                                    return Err(e);
+                                } else {
+                                    return Err(AdminError::TransactionFailed(format!(
+                                        "Failed to commit firewall policy rule for target {} on MikroTik (prior rules rolled back, but target {} outcome uncertain): {}",
+                                        target_ip, target_ip, e
+                                    )));
+                                }
                             } else {
                                 let applied_strs: Vec<String> = targets
                                     .iter()

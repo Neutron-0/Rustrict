@@ -77,6 +77,27 @@ impl Default for HttpUnifiTransport {
     }
 }
 
+/// Classifies a UniFi REST operation by operation semantics
+pub fn classify_unifi_operation(
+    method: &str,
+    path: &str,
+) -> crate::gateway::admin::plan::OperationSemantics {
+    use crate::gateway::admin::plan::OperationSemantics;
+    let method_upper = method.to_ascii_uppercase();
+    match method_upper.as_str() {
+        "GET" => OperationSemantics::ReadOnly,
+        "POST" => {
+            if path.ends_with("/api/auth/login") || path.ends_with("/api/login") {
+                OperationSemantics::ReadOnly
+            } else {
+                OperationSemantics::StateChanging
+            }
+        }
+        "PUT" | "DELETE" | "PATCH" => OperationSemantics::StateChanging,
+        _ => OperationSemantics::Unknown,
+    }
+}
+
 impl UnifiTransport for HttpUnifiTransport {
     fn request(
         &self,
@@ -94,154 +115,154 @@ impl UnifiTransport for HttpUnifiTransport {
             format!("{}{}", base_url, path)
         };
 
-        let mut curl_cfg = format!(
-            "url = \"{}\"\n\
-             request = \"{}\"\n\
-             header = \"Content-Type: application/json\"\n\
-             max-time = {}\n\
-             silent\n\
-             show-error\n",
-            full_url,
-            method,
-            self.connect_timeout.as_secs()
-        );
+        let semantics = classify_unifi_operation(method, path);
+        crate::gateway::admin::curl_util::execute_with_operation_retry(
+            semantics,
+            path,
+            |_attempt| {
+                let mut curl_cfg = format!(
+                    "url = \"{}\"\n\
+                     request = \"{}\"\n\
+                     header = \"Content-Type: application/json\"\n\
+                     max-time = {}\n\
+                     silent\n\
+                     show-error\n",
+                    full_url,
+                    method,
+                    self.connect_timeout.as_secs()
+                );
 
-        if let Some(cookie) = self.session_cookie.read().as_ref() {
-            curl_cfg.push_str(&format!("cookie = \"{}\"\n", cookie));
-        }
+                if let Some(cookie) = self.session_cookie.read().as_ref() {
+                    curl_cfg.push_str(&format!("cookie = \"{}\"\n", cookie));
+                }
 
-        // Support direct API Key header if username is "api-key" or password is provided
-        if let Some(creds) = credentials {
-            if creds.username.eq_ignore_ascii_case("api-key")
-                || creds.username.eq_ignore_ascii_case("apikey")
-            {
-                curl_cfg.push_str(&format!(
-                    "header = \"X-API-KEY: {}\"\n",
-                    creds.password.expose().replace('\"', "\\\"")
-                ));
-            }
-        }
+                // Support direct API Key header if username is "api-key" or password is provided
+                if let Some(creds) = credentials {
+                    if creds.username.eq_ignore_ascii_case("api-key")
+                        || creds.username.eq_ignore_ascii_case("apikey")
+                    {
+                        curl_cfg.push_str(&format!(
+                            "header = \"X-API-KEY: {}\"\n",
+                            creds.password.expose().replace('\"', "\\\"")
+                        ));
+                    }
+                }
 
-        if let Some(ca) = &self.ca_cert_path {
-            curl_cfg.push_str(&format!("cacert = \"{}\"\n", ca.display()));
-        }
+                if let Some(ca) = &self.ca_cert_path {
+                    curl_cfg.push_str(&format!("cacert = \"{}\"\n", ca.display()));
+                }
 
-        let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
-        let mut cmd = Command::new(&curl_bin);
-        cmd.arg("--retry")
-            .arg("2")
-            .arg("--retry-delay")
-            .arg("0")
-            .arg("--retry-connrefused")
-            .arg("--retry-all-errors")
-            .arg("--config")
-            .arg("-");
+                let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
+                let mut cmd = Command::new(&curl_bin);
+                cmd.arg("--config").arg("-");
 
-        let body_str = body.map(|b| b.to_string()).unwrap_or_default();
-        let _payload_guard = if !body_str.is_empty() {
-            let guard = crate::gateway::admin::curl_util::AutoCleanFile::create(
-                "rustrict_unifi",
-                ".json",
-                body_str.as_bytes(),
-            )?;
-            cmd.arg("--data-binary")
-                .arg(format!("@{}", guard.path().display()));
-            Some(guard)
-        } else {
-            None
-        };
+                let body_str = body.as_ref().map(|b| b.to_string()).unwrap_or_default();
+                let _payload_guard = if !body_str.is_empty() {
+                    let guard = crate::gateway::admin::curl_util::AutoCleanFile::create(
+                        "rustrict_unifi",
+                        ".json",
+                        body_str.as_bytes(),
+                    )?;
+                    cmd.arg("--data-binary")
+                        .arg(format!("@{}", guard.path().display()));
+                    Some(guard)
+                } else {
+                    None
+                };
 
-        let mut child = cmd
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                AdminError::CommunicationError(format!(
-                    "Failed to invoke native curl.exe for UniFi Network API: {}",
-                    e
-                ))
-            })?;
+                let mut child = cmd
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| {
+                        AdminError::CommunicationError(format!(
+                            "Failed to invoke native curl.exe for UniFi Network API: {}",
+                            e
+                        ))
+                    })?;
 
-        let mut curl_cfg_bytes = curl_cfg.into_bytes();
-        if let Some(mut stdin) = child.stdin.take() {
-            // Send only configuration on stdin
-            let _ = stdin.write_all(&curl_cfg_bytes);
-        }
-        crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
+                let mut curl_cfg_bytes = curl_cfg.into_bytes();
+                if let Some(mut stdin) = child.stdin.take() {
+                    // Send only configuration on stdin
+                    let _ = stdin.write_all(&curl_cfg_bytes);
+                }
+                crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
 
-        let output = crate::gateway::admin::curl_util::wait_child_bounded(
-            child,
-            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
-            self.connect_timeout + std::time::Duration::from_secs(5),
-            "UniFi Controller REST API",
-        )?;
+                let output = crate::gateway::admin::curl_util::wait_child_bounded(
+                    child,
+                    crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+                    self.connect_timeout + std::time::Duration::from_secs(5),
+                    "UniFi Controller REST API",
+                )?;
 
-        if output.stdout_truncated {
-            return Err(AdminError::CommunicationError(
-                "UniFi Controller response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
-            ));
-        }
+                if output.stdout_truncated {
+                    return Err(AdminError::CommunicationError(
+                        "UniFi Controller response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+                    ));
+                }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        if output.exit_code != 0 {
-            if stderr.contains("SSL")
-                || stderr.contains("certificate")
-                || stderr.contains("schannel")
-            {
-                return Err(AdminError::CommunicationError(format!(
-                    "TLS certificate validation failed for UniFi Controller at '{}': {}. Connection rejected to protect administrative credentials.",
-                    full_url, stderr.trim()
-                )));
-            }
-            if stderr.contains("timed out") || stderr.contains("Operation timed out") {
-                return Err(AdminError::Timeout(format!(
-                    "UniFi API request timed out: {}",
-                    stderr.trim()
-                )));
-            }
-            return Err(AdminError::CommunicationError(format!(
-                "UniFi API request failed (curl exit code {:?}): {}",
-                output.exit_code,
-                stderr.trim()
-            )));
-        }
-
-        // Parse JSON response
-        let parsed: Value = serde_json::from_str(&stdout).map_err(|e| {
-            AdminError::CommunicationError(format!(
-                "Invalid JSON response from UniFi Controller: {} (Raw: {})",
-                e,
-                stdout.trim()
-            ))
-        })?;
-
-        // Inspect UniFi error envelopes: { "meta": { "rc": "error", "msg": "..." } }
-        if let Some(meta) = parsed.get("meta") {
-            if meta.get("rc").and_then(|r| r.as_str()) == Some("error") {
-                let msg = meta
-                    .get("msg")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Unknown UniFi API Error");
-                if msg.contains("api.err.LoginRequired")
-                    || msg.contains("Unauthorized")
-                    || msg.contains("Invalid")
-                {
-                    return Err(AdminError::AuthenticationFailed(format!(
-                        "UniFi Authentication Error: {}",
-                        msg
+                if output.exit_code != 0 {
+                    if stderr.contains("SSL")
+                        || stderr.contains("certificate")
+                        || stderr.contains("schannel")
+                    {
+                        return Err(AdminError::CommunicationError(format!(
+                            "TLS certificate validation failed for UniFi Controller at '{}': {}. Connection rejected to protect administrative credentials.",
+                            full_url, stderr.trim()
+                        )));
+                    }
+                    if stderr.contains("timed out") || stderr.contains("Operation timed out") {
+                        return Err(AdminError::Timeout(format!(
+                            "UniFi API request timed out: {}",
+                            stderr.trim()
+                        )));
+                    }
+                    return Err(AdminError::CommunicationError(format!(
+                        "UniFi API request failed (curl exit code {:?}): {}",
+                        output.exit_code,
+                        stderr.trim()
                     )));
                 }
-                return Err(AdminError::TransactionFailed(format!(
-                    "UniFi API Error: {}",
-                    msg
-                )));
-            }
-        }
 
-        Ok(parsed)
+                // Parse JSON response
+                let parsed: Value = serde_json::from_str(&stdout).map_err(|e| {
+                    AdminError::CommunicationError(format!(
+                        "Invalid JSON response from UniFi Controller: {} (Raw: {})",
+                        e,
+                        stdout.trim()
+                    ))
+                })?;
+
+                // Inspect UniFi error envelopes: { "meta": { "rc": "error", "msg": "..." } }
+                if let Some(meta) = parsed.get("meta") {
+                    if meta.get("rc").and_then(|r| r.as_str()) == Some("error") {
+                        let msg = meta
+                            .get("msg")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown UniFi API Error");
+                        if msg.contains("api.err.LoginRequired")
+                            || msg.contains("Unauthorized")
+                            || msg.contains("Invalid")
+                        {
+                            return Err(AdminError::AuthenticationFailed(format!(
+                                "UniFi Authentication Error: {}",
+                                msg
+                            )));
+                        }
+                        return Err(AdminError::TransactionFailed(format!(
+                            "UniFi API Error: {}",
+                            msg
+                        )));
+                    }
+                }
+
+                Ok(parsed)
+            },
+        )
     }
 }
 

@@ -58,6 +58,18 @@ impl fmt::Display for PolicyScope {
     }
 }
 
+impl PolicyScope {
+    /// Determines whether two policy scopes overlap or conflict
+    pub fn conflicts_with(&self, other: &PolicyScope) -> bool {
+        match (self, other) {
+            (PolicyScope::NetworkWide, _) | (_, PolicyScope::NetworkWide) => true,
+            (PolicyScope::SpecificTargets(a), PolicyScope::SpecificTargets(b)) => {
+                a.iter().any(|target_a| b.contains(target_a))
+            }
+        }
+    }
+}
+
 /// Temporal duration for an administrative policy
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyDuration {
@@ -349,3 +361,65 @@ impl fmt::Display for AdminError {
 }
 
 impl std::error::Error for AdminError {}
+
+impl AdminError {
+    /// Determines whether this error represents an ambiguous mutation outcome
+    /// where the request may have reached the router but completion evidence was lost.
+    pub fn is_ambiguous_outcome(&self) -> bool {
+        match self {
+            Self::Timeout(_) | Self::CommunicationError(_) => true,
+            Self::TransactionFailed(msg) => {
+                let lower = msg.to_ascii_lowercase();
+                (lower.contains("timeout")
+                    || lower.contains("timed out")
+                    || lower.contains("communication error")
+                    || lower.contains("recv failure")
+                    || lower.contains("connection was aborted")
+                    || lower.contains("connection reset")
+                    || lower.contains("empty reply")
+                    || lower.contains("uncertain")
+                    || lower.contains("unknown outcome"))
+                    && !lower.contains("curl not found")
+                    && !lower.contains("temporary payload file")
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Semantic classification of administrative operations to control retry safety and outcome uncertainty
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OperationSemantics {
+    /// Safe, repeatable read-only query or status check
+    ReadOnly,
+    /// State-changing mutation that alters firewall rules, access lists, or router settings
+    StateChanging,
+    /// Unclassified or ambiguous operation; fails closed with zero retries
+    Unknown,
+}
+
+impl OperationSemantics {
+    /// Maximum allowed execution attempts for this operation type.
+    /// Mutations and unknown operations are strictly single-attempt (zero automatic retries).
+    pub fn max_attempts(&self) -> usize {
+        match self {
+            Self::ReadOnly => 2,
+            Self::StateChanging | Self::Unknown => 1,
+        }
+    }
+
+    /// Whether this operation is permitted to retry on transient connection failure.
+    pub fn allows_retry(&self) -> bool {
+        self.max_attempts() > 1
+    }
+}
+
+impl fmt::Display for OperationSemantics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadOnly => write!(f, "ReadOnly"),
+            Self::StateChanging => write!(f, "StateChanging"),
+            Self::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
