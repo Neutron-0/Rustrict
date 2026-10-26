@@ -14,14 +14,33 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone)]
 pub enum FailMode {
     HttpError(u16, String),
-    SoapFault { code: String, message: String },
+    SoapFault {
+        code: String,
+        message: String,
+    },
     MalformedJson,
     MalformedXml,
     OversizedResponse(usize),
     Redirect(String),
     Timeout(Duration),
     ConnectionDrop,
-    MultiTargetPartialFail { succeed_targets: usize },
+    MultiTargetPartialFail {
+        succeed_targets: usize,
+    },
+    /// Mutates router state, but immediately drops TCP connection before sending response
+    MutateThenDrop,
+    /// Mutates router state, but writes partial response headers before dropping connection
+    MutateThenPartialResponse,
+    /// Mutates router state, then delays response beyond client deadline
+    MutateThenTimeout(Duration),
+    /// Mutates router state, but returns an HTTP 500 server error
+    MutateThenServerError(u16, String),
+    /// Drops connection during read-only queries
+    ReadOnlyDrop,
+    /// Allows N targets to succeed, fails target N+1, and when rollback is attempted, rollback also fails
+    MultiTargetPartialWithRollbackFail {
+        succeed_targets: usize,
+    },
 }
 
 /// Sanitized record of an incoming HTTP request observed by the simulator
@@ -330,6 +349,84 @@ impl RouterEmulator {
                     }
                     *count += 1;
                 }
+                FailMode::MutateThenDrop => {
+                    if Self::apply_simulated_mutation(
+                        &path,
+                        &method,
+                        &soap_action,
+                        &body_raw,
+                        &state,
+                    ) {
+                        return;
+                    }
+                }
+                FailMode::MutateThenPartialResponse => {
+                    if Self::apply_simulated_mutation(
+                        &path,
+                        &method,
+                        &soap_action,
+                        &body_raw,
+                        &state,
+                    ) {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"status\":");
+                        let _ = stream.flush();
+                        return;
+                    }
+                }
+                FailMode::MutateThenTimeout(dur) => {
+                    if Self::apply_simulated_mutation(
+                        &path,
+                        &method,
+                        &soap_action,
+                        &body_raw,
+                        &state,
+                    ) {
+                        thread::sleep(dur);
+                        return;
+                    }
+                }
+                FailMode::MutateThenServerError(code, ref msg) => {
+                    if Self::apply_simulated_mutation(
+                        &path,
+                        &method,
+                        &soap_action,
+                        &body_raw,
+                        &state,
+                    ) {
+                        let resp = format!(
+                            "HTTP/1.1 {} Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            code, msg.len(), msg
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        return;
+                    }
+                }
+                FailMode::ReadOnlyDrop => {
+                    if method == "GET"
+                        || (is_soap && !soap_action.contains("DisallowWANAccessByIP"))
+                    {
+                        return;
+                    }
+                }
+                FailMode::MultiTargetPartialWithRollbackFail { succeed_targets } => {
+                    let is_rollback = (is_soap
+                        && body_raw.contains("<NewDisallow>0</NewDisallow>"))
+                        || (method == "DELETE" && path.contains("firewall"));
+                    if is_rollback {
+                        let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 30\r\nConnection: close\r\n\r\n{\"error\":\"Rollback rejected\"}";
+                        let _ = stream.write_all(resp.as_bytes());
+                        return;
+                    }
+                    if Self::is_mutation(&path, &method, &soap_action, &body_raw) {
+                        let mut count = mutation_count.lock().unwrap();
+                        if *count >= succeed_targets {
+                            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 38\r\nConnection: close\r\n\r\n{\"error\":\"Target rule mutation failed\"}";
+                            let _ = stream.write_all(resp.as_bytes());
+                            return;
+                        }
+                        *count += 1;
+                    }
+                }
             }
         }
 
@@ -358,6 +455,71 @@ impl RouterEmulator {
 
         let _ = stream.flush();
         let _ = stream.shutdown(std::net::Shutdown::Write);
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let mut drain = [0u8; 512];
+        while let Ok(n) = stream.read(&mut drain) {
+            if n == 0 {
+                break;
+            }
+        }
+    }
+
+    fn is_mutation(path: &str, method: &str, soap_action: &str, body_raw: &str) -> bool {
+        if soap_action.contains("DisallowWANAccessByIP") {
+            return body_raw.contains("<NewIPv4Address>");
+        }
+        if (path.contains("trafficrule")
+            || path.contains("trafficrules")
+            || path.contains("firewallrule"))
+            && (method == "POST" || method == "PUT" || method == "DELETE")
+        {
+            return true;
+        }
+        if path.starts_with("/rest/ip/firewall/filter")
+            && (method == "POST" || method == "PUT" || method == "DELETE")
+        {
+            return true;
+        }
+        false
+    }
+
+    fn apply_simulated_mutation(
+        path: &str,
+        method: &str,
+        soap_action: &str,
+        body_raw: &str,
+        state: &Arc<Mutex<SimulatedRouterState>>,
+    ) -> bool {
+        if soap_action.contains("DisallowWANAccessByIP") {
+            if body_raw.contains("<NewDisallow>1</NewDisallow>") {
+                if let Some(start) = body_raw.find("<NewIPv4Address>") {
+                    let s = &body_raw[start + "<NewIPv4Address>".len()..];
+                    if let Some(end) = s.find("</NewIPv4Address>") {
+                        if let Ok(ip) = s[..end].trim().parse::<Ipv4Addr>() {
+                            state.lock().unwrap().avm_blocked_ips.insert(ip);
+                            return true;
+                        }
+                    }
+                }
+            }
+        } else if (path.contains("trafficrule")
+            || path.contains("trafficrules")
+            || path.contains("firewallrule"))
+            && method == "POST"
+        {
+            if let Ok(val) = serde_json::from_str::<Value>(body_raw) {
+                state.lock().unwrap().unifi_rules.push(val);
+                return true;
+            }
+        } else if path.starts_with("/rest/ip/firewall/filter")
+            && (method == "POST" || method == "PUT")
+        {
+            if let Ok(val) = serde_json::from_str::<Value>(body_raw) {
+                state.lock().unwrap().mikrotik_rules.push(val);
+                return true;
+            }
+        }
+        false
     }
 
     fn handle_openwrt_ubus(
