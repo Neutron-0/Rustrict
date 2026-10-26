@@ -414,3 +414,175 @@ fn test_registry_unrecognized_provider_rejected() {
         other => panic!("Expected UnsupportedOperation, got {:?}", other),
     }
 }
+
+#[test]
+fn test_real_provider_failure_never_triggers_mock_or_arp_fallback() {
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = RouterRegistry::new(gateway_ip);
+
+    // Initial state: not connected
+    assert!(!registry.is_connected());
+    assert_eq!(registry.active_provider_id(), None);
+
+    // Attempting to connect with an invalid/unreachable real provider endpoint
+    let unifi_provider = Arc::new(rustrict::gateway::admin::UnifiAdminProvider::new(
+        gateway_ip,
+        "https://127.0.0.1:65534",
+    ));
+
+    // Connect attempt fails because no transport or mock was injected and port is closed
+    let connect_res = registry.connect("unifi-rest", unifi_provider, "https://127.0.0.1:65534");
+    assert!(
+        connect_res.is_err(),
+        "Real provider connection to unreachable endpoint must fail"
+    );
+
+    // CRITICAL: Registry must remain disconnected and MUST NOT fall back to mock or ARP spoofing!
+    assert!(
+        !registry.is_connected(),
+        "Registry must not be marked connected on failure"
+    );
+    assert_eq!(
+        registry.active_provider_id(),
+        None,
+        "Active provider ID must remain None"
+    );
+    assert!(!registry.is_authenticated(), "Must not be authenticated");
+
+    let status = registry.get_status();
+    assert!(!status.is_connected);
+    assert_eq!(status.provider_id, None);
+    assert_ne!(
+        status.provider_id,
+        Some("mock".to_string()),
+        "Must NEVER fall back to mock provider"
+    );
+
+    // Mutation calls must fail closed with UnsupportedOperation
+    let req = OperationPlanRequest::new(
+        PolicyScope::SpecificTargets(vec![Ipv4Addr::new(192, 168, 1, 99)]),
+        PolicyDuration::Indefinite,
+        PolicyPersistence::VolatileSession,
+    );
+    match registry.apply_policy(&req) {
+        Err(AdminError::UnsupportedOperation(msg)) => {
+            assert!(msg.contains("No router provider is currently connected"));
+        }
+        other => panic!("Expected UnsupportedOperation, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_capability_preflight_fails_closed_before_mutation() {
+    use rustrict::gateway::admin::{AvmAdminProvider, MockAvmTransport, RouterCredentials};
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = RouterRegistry::new(gateway_ip);
+
+    // Connect AVM provider with mock transport
+    let mock_avm_transport = Box::new(MockAvmTransport::default());
+    let avm_provider = Arc::new(
+        AvmAdminProvider::new(gateway_ip, "https://192.168.1.1:49443/tr64desc.xml")
+            .with_transport(mock_avm_transport),
+    );
+    avm_provider.set_credentials(RouterCredentials::new("admin", "admin_password"));
+
+    registry
+        .connect(
+            "avm-tr064",
+            avm_provider.clone(),
+            "https://192.168.1.1:49443",
+        )
+        .expect("Connect to AVM succeeds");
+
+    // Inspect capabilities: AVM does not support autonomous recovery (it has no on-router cron/timer)
+    let caps = registry.inspect_capabilities();
+    assert_eq!(
+        caps.timed_policy_auto_recovery,
+        CapabilityClassification::NotImplemented
+    );
+
+    // Planning or applying a temporary policy requiring autonomous recovery must fail closed
+    let req = OperationPlanRequest::new(
+        PolicyScope::SpecificTargets(vec![Ipv4Addr::new(192, 168, 178, 20)]),
+        PolicyDuration::Temporary(Duration::from_secs(600)),
+        PolicyPersistence::VolatileSession,
+    );
+
+    // Dry-run planning informs operator that autonomous recovery is unsupported
+    let plan = registry
+        .plan_operation(&req)
+        .expect("Planning dry-run succeeds");
+    assert!(
+        plan.recovery_mechanism.contains("UNSUPPORTED"),
+        "Dry-run plan must explicitly flag unsupported autonomous recovery: {:?}",
+        plan.recovery_mechanism
+    );
+
+    // Applying temporary policy must fail closed because AVM lacks on-router autonomous recovery
+    let apply_err = registry
+        .apply_policy(&req)
+        .expect_err("Applying must fail closed");
+    match apply_err {
+        AdminError::UnsupportedOperation(msg) => {
+            assert!(
+                msg.contains("autonomous") || msg.contains("recovery") || msg.contains("temporary")
+            );
+        }
+        other => panic!("Expected UnsupportedOperation, got {:?}", other),
+    }
+
+    // Router must have zero active policies
+    let active = registry
+        .query_active_policies()
+        .expect("query active succeeds");
+    assert!(
+        active.is_empty(),
+        "Failed preflight must leave zero active policies"
+    );
+}
+
+#[test]
+fn test_read_only_diagnostics_and_inventory_perform_zero_mutations() {
+    use rustrict::gateway::admin::{PolicyExecutionEngine, PolicyStore};
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock.clone(), "internal://mock-safety")
+        .expect("Connect mock succeeds");
+
+    let store = Arc::new(PolicyStore::in_memory());
+    let engine = PolicyExecutionEngine::with_store(registry.clone(), store.clone());
+
+    // Initial state: 0 active policies
+    let before_policies = registry.query_active_policies().expect("query before");
+    assert_eq!(before_policies.len(), 0);
+
+    // Run diagnostics multiple times
+    let diag_report = engine.run_diagnostics();
+    assert_eq!(diag_report.provider_id, "mock");
+
+    // Retrieve inventory
+    let inventory = engine.get_inventory();
+    assert!(!inventory.is_empty(), "Inventory items should be returned");
+
+    // After all diagnostics and inventory queries, verify active policies and store remain completely empty
+    let after_policies = registry.query_active_policies().expect("query after");
+    assert_eq!(
+        after_policies.len(),
+        0,
+        "Read-only diagnostics and inventory must perform zero mutations"
+    );
+    assert_eq!(
+        store.records().len(),
+        0,
+        "No records should be written by read-only operations"
+    );
+    assert_eq!(
+        store.historical_policies().len(),
+        0,
+        "No active policies should be persisted by read-only operations"
+    );
+}
