@@ -163,14 +163,23 @@ impl UnifiTransport for HttpUnifiTransport {
         }
         crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
 
-        let output = child.wait_with_output().map_err(|e| {
-            AdminError::CommunicationError(format!("Failed to wait for curl.exe output: {}", e))
-        })?;
+        let output = crate::gateway::admin::curl_util::wait_child_bounded(
+            child,
+            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+            self.connect_timeout + std::time::Duration::from_secs(5),
+            "UniFi Controller REST API",
+        )?;
+
+        if output.stdout_truncated {
+            return Err(AdminError::CommunicationError(
+                "UniFi Controller response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+            ));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        if !output.status.success() {
+        if output.exit_code != 0 {
             if stderr.contains("SSL")
                 || stderr.contains("certificate")
                 || stderr.contains("schannel")
@@ -188,7 +197,7 @@ impl UnifiTransport for HttpUnifiTransport {
             }
             return Err(AdminError::CommunicationError(format!(
                 "UniFi API request failed (curl exit code {:?}): {}",
-                output.status.code(),
+                output.exit_code,
                 stderr.trim()
             )));
         }

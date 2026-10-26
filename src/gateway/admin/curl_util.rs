@@ -118,6 +118,118 @@ impl Drop for AutoCleanFile {
     }
 }
 
+/// Maximum permitted stdout/stderr retained buffer size for router administrative subprocesses (2 MiB).
+pub const MAX_SUBPROCESS_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Drains an arbitrary Read stream into a bounded buffer, continuing to drain into a discard buffer upon reaching max_bytes.
+pub fn read_bounded_pipe<R: std::io::Read>(mut reader: R, max_bytes: usize) -> (Vec<u8>, bool) {
+    let mut retained = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if retained.len() < max_bytes {
+                    let to_take = n.min(max_bytes - retained.len());
+                    retained.extend_from_slice(&chunk[..to_take]);
+                    if to_take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+
+    (retained, truncated)
+}
+
+/// Bounded output from a child process execution.
+#[derive(Debug, Clone)]
+pub struct BoundedChildOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub exit_code: i32,
+}
+
+/// Waits for a child process to terminate within a timeout, draining stdout and stderr through background
+/// reader threads with bounded memory buffers.
+pub fn wait_child_bounded(
+    mut child: std::process::Child,
+    max_output_bytes: usize,
+    timeout: std::time::Duration,
+    operation_desc: &str,
+) -> Result<BoundedChildOutput, AdminError> {
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        if let Some(pipe) = stdout_pipe {
+            read_bounded_pipe(pipe, max_output_bytes)
+        } else {
+            (Vec::new(), false)
+        }
+    });
+
+    let stderr_handle = std::thread::spawn(move || {
+        if let Some(pipe) = stderr_pipe {
+            read_bounded_pipe(pipe, max_output_bytes)
+        } else {
+            (Vec::new(), false)
+        }
+    });
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(AdminError::Timeout(format!(
+                        "Operation '{}' timed out after {:.1}s",
+                        operation_desc,
+                        timeout.as_secs_f64()
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(AdminError::CommunicationError(format!(
+                    "Error monitoring process for '{}': {}",
+                    operation_desc, e
+                )));
+            }
+        }
+    };
+
+    let (stdout, stdout_truncated) = stdout_handle.join().unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_handle.join().unwrap_or_default();
+    let exit_code = status.code().unwrap_or(-1);
+
+    Ok(BoundedChildOutput {
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+        exit_code,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +265,23 @@ mod tests {
             !file_path.exists(),
             "Temporary file must be deleted upon Drop"
         );
+    }
+
+    #[test]
+    fn test_read_bounded_pipe_within_limit() {
+        let data = b"Hello, router administrative interface!";
+        let cursor = std::io::Cursor::new(data);
+        let (retained, truncated) = read_bounded_pipe(cursor, 1024);
+        assert_eq!(retained, data);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn test_read_bounded_pipe_exceeding_limit() {
+        let data = vec![b'X'; 50 * 1024]; // 50 KiB
+        let cursor = std::io::Cursor::new(&data);
+        let (retained, truncated) = read_bounded_pipe(cursor, 10 * 1024); // 10 KiB cap
+        assert_eq!(retained.len(), 10 * 1024);
+        assert!(truncated);
     }
 }

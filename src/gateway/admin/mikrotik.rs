@@ -168,11 +168,20 @@ impl MikroTikTransport for HttpsMikroTikTransport {
         }
         crate::gateway::admin::credentials::zero_slice(&mut stdin_bytes);
 
-        let output = child.wait_with_output().map_err(|e| {
-            AdminError::CommunicationError(format!("Failed waiting for HTTPS request: {}", e))
-        })?;
+        let output = crate::gateway::admin::curl_util::wait_child_bounded(
+            child,
+            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+            self.request_timeout + std::time::Duration::from_secs(5),
+            "MikroTik REST HTTPS",
+        )?;
 
-        let exit_code = output.status.code().unwrap_or(-1);
+        if output.stdout_truncated {
+            return Err(AdminError::CommunicationError(
+                "MikroTik REST response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+            ));
+        }
+
+        let exit_code = output.exit_code;
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 

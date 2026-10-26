@@ -120,6 +120,20 @@ pub struct SshOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+impl SshOutput {
+    pub fn new(stdout: impl Into<String>, stderr: impl Into<String>, exit_code: i32) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
 }
 
 /// Abstraction for SSH subprocess execution.
@@ -230,26 +244,30 @@ impl SshCommandExecutor for ProcessSshExecutor {
             AdminError::CommunicationError(format!("Failed to spawn SSH subprocess: {}", e))
         })?;
 
-        // Drain stdout and stderr in background threads to prevent pipe buffer deadlocks
+        // Drain stdout and stderr in background threads with bounded memory caps to prevent pipe deadlocks
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
         let stdout_handle = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut s) = stdout_pipe {
-                use std::io::Read;
-                let _ = s.read_to_end(&mut buf);
+            if let Some(pipe) = stdout_pipe {
+                crate::gateway::admin::curl_util::read_bounded_pipe(
+                    pipe,
+                    crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+                )
+            } else {
+                (Vec::new(), false)
             }
-            buf
         });
 
         let stderr_handle = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut s) = stderr_pipe {
-                use std::io::Read;
-                let _ = s.read_to_end(&mut buf);
+            if let Some(pipe) = stderr_pipe {
+                crate::gateway::admin::curl_util::read_bounded_pipe(
+                    pipe,
+                    crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+                )
+            } else {
+                (Vec::new(), false)
             }
-            buf
         });
 
         // Bounded request timeout: connect timeout + execution headroom with child termination
@@ -285,8 +303,8 @@ impl SshCommandExecutor for ProcessSshExecutor {
             }
         };
 
-        let stdout_bytes = stdout_handle.join().unwrap_or_default();
-        let stderr_bytes = stderr_handle.join().unwrap_or_default();
+        let (stdout_bytes, stdout_truncated) = stdout_handle.join().unwrap_or_default();
+        let (stderr_bytes, stderr_truncated) = stderr_handle.join().unwrap_or_default();
 
         // Cleanup temporary known_hosts file if created
         if let Some(kh) = temp_kh_file {
@@ -327,6 +345,8 @@ impl SshCommandExecutor for ProcessSshExecutor {
             stdout,
             stderr,
             exit_code,
+            stdout_truncated,
+            stderr_truncated,
         })
     }
 }
@@ -341,6 +361,7 @@ pub struct MockSshExecutor {
     pub simulate_non_openwrt: Arc<AtomicBool>,
     pub simulate_timeout: Arc<AtomicBool>,
     pub simulate_command_error: Arc<AtomicBool>,
+    pub simulate_oversized_output: Arc<AtomicBool>,
     pub crontab_content: Arc<RwLock<String>>,
     pub watchdog_script_content: Arc<RwLock<Option<String>>>,
     pub firewall_rules: Arc<RwLock<serde_json::Map<String, Value>>>,
@@ -358,6 +379,7 @@ impl Default for MockSshExecutor {
             simulate_non_openwrt: Arc::new(AtomicBool::new(false)),
             simulate_timeout: Arc::new(AtomicBool::new(false)),
             simulate_command_error: Arc::new(AtomicBool::new(false)),
+            simulate_oversized_output: Arc::new(AtomicBool::new(false)),
             crontab_content: Arc::new(RwLock::new(String::new())),
             watchdog_script_content: Arc::new(RwLock::new(None)),
             firewall_rules: Arc::new(RwLock::new(serde_json::Map::new())),
@@ -398,6 +420,16 @@ impl SshCommandExecutor for MockSshExecutor {
     fn execute(&self, _config: &SshConfig, command: &str) -> Result<SshOutput, AdminError> {
         self.executed_commands.write().push(command.to_string());
 
+        if self.simulate_oversized_output.load(Ordering::SeqCst) {
+            return Ok(SshOutput {
+                stdout: "{\"values\":".into(),
+                stderr: "".into(),
+                exit_code: 0,
+                stdout_truncated: true,
+                stderr_truncated: false,
+            });
+        }
+
         if self.simulate_missing_client.load(Ordering::SeqCst) {
             return Err(AdminError::CommunicationError(
                 "OpenSSH client not found. Ensure the Windows Optional Feature 'OpenSSH Client' is installed or 'ssh.exe' is available in System32 / PATH.".into(),
@@ -429,12 +461,16 @@ impl SshCommandExecutor for MockSshExecutor {
                     stdout: "1000\n".into(),
                     stderr: "".into(),
                     exit_code: 0,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                 });
             } else {
                 return Ok(SshOutput {
                     stdout: "0\n".into(),
                     stderr: "".into(),
                     exit_code: 0,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                 });
             }
         }
@@ -448,12 +484,16 @@ impl SshCommandExecutor for MockSshExecutor {
                     stdout: "".into(),
                     stderr: "cat: /etc/crontabs/root: Permission denied".into(),
                     exit_code: 1,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                 });
             }
             return Ok(SshOutput {
                 stdout: self.crontab_content.read().clone(),
                 stderr: "".into(),
                 exit_code: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
             });
         }
 
@@ -469,6 +509,8 @@ impl SshCommandExecutor for MockSshExecutor {
                     .unwrap_or_default(),
                 stderr: "".into(),
                 exit_code: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
             });
         }
 
@@ -483,6 +525,8 @@ impl SshCommandExecutor for MockSshExecutor {
                     stderr: "mkdir: cannot create directory '/etc/rustrict': Read-only file system"
                         .into(),
                     exit_code: 1,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                 });
             }
             if let Some(start) = command.find("printf '%s' '") {
@@ -499,6 +543,8 @@ impl SshCommandExecutor for MockSshExecutor {
                 stdout: "".into(),
                 stderr: "".into(),
                 exit_code: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
             });
         }
 
@@ -511,6 +557,8 @@ impl SshCommandExecutor for MockSshExecutor {
                     stdout: "".into(),
                     stderr: "cannot create /etc/crontabs/root: Permission denied".into(),
                     exit_code: 1,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                 });
             }
             if let Some(start) = command.find("printf '%s' '") {
@@ -525,6 +573,8 @@ impl SshCommandExecutor for MockSshExecutor {
                 stdout: "".into(),
                 stderr: "".into(),
                 exit_code: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
             });
         }
 
@@ -563,6 +613,8 @@ impl SshCommandExecutor for MockSshExecutor {
                                 .to_string(),
                                 stderr: "".into(),
                                 exit_code: 0,
+                                stdout_truncated: false,
+                                stderr_truncated: false,
                             });
                         } else {
                             return Ok(SshOutput {
@@ -581,6 +633,8 @@ impl SshCommandExecutor for MockSshExecutor {
                                 .to_string(),
                                 stderr: "".into(),
                                 exit_code: 0,
+                                stdout_truncated: false,
+                                stderr_truncated: false,
                             });
                         }
                     }
@@ -590,6 +644,8 @@ impl SshCommandExecutor for MockSshExecutor {
                             stdout: json!({ "values": Value::Object(rules) }).to_string(),
                             stderr: "".into(),
                             exit_code: 0,
+                            stdout_truncated: false,
+                            stderr_truncated: false,
                         });
                     }
                     ("uci", "add") => {
@@ -608,6 +664,8 @@ impl SshCommandExecutor for MockSshExecutor {
                             stdout: json!({ "section": sec_id }).to_string(),
                             stderr: "".into(),
                             exit_code: 0,
+                            stdout_truncated: false,
+                            stderr_truncated: false,
                         });
                     }
                     ("uci", "set") => {
@@ -633,6 +691,8 @@ impl SshCommandExecutor for MockSshExecutor {
                             stdout: json!({}).to_string(),
                             stderr: "".into(),
                             exit_code: 0,
+                            stdout_truncated: false,
+                            stderr_truncated: false,
                         });
                     }
                     ("uci", "delete") => {
@@ -646,6 +706,8 @@ impl SshCommandExecutor for MockSshExecutor {
                             stdout: json!({}).to_string(),
                             stderr: "".into(),
                             exit_code: 0,
+                            stdout_truncated: false,
+                            stderr_truncated: false,
                         });
                     }
                     ("uci", "commit") => {
@@ -654,6 +716,8 @@ impl SshCommandExecutor for MockSshExecutor {
                                 stdout: "".into(),
                                 stderr: "uci: I/O error: disk full".into(),
                                 exit_code: 1,
+                                stdout_truncated: false,
+                                stderr_truncated: false,
                             });
                         }
                         *self.uncommitted_rules.write() = None;
@@ -661,6 +725,8 @@ impl SshCommandExecutor for MockSshExecutor {
                             stdout: json!({}).to_string(),
                             stderr: "".into(),
                             exit_code: 0,
+                            stdout_truncated: false,
+                            stderr_truncated: false,
                         });
                     }
                     ("uci", "revert") => {
@@ -671,6 +737,8 @@ impl SshCommandExecutor for MockSshExecutor {
                             stdout: json!({}).to_string(),
                             stderr: "".into(),
                             exit_code: 0,
+                            stdout_truncated: false,
+                            stderr_truncated: false,
                         });
                     }
                     ("uci", "apply") => {
@@ -678,6 +746,8 @@ impl SshCommandExecutor for MockSshExecutor {
                             stdout: json!({}).to_string(),
                             stderr: "".into(),
                             exit_code: 0,
+                            stdout_truncated: false,
+                            stderr_truncated: false,
                         });
                     }
                     _ => {}
@@ -690,6 +760,8 @@ impl SshCommandExecutor for MockSshExecutor {
             stdout: "".into(),
             stderr: "".into(),
             exit_code: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
         })
     }
 }
@@ -866,6 +938,11 @@ impl OpenWrtTransport for SshOpenWrtTransport {
                 };
 
                 let out = self.executor.execute(&self.config, &cmd)?;
+                if out.stdout_truncated {
+                    return Err(AdminError::CommunicationError(
+                        "SSH remote command output exceeded maximum buffer limit (2 MiB); truncated response cannot be safely processed".into(),
+                    ));
+                }
                 if out.exit_code != 0 {
                     return Err(AdminError::CommunicationError(format!(
                         "Failed to write file '{}' over SSH (exit code {}): {}",
@@ -883,6 +960,11 @@ impl OpenWrtTransport for SshOpenWrtTransport {
                 let cmd = format!("ubus call {} {} '{}'", object, method, escaped_params);
 
                 let out = self.executor.execute(&self.config, &cmd)?;
+                if out.stdout_truncated {
+                    return Err(AdminError::CommunicationError(
+                        "SSH remote command output exceeded maximum buffer limit (2 MiB); truncated response cannot be safely processed".into(),
+                    ));
+                }
                 if out.exit_code != 0 {
                     return Err(AdminError::CommunicationError(format!(
                         "SSH remote ubus call {} {} failed (exit code {}): {}",

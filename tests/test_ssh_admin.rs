@@ -513,3 +513,29 @@ fn test_ssh_transport_capabilities_distinction() {
     let auth_cap_authed = format!("{:?}", caps_authed.authenticated_admin_interfaces);
     assert!(auth_cap_authed.contains("Implemented"));
 }
+
+#[test]
+fn test_ssh_oversized_output_with_continued_pipe_draining() {
+    let (provider, executor) = create_mock_ssh_openwrt();
+    provider.login().unwrap();
+
+    // Simulate oversized remote command output that triggers truncation
+    executor
+        .simulate_oversized_output
+        .store(true, Ordering::SeqCst);
+
+    let err = provider
+        .reconcile_policies()
+        .expect_err("Oversized output must be rejected as an unparseable truncated response");
+
+    match err {
+        AdminError::CommunicationError(msg) => {
+            assert!(
+                msg.contains("exceeded maximum buffer limit") || msg.contains("truncated"),
+                "Error message should mention buffer limit/truncation: {}",
+                msg
+            );
+        }
+        other => panic!("Expected CommunicationError, got: {:?}", other),
+    }
+}

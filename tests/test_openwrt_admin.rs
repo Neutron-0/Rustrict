@@ -616,3 +616,101 @@ fn test_openwrt_multi_target_policy_enforcement_and_recovery() {
         assert!(!uci_state.contains_key("cfg_rustrict_pause_192_168_1_103"));
     }
 }
+
+#[test]
+fn test_openwrt_oversized_http_response_rejection() {
+    use rustrict::gateway::admin::openwrt::{HttpOpenWrtTransport, OpenWrtTransport};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Must bind localhost listener");
+    let port = listener.local_addr().unwrap().port();
+
+    let server_handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut req_buf = [0u8; 1024];
+            let _ = stream.read(&mut req_buf);
+
+            // Send HTTP response headers followed by 2.5 MiB of data (exceeding 2 MiB limit)
+            let header =
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2621440\r\n\r\n";
+            let _ = stream.write_all(header);
+            let chunk = [b'A'; 65536]; // 64 KiB
+            for _ in 0..40 {
+                if stream.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let transport = HttpOpenWrtTransport::default();
+    let endpoint = format!("http://127.0.0.1:{}/ubus", port);
+    let err = transport
+        .call(
+            &endpoint,
+            "system",
+            "info",
+            serde_json::json!({}),
+            "session",
+        )
+        .expect_err("Oversized HTTP response must be rejected");
+
+    match err {
+        AdminError::CommunicationError(msg) => {
+            assert!(
+                msg.contains("exceeded maximum buffer limit"),
+                "Error should state buffer limit exceeded: {}",
+                msg
+            );
+        }
+        other => panic!("Expected CommunicationError, got: {:?}", other),
+    }
+
+    let _ = server_handle.join();
+}
+
+#[test]
+fn test_openwrt_unexpected_http_redirect_rejection() {
+    use rustrict::gateway::admin::openwrt::{HttpOpenWrtTransport, OpenWrtTransport};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Must bind localhost listener");
+    let port = listener.local_addr().unwrap().port();
+
+    let server_handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut req_buf = [0u8; 1024];
+            let _ = stream.read(&mut req_buf);
+
+            let resp = b"HTTP/1.1 302 Found\r\nLocation: http://untrusted.host.internal/evil\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp);
+        }
+    });
+
+    let transport = HttpOpenWrtTransport::default();
+    let endpoint = format!("http://127.0.0.1:{}/ubus", port);
+    let err = transport
+        .call(
+            &endpoint,
+            "system",
+            "info",
+            serde_json::json!({}),
+            "session",
+        )
+        .expect_err("HTTP redirect must be rejected to prevent credential forwarding");
+
+    match err {
+        AdminError::SecurityViolation(msg) => {
+            assert!(
+                msg.contains("Unexpected HTTP redirect"),
+                "Error should mention unexpected redirect: {}",
+                msg
+            );
+        }
+        other => panic!("Expected SecurityViolation, got: {:?}", other),
+    }
+
+    let _ = server_handle.join();
+}

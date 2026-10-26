@@ -258,14 +258,23 @@ impl AvmTransport for HttpAvmTransport {
         }
         crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
 
-        let output = child.wait_with_output().map_err(|e| {
-            AdminError::CommunicationError(format!("Failed to wait for curl.exe output: {}", e))
-        })?;
+        let output = crate::gateway::admin::curl_util::wait_child_bounded(
+            child,
+            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+            self.connect_timeout + std::time::Duration::from_secs(5),
+            "AVM TR-064 Challenge",
+        )?;
+
+        if output.stdout_truncated {
+            return Err(AdminError::CommunicationError(
+                "AVM challenge response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+            ));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        if !output.status.success() {
+        if output.exit_code != 0 {
             if stderr.contains("SSL")
                 || stderr.contains("certificate")
                 || stderr.contains("schannel")
@@ -283,7 +292,7 @@ impl AvmTransport for HttpAvmTransport {
             }
             return Err(AdminError::CommunicationError(format!(
                 "AVM TR-064 SOAP request failed (curl exit code {:?}): {}",
-                output.status.code(),
+                output.exit_code,
                 stderr.trim()
             )));
         }
@@ -340,14 +349,23 @@ impl AvmTransport for HttpAvmTransport {
         }
         crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
 
-        let output = child.wait_with_output().map_err(|e| {
-            AdminError::CommunicationError(format!("Failed to wait for curl.exe output: {}", e))
-        })?;
+        let output = crate::gateway::admin::curl_util::wait_child_bounded(
+            child,
+            crate::gateway::admin::curl_util::MAX_SUBPROCESS_OUTPUT_BYTES,
+            self.connect_timeout + std::time::Duration::from_secs(5),
+            "AVM TR-064 Device Description",
+        )?;
+
+        if output.stdout_truncated {
+            return Err(AdminError::CommunicationError(
+                "AVM device description response exceeded maximum buffer limit (2 MiB); truncated response cannot be parsed".into(),
+            ));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        if !output.status.success() {
+        if output.exit_code != 0 {
             if stderr.contains("SSL") || stderr.contains("certificate") {
                 return Err(AdminError::CommunicationError(format!(
                     "TLS certificate validation failed for FRITZ!Box: {}",
@@ -361,7 +379,7 @@ impl AvmTransport for HttpAvmTransport {
             }
             return Err(AdminError::CommunicationError(format!(
                 "Failed to fetch AVM device description (curl exit code {:?}): {}",
-                output.status.code(),
+                output.exit_code,
                 stderr.trim()
             )));
         }

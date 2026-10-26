@@ -98,10 +98,18 @@ impl OpenWrtTransport for HttpOpenWrtTransport {
         let mut response_buf = Vec::new();
         let mut chunk = [0u8; 4096];
         let mut read_timed_out = false;
+        const MAX_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
         loop {
             match stream.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(n) => response_buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    if response_buf.len() + n > MAX_HTTP_RESPONSE_BYTES {
+                        return Err(AdminError::CommunicationError(
+                            "OpenWrt HTTP response exceeded maximum buffer limit (2 MiB)".into(),
+                        ));
+                    }
+                    response_buf.extend_from_slice(&chunk[..n]);
+                }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::TimedOut
                         || e.kind() == std::io::ErrorKind::WouldBlock
@@ -121,6 +129,20 @@ impl OpenWrtTransport for HttpOpenWrtTransport {
 
         let resp_str = String::from_utf8_lossy(&response_buf);
         let body_start = resp_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+        let header_part = &resp_str[..body_start];
+
+        let status_line = header_part.lines().next().unwrap_or("");
+        if status_line.contains(" 301 ")
+            || status_line.contains(" 302 ")
+            || status_line.contains(" 307 ")
+            || status_line.contains(" 308 ")
+        {
+            return Err(AdminError::SecurityViolation(format!(
+                "Unexpected HTTP redirect from router endpoint ({}). Redirection rejected to prevent credential forwarding.",
+                status_line.trim()
+            )));
+        }
+
         let json_part = &resp_str[body_start..];
 
         let parsed: Value = serde_json::from_str(json_part).map_err(|e| {
