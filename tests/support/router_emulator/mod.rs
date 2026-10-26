@@ -155,7 +155,7 @@ impl RouterEmulator {
     }
 
     fn handle_connection(
-        mut stream: TcpStream,
+        stream: TcpStream,
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
         state: Arc<Mutex<SimulatedRouterState>>,
         fail_mode: Arc<Mutex<Option<FailMode>>>,
@@ -165,10 +165,7 @@ impl RouterEmulator {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
-        let mut reader = BufReader::new(match stream.try_clone() {
-            Ok(s) => s,
-            Err(_) => return,
-        });
+        let mut reader = BufReader::new(stream);
 
         // Parse HTTP request line
         let mut request_line = String::new();
@@ -224,8 +221,8 @@ impl RouterEmulator {
             .map(|v| v.to_ascii_lowercase().contains("100-continue"))
             .unwrap_or(false)
         {
-            let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
-            let _ = stream.flush();
+            let _ = reader.get_mut().write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+            let _ = reader.get_mut().flush();
         }
 
         // Parse HTTP body up to bounded limit (max 2 MiB)
@@ -235,6 +232,8 @@ impl RouterEmulator {
         }
         let body_raw = String::from_utf8_lossy(&body_bytes).to_string();
         let sanitized_body = sanitize_text(&body_raw);
+
+        let mut stream = reader.into_inner();
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -354,13 +353,6 @@ impl RouterEmulator {
 
         let _ = stream.flush();
         let _ = stream.shutdown(std::net::Shutdown::Write);
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-        let mut drain = [0u8; 1024];
-        while let Ok(n) = stream.read(&mut drain) {
-            if n == 0 {
-                break;
-            }
-        }
     }
 
     fn handle_openwrt_ubus(
