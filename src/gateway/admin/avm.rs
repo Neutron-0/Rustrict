@@ -54,7 +54,8 @@ pub fn md5_digest(data: &[u8]) -> String {
     }
     msg.extend_from_slice(&orig_len_bits.to_le_bytes());
 
-    for chunk in msg.chunks_exact(64) {
+    let (chunks, _) = msg.as_chunks::<64>();
+    for chunk in chunks {
         let mut m = [0u32; 16];
         for i in 0..16 {
             m[i] = u32::from_le_bytes([

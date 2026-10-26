@@ -28,12 +28,10 @@ fn main() {
     let candidates = vec![
         PathBuf::from("target/release"),
         PathBuf::from(format!(
-            "{}\\anaconda3\\Lib\\site-packages\\pydivert\\windivert_dll",
-            home
+            "{home}\\anaconda3\\Lib\\site-packages\\pydivert\\windivert_dll"
         )),
         PathBuf::from(format!(
-            "{}\\AppData\\Roaming\\Python\\Python313\\site-packages\\pydivert\\windivert_dll",
-            home
+            "{home}\\AppData\\Roaming\\Python\\Python313\\site-packages\\pydivert\\windivert_dll"
         )),
         PathBuf::from("."),
     ];

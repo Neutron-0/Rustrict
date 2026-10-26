@@ -2,6 +2,7 @@
 name = "rustrict"
 version = "2.0.0"
 edition = "2021"
+rust-version = "1.88.0"
 authors = ["Neutron-0"]
 description = "High-performance Windows network bandwidth limiter, traffic shaper, and device manager"
 license = "MIT"

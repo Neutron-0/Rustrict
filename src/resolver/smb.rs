@@ -194,9 +194,10 @@ pub fn parse_ntlmssp_challenge(data: &[u8]) -> Option<String> {
         i += avlen;
 
         // Decode UTF-16LE string
-        let u16_chars: Vec<u16> = val_bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        let (chunks, _) = val_bytes.as_chunks::<2>();
+        let u16_chars: Vec<u16> = chunks
+            .iter()
+            .map(|&[b0, b1]| u16::from_le_bytes([b0, b1]))
             .collect();
         let decoded = String::from_utf16_lossy(&u16_chars);
 

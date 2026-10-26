@@ -151,7 +151,10 @@ impl SsdpScanner {
             if let Some(svc_pos) = xml.find(svc) {
                 // Safely slice window preventing multi-byte UTF-8 char boundary panics
                 let raw_end = std::cmp::min(svc_pos + 1000, xml.len());
-                let window_end = xml.floor_char_boundary(raw_end);
+                let mut window_end = raw_end;
+                while !xml.is_char_boundary(window_end) {
+                    window_end -= 1;
+                }
                 let window = &xml[svc_pos..window_end];
                 if let Some(ctrl) =
                     crate::gateway::soap::SoapClient::extract_tag_value(window, "controlURL")

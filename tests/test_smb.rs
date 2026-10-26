@@ -50,3 +50,41 @@ fn test_ntlmssp_challenge_parsing() {
     let parsed = parse_ntlmssp_challenge(&payload);
     assert_eq!(parsed, Some("VICTIM-LAPTOP".to_string()));
 }
+
+#[test]
+fn test_ntlmssp_challenge_with_odd_trailing_byte() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0x00; 16]); // NetBIOS/SMB prefix padding
+
+    payload.extend_from_slice(b"NTLMSSP\x00\x02\x00\x00\x00"); // 12 bytes
+    payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00]); // 8 bytes
+    payload.extend_from_slice(&[0x05, 0x82, 0x89, 0xe2]); // 4 bytes
+    payload.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]); // 8 bytes
+    payload.extend_from_slice(&[0x00; 8]); // 8 bytes
+
+    let comp_name = "ODD-DEVICE";
+    let mut u16_name: Vec<u8> = comp_name
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    // Intentionally append an odd, incomplete trailing byte to test chunk remainder safety
+    u16_name.push(0xFF);
+
+    let mut target_info = Vec::new();
+    target_info.extend_from_slice(&1u16.to_le_bytes()); // MsvAvNbComputerName (0x0001)
+    target_info.extend_from_slice(&(u16_name.len() as u16).to_le_bytes());
+    target_info.extend_from_slice(&u16_name);
+    target_info.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // EOL
+
+    let target_info_offset = 48u32;
+    let target_info_len = target_info.len() as u16;
+
+    payload.extend_from_slice(&target_info_len.to_le_bytes());
+    payload.extend_from_slice(&target_info_len.to_le_bytes());
+    payload.extend_from_slice(&target_info_offset.to_le_bytes());
+
+    payload.extend_from_slice(&target_info);
+
+    let parsed = parse_ntlmssp_challenge(&payload);
+    assert_eq!(parsed, Some("ODD-DEVICE".to_string()));
+}

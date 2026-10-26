@@ -86,9 +86,10 @@ pub fn extract_x509_cn(data: &[u8]) -> Option<String> {
             }
             0x1e => {
                 // BMPString (UTF-16BE)
-                let u16_chars: Vec<u16> = str_bytes
-                    .chunks_exact(2)
-                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                let (chunks, _) = str_bytes.as_chunks::<2>();
+                let u16_chars: Vec<u16> = chunks
+                    .iter()
+                    .map(|&[b0, b1]| u16::from_be_bytes([b0, b1]))
                     .collect();
                 Some(String::from_utf16_lossy(&u16_chars).trim().to_string())
             }
