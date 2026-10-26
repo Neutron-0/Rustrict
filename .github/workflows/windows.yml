@@ -11,14 +11,14 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Native Windows Verification
+  lint:
+    name: Lint & Static Analysis (Stable)
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Rust toolchain
+      - name: Set up stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -35,5 +35,37 @@ jobs:
       - name: Run Clippy Linter
         run: cargo clippy --all-targets -- -D warnings
 
+  test:
+    name: Test Suite (Stable)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Run Test Suite
+        run: cargo test --all-targets
+
+  msrv:
+    name: MSRV Compatibility (1.88.0)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust 1.88.0 (MSRV)
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check All Targets on MSRV
+        run: cargo check --all-targets
+
+      - name: Run Test Suite on MSRV
         run: cargo test --all-targets
