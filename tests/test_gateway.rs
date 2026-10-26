@@ -1,9 +1,9 @@
-use std::net::Ipv4Addr;
-use std::str::FromStr;
 use rustrict::gateway::hosts::GatewayHostEntry;
 use rustrict::gateway::soap::SoapClient;
 use rustrict::gateway::ssdp::SsdpScanner;
 use rustrict::types::MacAddress;
+use std::net::Ipv4Addr;
+use std::str::FromStr;
 
 #[test]
 fn test_soap_extract_tag_value() {

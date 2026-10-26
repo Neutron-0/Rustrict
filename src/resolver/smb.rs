@@ -8,10 +8,9 @@ use std::time::Duration;
 /// - MsvAvNbDomainName (Workgroup or Domain name)
 pub fn probe_smb_ntlm(ip: Ipv4Addr) -> Option<String> {
     let addr = SocketAddrV4::new(ip, 445);
-    let mut stream = TcpStream::connect_timeout(
-        &std::net::SocketAddr::V4(addr),
-        Duration::from_millis(70),
-    ).ok()?;
+    let mut stream =
+        TcpStream::connect_timeout(&std::net::SocketAddr::V4(addr), Duration::from_millis(70))
+            .ok()?;
 
     let _ = stream.set_read_timeout(Some(Duration::from_millis(80)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(80)));
@@ -22,35 +21,33 @@ pub fn probe_smb_ntlm(ip: Ipv4Addr) -> Option<String> {
     // SMB2 Negotiate Protocol packet with dialect 0x0202 (SMB 2.0.2)
     let smb2_negotiate: &[u8] = &[
         // NetBIOS Session Service: Length 0x000044
-        0x00, 0x00, 0x00, 0x44,
-        // SMB2 Header
+        0x00, 0x00, 0x00, 0x44, // SMB2 Header
         0xfe, b'S', b'M', b'B', // Protocol Id: \xfeSMB
-        0x40, 0x00,             // Header Length: 64
-        0x00, 0x00,             // Credit Charge
-        0x00, 0x00,             // Channel Sequence / Reserved
-        0x00, 0x00,             // Status: 0
-        0x00, 0x00,             // Command: Negotiate (0)
-        0x00, 0x00,             // Credits Requested
+        0x40, 0x00, // Header Length: 64
+        0x00, 0x00, // Credit Charge
+        0x00, 0x00, // Channel Sequence / Reserved
+        0x00, 0x00, // Status: 0
+        0x00, 0x00, // Command: Negotiate (0)
+        0x00, 0x00, // Credits Requested
         0x00, 0x00, 0x00, 0x00, // Flags
         0x00, 0x00, 0x00, 0x00, // Next Command
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Message Id: 0
         0xfe, 0xff, 0x00, 0x00, // Process Id
         0x00, 0x00, 0x00, 0x00, // Tree Id
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Session Id
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Signature
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // Signature
         // SMB2 Negotiate Request Body (36 bytes)
-        0x24, 0x00,             // StructureSize: 36
-        0x02, 0x00,             // DialectCount: 2
-        0x01, 0x00,             // SecurityMode: Signing enabled
-        0x00, 0x00,             // Reserved
+        0x24, 0x00, // StructureSize: 36
+        0x02, 0x00, // DialectCount: 2
+        0x01, 0x00, // SecurityMode: Signing enabled
+        0x00, 0x00, // Reserved
         0x00, 0x00, 0x00, 0x00, // Capabilities
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ClientGuid
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // ClientGuid
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // NegotiateContext
         // Dialects: SMB 2.0.2 (0x0202), SMB 2.1 (0x0210)
-        0x02, 0x02,
-        0x10, 0x02,
+        0x02, 0x02, 0x10, 0x02,
     ];
 
     if stream.write_all(smb2_negotiate).is_err() {
@@ -70,18 +67,16 @@ pub fn probe_smb_ntlm(ip: Ipv4Addr) -> Option<String> {
 
     // Extract Session Id from Negotiate Response to use in Session Setup
     let session_id = [
-        buf[44], buf[45], buf[46], buf[47],
-        buf[48], buf[49], buf[50], buf[51],
+        buf[44], buf[45], buf[46], buf[47], buf[48], buf[49], buf[50], buf[51],
     ];
 
     // 2. Send SMB2 Session Setup Request containing NTLMSSP NEGOTIATE (Type 1)
     // NTLMSSP Negotiate payload:
     let ntlm_negotiate: &[u8] = &[
         b'N', b'T', b'L', b'M', b'S', b'S', b'P', 0x00, // Signature: NTLMSSP
-        0x01, 0x00, 0x00, 0x00,                         // Type: 1 (Negotiate)
+        0x01, 0x00, 0x00, 0x00, // Type: 1 (Negotiate)
         // Flags: Negotiate Unicode, OEM, Request Target, NTLM, Workstation Supplied, Domain Supplied
-        0x07, 0x82, 0x08, 0x62,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Domain
+        0x07, 0x82, 0x08, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Domain
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Workstation
     ];
 
@@ -91,18 +86,11 @@ pub fn probe_smb_ntlm(ip: Ipv4Addr) -> Option<String> {
     setup_pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
     // SMB2 Header
     setup_pkt.extend_from_slice(&[
-        0xfe, b'S', b'M', b'B',
-        0x40, 0x00,
-        0x00, 0x00,
-        0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00,             // Command: Session Setup (1)
-        0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Message Id: 1
-        0xfe, 0xff, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
+        0xfe, b'S', b'M', b'B', 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x00, // Command: Session Setup (1)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, // Message Id: 1
+        0xfe, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]);
     setup_pkt.extend_from_slice(&session_id);
     setup_pkt.extend_from_slice(&[0x00; 16]); // Signature
@@ -111,14 +99,30 @@ pub fn probe_smb_ntlm(ip: Ipv4Addr) -> Option<String> {
     let sec_offset = 64 + 24; // 88
     let sec_len = ntlm_negotiate.len() as u16;
     setup_pkt.extend_from_slice(&[
-        0x19, 0x00,                         // StructureSize: 25
-        0x00,                               // Flags
-        0x01,                               // SecurityMode
-        0x00, 0x00, 0x00, 0x00,             // Capabilities
-        0x00, 0x00, 0x00, 0x00,             // Channel
-        (sec_offset & 0xff) as u8, ((sec_offset >> 8) & 0xff) as u8, // SecurityBufferOffset
-        (sec_len & 0xff) as u8, ((sec_len >> 8) & 0xff) as u8,       // SecurityBufferLength
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // PreviousSessionId
+        0x19,
+        0x00, // StructureSize: 25
+        0x00, // Flags
+        0x01, // SecurityMode
+        0x00,
+        0x00,
+        0x00,
+        0x00, // Capabilities
+        0x00,
+        0x00,
+        0x00,
+        0x00, // Channel
+        (sec_offset & 0xff) as u8,
+        ((sec_offset >> 8) & 0xff) as u8, // SecurityBufferOffset
+        (sec_len & 0xff) as u8,
+        ((sec_len >> 8) & 0xff) as u8, // SecurityBufferLength
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00, // PreviousSessionId
     ]);
     setup_pkt.extend_from_slice(ntlm_negotiate);
 
@@ -156,9 +160,8 @@ pub fn parse_ntlmssp_challenge(data: &[u8]) -> Option<String> {
 
     // Target Info Fields at challenge offset 40 (length: u16, max_len: u16, offset: u32)
     let target_info_len = u16::from_le_bytes([challenge[40], challenge[41]]) as usize;
-    let target_info_offset = u32::from_le_bytes([
-        challenge[44], challenge[45], challenge[46], challenge[47],
-    ]) as usize;
+    let target_info_offset =
+        u32::from_le_bytes([challenge[44], challenge[45], challenge[46], challenge[47]]) as usize;
 
     if target_info_offset + target_info_len > challenge.len() {
         return None;

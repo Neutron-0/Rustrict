@@ -1,10 +1,10 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use parking_lot::RwLock;
 
 use crate::spoofer::raw_l2::{craft_arp_reply, RawL2Sender};
 use crate::types::{Host, HostStatus, MacAddress};
@@ -62,7 +62,12 @@ impl ArpSpoofer {
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        let targets = self.targets.write().drain().map(|(_, h)| h).collect::<Vec<_>>();
+        let targets = self
+            .targets
+            .write()
+            .drain()
+            .map(|(_, h)| h)
+            .collect::<Vec<_>>();
         for host in targets {
             self.restore(&host);
         }

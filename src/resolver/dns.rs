@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 /// Performs reverse DNS lookup using native Windows WinSock getnameinfo
 pub fn query_reverse_dns(ip: Ipv4Addr) -> Option<String> {
     use windows_sys::Win32::Networking::WinSock::{
-        getnameinfo, SOCKADDR, SOCKADDR_IN, NI_NAMEREQD,
+        getnameinfo, NI_NAMEREQD, SOCKADDR, SOCKADDR_IN,
     };
 
     let mut sa: SOCKADDR_IN = unsafe { std::mem::zeroed() };

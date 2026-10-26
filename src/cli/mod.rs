@@ -8,4 +8,3 @@ pub use prompt::RustrictCli;
 pub use table::{
     render_findings_table, render_hosts_table, render_scope_table, render_services_table,
 };
-

@@ -5,7 +5,7 @@ pub struct RadiotapHeader {
     pub length: u16,
     pub present_flags: u32,
     pub channel_freq: Option<u16>, // e.g. 2412 MHz (Ch 1), 5180 MHz (Ch 36)
-    pub dbm_signal: Option<i8>,     // e.g. -45 dBm
+    pub dbm_signal: Option<i8>,    // e.g. -45 dBm
 }
 
 impl RadiotapHeader {

@@ -37,7 +37,8 @@ pub fn audit_tls_posture(ip: Ipv4Addr, port: u16) -> Vec<AuditFinding> {
                         let session_id_len = buf[43] as usize;
                         let cipher_offset = 44 + session_id_len;
                         if cipher_offset + 2 <= n {
-                            let cipher = u16::from_be_bytes([buf[cipher_offset], buf[cipher_offset + 1]]);
+                            let cipher =
+                                u16::from_be_bytes([buf[cipher_offset], buf[cipher_offset + 1]]);
                             if is_weak_cipher(cipher) {
                                 findings.push(AuditFinding::new(
                                     "SEC-TLS-WEAK-CIPHER",

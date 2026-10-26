@@ -1,11 +1,11 @@
+use crate::types::MacAddress;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use parking_lot::RwLock;
-use crate::types::MacAddress;
 
 pub struct PassiveIdentitySniffer {
     entries: Arc<RwLock<HashMap<Ipv4Addr, (MacAddress, String)>>>,
@@ -90,9 +90,14 @@ fn run_passive_loop(
 
     let open_fn: PcapOpenLiveFn = unsafe {
         let name = CString::new("pcap_open_live").unwrap();
-        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            h_module,
+            name.as_ptr() as *const u8,
+        );
         match addr {
-            Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapOpenLiveFn>(f),
+            Some(f) => {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapOpenLiveFn>(f)
+            }
             None => {
                 crate::platform::free_library(h_module);
                 return;
@@ -102,7 +107,10 @@ fn run_passive_loop(
 
     let next_ex_fn: PcapNextExFn = unsafe {
         let name = CString::new("pcap_next_ex").unwrap();
-        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            h_module,
+            name.as_ptr() as *const u8,
+        );
         match addr {
             Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapNextExFn>(f),
             None => {
@@ -114,7 +122,10 @@ fn run_passive_loop(
 
     let close_fn: PcapCloseFn = unsafe {
         let name = CString::new("pcap_close").unwrap();
-        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            h_module,
+            name.as_ptr() as *const u8,
+        );
         match addr {
             Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, PcapCloseFn>(f),
             None => {
@@ -129,7 +140,9 @@ fn run_passive_loop(
     // Open with 200ms timeout for non-blocking loop
     let pcap_handle = unsafe { open_fn(c_dev.as_ptr(), 1500, 1, 200, errbuf.as_mut_ptr()) };
     if pcap_handle.is_null() {
-        unsafe { crate::platform::free_library(h_module); }
+        unsafe {
+            crate::platform::free_library(h_module);
+        }
         return;
     }
 
@@ -187,13 +200,19 @@ pub fn parse_dhcp_or_broadcast(data: &[u8]) -> Option<(Ipv4Addr, MacAddress, Str
     let udp_payload = &udp_data[8..];
 
     // Check DHCP (ports 67 or 68)
-    if (src_port == 67 || src_port == 68 || dst_port == 67 || dst_port == 68) && udp_payload.len() > 240 {
+    if (src_port == 67 || src_port == 68 || dst_port == 67 || dst_port == 68)
+        && udp_payload.len() > 240
+    {
         // DHCP Magic Cookie: 0x63, 0x82, 0x53, 0x63 at offset 236
         if udp_payload[236..240] == [0x63, 0x82, 0x53, 0x63] {
             // Client Hardware Address (chaddr) in DHCP packet is at offset 28..34 in udp_payload
             let chaddr = MacAddress([
-                udp_payload[28], udp_payload[29], udp_payload[30],
-                udp_payload[31], udp_payload[32], udp_payload[33],
+                udp_payload[28],
+                udp_payload[29],
+                udp_payload[30],
+                udp_payload[31],
+                udp_payload[32],
+                udp_payload[33],
             ]);
             let client_mac = if chaddr != MacAddress::ZERO && chaddr != MacAddress::BROADCAST {
                 chaddr
@@ -202,8 +221,18 @@ pub fn parse_dhcp_or_broadcast(data: &[u8]) -> Option<(Ipv4Addr, MacAddress, Str
             };
 
             // Client IP at offset 12 (ciaddr) or yiaddr at offset 16
-            let ciaddr = Ipv4Addr::new(udp_payload[12], udp_payload[13], udp_payload[14], udp_payload[15]);
-            let yiaddr = Ipv4Addr::new(udp_payload[16], udp_payload[17], udp_payload[18], udp_payload[19]);
+            let ciaddr = Ipv4Addr::new(
+                udp_payload[12],
+                udp_payload[13],
+                udp_payload[14],
+                udp_payload[15],
+            );
+            let yiaddr = Ipv4Addr::new(
+                udp_payload[16],
+                udp_payload[17],
+                udp_payload[18],
+                udp_payload[19],
+            );
             let mut target_ip = if ciaddr != Ipv4Addr::UNSPECIFIED {
                 ciaddr
             } else if yiaddr != Ipv4Addr::UNSPECIFIED {

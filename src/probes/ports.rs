@@ -1,7 +1,7 @@
+use rayon::prelude::*;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::time::Duration;
-use rayon::prelude::*;
 
 use crate::core::assessment::{PortStatus, ServiceEntry};
 
@@ -38,7 +38,6 @@ pub fn get_top_port_numbers() -> Vec<u16> {
 }
 
 pub fn get_service_name_for_port(port: u16) -> &'static str {
-
     for &(p, name) in TOP_PORTS {
         if p == port {
             return name;
@@ -70,15 +69,24 @@ pub fn parse_ports_arg(arg: &str) -> Result<Vec<u16>, String> {
             continue;
         }
         if let Some((start_s, end_s)) = trimmed.split_once('-') {
-            let start: u16 = start_s.trim().parse().map_err(|e| format!("Invalid port number: {}", e))?;
-            let end: u16 = end_s.trim().parse().map_err(|e| format!("Invalid port number: {}", e))?;
+            let start: u16 = start_s
+                .trim()
+                .parse()
+                .map_err(|e| format!("Invalid port number: {}", e))?;
+            let end: u16 = end_s
+                .trim()
+                .parse()
+                .map_err(|e| format!("Invalid port number: {}", e))?;
             if start > end {
                 return Err(format!("Invalid port range: {}-{}", start, end));
             }
             // Limit range expansion to at most 1024 ports per range chunk to prevent thread exhaustion
             let count = (end as u32) - (start as u32) + 1;
             if count > 2048 {
-                return Err(format!("Port range {}-{} exceeds 2048 ports limit", start, end));
+                return Err(format!(
+                    "Port range {}-{} exceeds 2048 ports limit",
+                    start, end
+                ));
             }
             for p in start..=end {
                 if !ports.contains(&p) {
@@ -86,7 +94,9 @@ pub fn parse_ports_arg(arg: &str) -> Result<Vec<u16>, String> {
                 }
             }
         } else {
-            let port: u16 = trimmed.parse().map_err(|e| format!("Invalid port: {}", e))?;
+            let port: u16 = trimmed
+                .parse()
+                .map_err(|e| format!("Invalid port: {}", e))?;
             if !ports.contains(&port) {
                 ports.push(port);
             }
@@ -113,7 +123,8 @@ pub fn probe_tcp_port(ip: Ipv4Addr, port: u16, timeout: Duration) -> Option<Serv
     // Banner grab heuristics
     if port == 80 || port == 8080 || port == 8000 || port == 5000 {
         // Send fast HTTP HEAD
-        let req = b"HEAD / HTTP/1.0\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n\r\n";
+        let req =
+            b"HEAD / HTTP/1.0\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n\r\n";
         if stream.write_all(req).is_ok() {
             let mut buf = [0u8; 1024];
             if let Ok(n) = stream.read(&mut buf) {

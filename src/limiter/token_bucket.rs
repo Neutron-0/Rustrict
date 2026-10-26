@@ -1,5 +1,5 @@
-use std::time::Instant;
 use parking_lot::Mutex;
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct TokenBucket {
@@ -28,7 +28,8 @@ impl TokenBucket {
     pub fn try_consume(&mut self, bits: u64) -> bool {
         let now = Instant::now();
         let elapsed_secs = (now - self.last_refill).as_secs_f64();
-        self.tokens = (self.tokens + elapsed_secs * self.rate_bps as f64).min(self.capacity_bits as f64);
+        self.tokens =
+            (self.tokens + elapsed_secs * self.rate_bps as f64).min(self.capacity_bits as f64);
         self.last_refill = now;
 
         if self.tokens >= bits as f64 {

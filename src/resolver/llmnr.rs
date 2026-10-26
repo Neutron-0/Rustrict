@@ -4,10 +4,15 @@ use std::time::Duration;
 /// Queries LLMNR (UDP 5355) link-local resolution
 pub fn query_llmnr(ip: Ipv4Addr) -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.set_read_timeout(Some(Duration::from_millis(60))).ok()?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(60)))
+        .ok()?;
 
     let octets = ip.octets();
-    let ptr_name = format!("{}.{}.{}.{}.in-addr.arpa", octets[3], octets[2], octets[1], octets[0]);
+    let ptr_name = format!(
+        "{}.{}.{}.{}.in-addr.arpa",
+        octets[3], octets[2], octets[1], octets[0]
+    );
 
     let mut packet = Vec::with_capacity(128);
     // Header
@@ -15,9 +20,7 @@ pub fn query_llmnr(ip: Ipv4Addr) -> Option<String> {
         0x12, 0x34, // ID
         0x00, 0x00, // Standard Query
         0x00, 0x01, // Questions: 1
-        0x00, 0x00,
-        0x00, 0x00,
-        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]);
 
     for part in ptr_name.split('.') {
@@ -86,7 +89,10 @@ pub fn parse_llmnr_response(buf: &[u8]) -> Option<String> {
                 let clean = hostname.trim_end_matches('.').to_string();
                 if !clean.is_empty() {
                     let host = clean.split('.').next().unwrap_or(&clean);
-                    if !host.is_empty() && !host.eq_ignore_ascii_case("in-addr") && !host.eq_ignore_ascii_case("arpa") {
+                    if !host.is_empty()
+                        && !host.eq_ignore_ascii_case("in-addr")
+                        && !host.eq_ignore_ascii_case("arpa")
+                    {
                         return Some(host.to_string());
                     }
                 }

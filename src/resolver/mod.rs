@@ -7,9 +7,9 @@ pub mod passive;
 pub mod smb;
 pub mod tls;
 
+use crate::types::{MacAddress, NameSource};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::Duration;
-use crate::types::{MacAddress, NameSource};
 
 pub struct HostIdentity {
     pub hostname: String,
@@ -40,11 +40,16 @@ pub fn extract_html_title(html: &str) -> Option<String> {
 fn probe_http_title(ip: Ipv4Addr) -> Option<String> {
     for port in [80, 8080] {
         let addr = SocketAddrV4::new(ip, port);
-        if let Ok(mut stream) = TcpStream::connect_timeout(&std::net::SocketAddr::V4(addr), Duration::from_millis(60)) {
+        if let Ok(mut stream) =
+            TcpStream::connect_timeout(&std::net::SocketAddr::V4(addr), Duration::from_millis(60))
+        {
             let _ = stream.set_read_timeout(Some(Duration::from_millis(60)));
             let _ = stream.set_write_timeout(Some(Duration::from_millis(60)));
             use std::io::{Read, Write};
-            let req = format!("GET / HTTP/1.1\r\nHost: {}\r\nUser-Agent: Rustrict\r\nConnection: close\r\n\r\n", ip);
+            let req = format!(
+                "GET / HTTP/1.1\r\nHost: {}\r\nUser-Agent: Rustrict\r\nConnection: close\r\n\r\n",
+                ip
+            );
             if stream.write_all(req.as_bytes()).is_ok() {
                 let mut buf = [0u8; 1024];
                 if let Ok(n) = stream.read(&mut buf) {
@@ -83,7 +88,11 @@ pub fn resolve_identity_with_gateway(
         return HostIdentity {
             hostname: "Default Gateway (Router)".to_string(),
             source: NameSource::Gateway,
-            vendor: if vendor != "Generic Network Device" { vendor.to_string() } else { "Router".to_string() },
+            vendor: if vendor != "Generic Network Device" {
+                vendor.to_string()
+            } else {
+                "Router".to_string()
+            },
         };
     }
 

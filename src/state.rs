@@ -1,9 +1,9 @@
+use crate::core::scope::ScopeManager;
+use crate::types::{Direction, Host, MacAddress};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
-use crate::core::scope::ScopeManager;
-use crate::types::{Direction, Host, MacAddress};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentBlockedHost {
@@ -59,7 +59,8 @@ impl PersistentState {
 
     pub fn add_blocked(&mut self, host: &Host, dir: Direction) {
         let mac_str = host.mac.to_string();
-        self.blocked_hosts.retain(|b| b.ip != host.ip && (host.mac == MacAddress::ZERO || b.mac != mac_str));
+        self.blocked_hosts
+            .retain(|b| b.ip != host.ip && (host.mac == MacAddress::ZERO || b.mac != mac_str));
         self.blocked_hosts.push(PersistentBlockedHost {
             ip: host.ip,
             mac: mac_str,
@@ -81,7 +82,9 @@ impl PersistentState {
     pub fn get_direction(&self, ip: &Ipv4Addr) -> Direction {
         if let Some(h) = self.blocked_hosts.iter().find(|b| b.ip == *ip) {
             let dir_lower = h.direction.to_ascii_lowercase();
-            if (dir_lower.contains("upload") && dir_lower.contains("download")) || dir_lower.contains("both") {
+            if (dir_lower.contains("upload") && dir_lower.contains("download"))
+                || dir_lower.contains("both")
+            {
                 Direction::Both
             } else if dir_lower.contains("upload") {
                 Direction::Outgoing

@@ -50,7 +50,10 @@ fn test_resolve_by_ip() {
 #[test]
 fn test_resolve_mixed_id_and_ip() {
     let hosts = sample_hosts();
-    assert_eq!(resolve_test_targets(&hosts, "0,192.168.18.50,1"), Ok(vec![0, 2, 1]));
+    assert_eq!(
+        resolve_test_targets(&hosts, "0,192.168.18.50,1"),
+        Ok(vec![0, 2, 1])
+    );
 }
 
 #[test]
@@ -64,7 +67,10 @@ fn test_resolve_all() {
 fn test_resolve_deduplication() {
     let hosts = sample_hosts();
     // Same target specified by ID and IP should be deduplicated
-    assert_eq!(resolve_test_targets(&hosts, "2,192.168.18.50,2"), Ok(vec![2]));
+    assert_eq!(
+        resolve_test_targets(&hosts, "2,192.168.18.50,2"),
+        Ok(vec![2])
+    );
 }
 
 #[test]
@@ -140,9 +146,10 @@ fn test_non_destructive_upsert() {
 
     // Non-destructive upsert
     for new_h in new_scan {
-        if let Some(existing) = current_hosts.iter_mut().find(|h| {
-            (h.mac != MacAddress::ZERO && h.mac == new_h.mac) || h.ip == new_h.ip
-        }) {
+        if let Some(existing) = current_hosts
+            .iter_mut()
+            .find(|h| (h.mac != MacAddress::ZERO && h.mac == new_h.mac) || h.ip == new_h.ip)
+        {
             existing.ip = new_h.ip;
             if new_h.name_source != NameSource::Unresolved {
                 existing.name = new_h.name;
@@ -169,20 +176,19 @@ fn test_fresh_rescan_prunes_unmanaged_but_preserves_blocked() {
     let mut current_hosts = sample_hosts();
 
     // Mark host 2 as persistently blocked
-    current_hosts[2].status = rustrict::types::HostStatus::Blocked(rustrict::types::Direction::Both);
+    current_hosts[2].status =
+        rustrict::types::HostStatus::Blocked(rustrict::types::Direction::Both);
     current_hosts[2].persistent_block = true;
 
     // Fresh scan only discovers router (192.168.18.1)
-    let new_scan = [
-        Host::with_source(
-            0,
-            Ipv4Addr::new(192, 168, 18, 1),
-            MacAddress([0xec, 0x02, 0x73, 0xcb, 0x84, 0x00]),
-            "Router".to_string(),
-            NameSource::Gateway,
-            "TP-Link".to_string(),
-        ),
-    ];
+    let new_scan = [Host::with_source(
+        0,
+        Ipv4Addr::new(192, 168, 18, 1),
+        MacAddress([0xec, 0x02, 0x73, 0xcb, 0x84, 0x00]),
+        "Router".to_string(),
+        NameSource::Gateway,
+        "TP-Link".to_string(),
+    )];
 
     // Simulate reconcile_hosts(new_scan, is_fresh = true)
     let is_fresh = true;
@@ -190,28 +196,43 @@ fn test_fresh_rescan_prunes_unmanaged_but_preserves_blocked() {
         current_hosts.retain(|h| {
             h.persistent_block
                 || h.status != rustrict::types::HostStatus::Free
-                || new_scan.iter().any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac))
+                || new_scan
+                    .iter()
+                    .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac))
         });
     }
 
     // Update reachability flags
     for h in &mut current_hosts {
-        let is_alive = new_scan.iter().any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac));
+        let is_alive = new_scan
+            .iter()
+            .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac));
         h.online = is_alive;
     }
 
     // Host 1 (NEO / unmanaged) should be pruned because it wasn't in fresh scan!
-    assert!(!current_hosts.iter().any(|h| h.ip == Ipv4Addr::new(192, 168, 18, 32)));
+    assert!(!current_hosts
+        .iter()
+        .any(|h| h.ip == Ipv4Addr::new(192, 168, 18, 32)));
 
     // Host 2 (Blocked) MUST be preserved even though it wasn't in the scan!
-    let blocked_host = current_hosts.iter().find(|h| h.ip == Ipv4Addr::new(192, 168, 18, 50)).unwrap();
+    let blocked_host = current_hosts
+        .iter()
+        .find(|h| h.ip == Ipv4Addr::new(192, 168, 18, 50))
+        .unwrap();
     assert!(blocked_host.persistent_block);
-    assert_eq!(blocked_host.status, rustrict::types::HostStatus::Blocked(rustrict::types::Direction::Both));
+    assert_eq!(
+        blocked_host.status,
+        rustrict::types::HostStatus::Blocked(rustrict::types::Direction::Both)
+    );
     // And its live state correctly reflects offline
     assert!(!blocked_host.online);
 
     // Host 0 (Router) is online
-    let router = current_hosts.iter().find(|h| h.ip == Ipv4Addr::new(192, 168, 18, 1)).unwrap();
+    let router = current_hosts
+        .iter()
+        .find(|h| h.ip == Ipv4Addr::new(192, 168, 18, 1))
+        .unwrap();
     assert!(router.online);
 }
 
@@ -231,17 +252,26 @@ fn test_persistent_state_roundtrip() {
     // Test Outgoing
     state.add_blocked(&host, rustrict::types::Direction::Outgoing);
     assert!(state.is_blocked(&test_ip));
-    assert_eq!(state.get_direction(&test_ip), rustrict::types::Direction::Outgoing);
+    assert_eq!(
+        state.get_direction(&test_ip),
+        rustrict::types::Direction::Outgoing
+    );
 
     // Test Both (Previously broken due to bug in get_direction)
     state.add_blocked(&host, rustrict::types::Direction::Both);
     assert!(state.is_blocked(&test_ip));
-    assert_eq!(state.get_direction(&test_ip), rustrict::types::Direction::Both);
+    assert_eq!(
+        state.get_direction(&test_ip),
+        rustrict::types::Direction::Both
+    );
 
     // Test Incoming
     state.add_blocked(&host, rustrict::types::Direction::Incoming);
     assert!(state.is_blocked(&test_ip));
-    assert_eq!(state.get_direction(&test_ip), rustrict::types::Direction::Incoming);
+    assert_eq!(
+        state.get_direction(&test_ip),
+        rustrict::types::Direction::Incoming
+    );
 
     state.remove_blocked(&test_ip);
     assert!(!state.is_blocked(&test_ip));

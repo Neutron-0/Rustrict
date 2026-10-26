@@ -39,7 +39,8 @@ impl SoapClient {
                         let close_tag_start = close_search + close_rel;
                         if let Some(close_bracket) = xml_lower[close_tag_start..].find('>') {
                             let close_bracket_pos = close_tag_start + close_bracket;
-                            let close_tag_body = xml_lower[close_tag_start + 2..close_bracket_pos].trim();
+                            let close_tag_body =
+                                xml_lower[close_tag_start + 2..close_bracket_pos].trim();
                             let close_local = close_tag_body
                                 .split_whitespace()
                                 .next()
@@ -87,7 +88,8 @@ impl SoapClient {
         let resp = Self::send_soap_request(gateway_addr, control_path, &action, &soap_body)?;
 
         // If router returns 714 (NoSuchEntryInArray) or fault, return Ok(None) to indicate end of list
-        if resp.contains("714") || resp.contains("NoSuchEntryInArray") || resp.contains("<s:Fault>") {
+        if resp.contains("714") || resp.contains("NoSuchEntryInArray") || resp.contains("<s:Fault>")
+        {
             return Ok(None);
         }
 

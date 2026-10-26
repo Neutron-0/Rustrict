@@ -1,5 +1,5 @@
-use std::net::Ipv4Addr;
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortStatus {

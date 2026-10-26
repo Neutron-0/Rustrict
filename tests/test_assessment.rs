@@ -111,7 +111,6 @@ fn test_fault_profile_simulation_metrics() {
     assert!((80..=120).contains(&delay));
 }
 
-
 #[test]
 fn test_report_export_markdown_json_sarif() {
     let mut scope = ScopeManager::new();
@@ -175,7 +174,13 @@ fn test_report_export_markdown_json_sarif() {
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
     assert_eq!(parsed["tool"], "Rustrict");
     assert_eq!(parsed["findings"].as_array().unwrap().len(), 2);
-    assert_eq!(parsed["services"]["192.168.1.100"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        parsed["services"]["192.168.1.100"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     // SARIF Verification
     let sarif_str = export_sarif(&findings).unwrap();
@@ -185,7 +190,6 @@ fn test_report_export_markdown_json_sarif() {
     assert_eq!(runs["tool"]["driver"]["name"], "Rustrict");
     assert_eq!(runs["tool"]["driver"]["rules"].as_array().unwrap().len(), 2);
     assert_eq!(runs["results"].as_array().unwrap().len(), 2);
-
 
     let result1 = &runs["results"][0];
     assert_eq!(result1["ruleId"], "SMB-SIGNING-NOT-REQUIRED");

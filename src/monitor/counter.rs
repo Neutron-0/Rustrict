@@ -1,9 +1,9 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use parking_lot::RwLock;
 
 use crate::types::{BitRate, ByteValue};
 
@@ -35,7 +35,10 @@ impl BandwidthMeter {
     }
 
     pub fn register_host(&self, ip: Ipv4Addr) {
-        self.stats.write().entry(ip).or_insert_with(|| Arc::new(HostTrafficStats::default()));
+        self.stats
+            .write()
+            .entry(ip)
+            .or_insert_with(|| Arc::new(HostTrafficStats::default()));
     }
 
     pub fn unregister_host(&self, ip: &Ipv4Addr) {
@@ -72,7 +75,15 @@ impl BandwidthMeter {
             let ul_bps = ((sent as f64 * 8.0) / elapsed) as u64;
             let dl_bps = ((recv as f64 * 8.0) / elapsed) as u64;
 
-            results.insert(ip, (BitRate(ul_bps), BitRate(dl_bps), ByteValue(total_sent), ByteValue(total_recv)));
+            results.insert(
+                ip,
+                (
+                    BitRate(ul_bps),
+                    BitRate(dl_bps),
+                    ByteValue(total_sent),
+                    ByteValue(total_recv),
+                ),
+            );
         }
 
         results

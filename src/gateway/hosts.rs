@@ -1,5 +1,5 @@
-use std::net::Ipv4Addr;
 use crate::types::MacAddress;
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayHostEntry {

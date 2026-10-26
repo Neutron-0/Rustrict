@@ -1,11 +1,11 @@
+use crate::platform;
+use crate::resolver;
+use crate::types::{Host, MacAddress};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use rayon::prelude::*;
-use crate::types::{Host, MacAddress};
-use crate::platform;
-use crate::resolver;
 
 pub struct SubnetScanner {
     pub local_ip: Ipv4Addr,
@@ -56,14 +56,18 @@ impl SubnetScanner {
             last_ip
         };
 
-        let ip_list: Vec<Ipv4Addr> = (first_ip..=bounded_last)
-            .map(Ipv4Addr::from)
-            .collect();
+        let ip_list: Vec<Ipv4Addr> = (first_ip..=bounded_last).map(Ipv4Addr::from).collect();
 
         self.scan_ip_list(&ip_list, fresh, on_progress)
     }
 
-    pub fn scan_range<F>(&self, start: Ipv4Addr, end: Ipv4Addr, fresh: bool, on_progress: F) -> Vec<Host>
+    pub fn scan_range<F>(
+        &self,
+        start: Ipv4Addr,
+        end: Ipv4Addr,
+        fresh: bool,
+        on_progress: F,
+    ) -> Vec<Host>
     where
         F: Fn(usize, usize, usize) + Sync + Send,
     {
@@ -81,9 +85,7 @@ impl SubnetScanner {
             end_u32
         };
 
-        let ip_list: Vec<Ipv4Addr> = (start_u32..=bounded_end)
-            .map(Ipv4Addr::from)
-            .collect();
+        let ip_list: Vec<Ipv4Addr> = (start_u32..=bounded_end).map(Ipv4Addr::from).collect();
 
         self.scan_ip_list(&ip_list, fresh, on_progress)
     }
@@ -172,7 +174,8 @@ impl SubnetScanner {
             .into_par_iter()
             .enumerate()
             .map(|(id, (ip, mac))| {
-                let identity = resolver::resolve_identity_with_gateway(ip, &mac, local_ip, gateway_ip, gc_ref);
+                let identity =
+                    resolver::resolve_identity_with_gateway(ip, &mac, local_ip, gateway_ip, gc_ref);
                 Host::with_source(
                     id,
                     ip,

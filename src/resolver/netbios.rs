@@ -4,7 +4,9 @@ use std::time::Duration;
 /// Queries NetBIOS Name Service (UDP 137) to get the Windows/Samba machine name
 pub fn query_netbios(ip: Ipv4Addr) -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.set_read_timeout(Some(Duration::from_millis(80))).ok()?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(80)))
+        .ok()?;
 
     // NBNS Node Status Query Packet
     let mut packet = Vec::with_capacity(50);
@@ -21,7 +23,7 @@ pub fn query_netbios(ip: Ipv4Addr) -> Option<String> {
     packet.push(0x20); // Length: 32
     packet.extend_from_slice(b"CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     packet.push(0x00); // Terminating null
-    // Type & Class
+                       // Type & Class
     packet.extend_from_slice(&[
         0x00, 0x21, // Type: NBSTAT
         0x00, 0x01, // Class: IN

@@ -1,10 +1,10 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
 
 use crate::limiter::fault::FaultProfile;
 use crate::limiter::token_bucket::SharedTokenBucket;
@@ -109,7 +109,9 @@ impl TrafficLimiter {
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some((h, close_fn)) = self.active_handle.lock().take() {
-            unsafe { close_fn(h.0); }
+            unsafe {
+                close_fn(h.0);
+            }
         }
     }
 
@@ -177,10 +179,7 @@ fn run_windivert_loop(
 
     // Dynamically load WinDivert.dll or WinDivert64.dll from exe dir or PATH
     let mut h_module = std::ptr::null_mut();
-    let mut candidate_paths = vec![
-        "WinDivert.dll".to_string(),
-        "WinDivert64.dll".to_string(),
-    ];
+    let mut candidate_paths = vec!["WinDivert.dll".to_string(), "WinDivert64.dll".to_string()];
 
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
@@ -191,7 +190,9 @@ fn run_windivert_loop(
 
     for path in &candidate_paths {
         let dll_name = CString::new(path.as_str()).unwrap();
-        let handle = unsafe { windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_name.as_ptr() as *const u8) };
+        let handle = unsafe {
+            windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_name.as_ptr() as *const u8)
+        };
         if !handle.is_null() {
             h_module = handle;
             break;
@@ -200,24 +201,32 @@ fn run_windivert_loop(
 
     if h_module.is_null() {
         eprintln!("\n[ERR] WinDivert.dll not found in working directory or application path.");
-        eprintln!("[ERR] Ensure WinDivert.dll and WinDivert64.sys are placed alongside rustrict.exe.\n");
+        eprintln!(
+            "[ERR] Ensure WinDivert.dll and WinDivert64.sys are placed alongside rustrict.exe.\n"
+        );
         return;
     }
 
     let open_fn: WinDivertOpenFn = unsafe {
         let name = CString::new("WinDivertOpen").unwrap();
-        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
-        if addr.is_none() { 
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            h_module,
+            name.as_ptr() as *const u8,
+        );
+        if addr.is_none() {
             eprintln!("[ERR] Symbol WinDivertOpen not found in WinDivert.dll");
             crate::platform::free_library(h_module);
-            return; 
+            return;
         }
         std::mem::transmute(addr)
     };
 
     let recv_fn: WinDivertRecvFn = unsafe {
         let name = CString::new("WinDivertRecv").unwrap();
-        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            h_module,
+            name.as_ptr() as *const u8,
+        );
         if addr.is_none() {
             crate::platform::free_library(h_module);
             return;
@@ -227,7 +236,10 @@ fn run_windivert_loop(
 
     let send_fn: WinDivertSendFn = unsafe {
         let name = CString::new("WinDivertSend").unwrap();
-        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            h_module,
+            name.as_ptr() as *const u8,
+        );
         if addr.is_none() {
             crate::platform::free_library(h_module);
             return;
@@ -237,7 +249,10 @@ fn run_windivert_loop(
 
     let close_fn: WinDivertCloseFn = unsafe {
         let name = CString::new("WinDivertClose").unwrap();
-        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(h_module, name.as_ptr() as *const u8);
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            h_module,
+            name.as_ptr() as *const u8,
+        );
         if addr.is_none() {
             crate::platform::free_library(h_module);
             return;
@@ -256,7 +271,9 @@ fn run_windivert_loop(
         } else if err == 2 {
             eprintln!("[ERR] WinDivert64.sys driver file missing from application directory.\n");
         }
-        unsafe { crate::platform::free_library(h_module); }
+        unsafe {
+            crate::platform::free_library(h_module);
+        }
         return;
     }
 
@@ -269,25 +286,22 @@ fn run_windivert_loop(
     let delay_worker = thread::spawn(move || {
         let h = handle_usize as *mut std::ffi::c_void;
         while delay_running.load(Ordering::Relaxed) {
-            match delay_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(pkt) => {
-                    let now = Instant::now();
-                    if pkt.send_at > now {
-                        thread::sleep(pkt.send_at - now);
-                    }
-                    if delay_running.load(Ordering::Relaxed) {
-                        let _ = unsafe {
-                            send_fn(
-                                h,
-                                pkt.data.as_ptr(),
-                                pkt.data.len() as u32,
-                                pkt.addr.as_ptr(),
-                                std::ptr::null_mut(),
-                            )
-                        };
-                    }
+            if let Ok(pkt) = delay_rx.recv_timeout(Duration::from_millis(50)) {
+                let now = Instant::now();
+                if pkt.send_at > now {
+                    thread::sleep(pkt.send_at - now);
                 }
-                Err(_) => {}
+                if delay_running.load(Ordering::Relaxed) {
+                    let _ = unsafe {
+                        send_fn(
+                            h,
+                            pkt.data.as_ptr(),
+                            pkt.data.len() as u32,
+                            pkt.addr.as_ptr(),
+                            std::ptr::null_mut(),
+                        )
+                    };
+                }
             }
         }
     });
@@ -327,12 +341,30 @@ fn run_windivert_loop(
         // Parse IPv4 header
         let version = (packet_buf[0] >> 4) & 0x0f;
         if version != 4 {
-            let _ = unsafe { send_fn(handle, packet_buf.as_ptr(), read_len, addr_buf.as_ptr(), std::ptr::null_mut()) };
+            let _ = unsafe {
+                send_fn(
+                    handle,
+                    packet_buf.as_ptr(),
+                    read_len,
+                    addr_buf.as_ptr(),
+                    std::ptr::null_mut(),
+                )
+            };
             continue;
         }
 
-        let src_ip = Ipv4Addr::new(packet_buf[12], packet_buf[13], packet_buf[14], packet_buf[15]);
-        let dst_ip = Ipv4Addr::new(packet_buf[16], packet_buf[17], packet_buf[18], packet_buf[19]);
+        let src_ip = Ipv4Addr::new(
+            packet_buf[12],
+            packet_buf[13],
+            packet_buf[14],
+            packet_buf[15],
+        );
+        let dst_ip = Ipv4Addr::new(
+            packet_buf[16],
+            packet_buf[17],
+            packet_buf[18],
+            packet_buf[19],
+        );
         let pkt_bits = (read_len as u64) * 8;
 
         let rule_map = rules.read();
@@ -417,7 +449,11 @@ fn run_windivert_loop(
 
     let should_close = active_handle.lock().take().is_some();
     if should_close {
-        unsafe { close_fn(handle); }
+        unsafe {
+            close_fn(handle);
+        }
     }
-    unsafe { crate::platform::free_library(h_module); }
+    unsafe {
+        crate::platform::free_library(h_module);
+    }
 }

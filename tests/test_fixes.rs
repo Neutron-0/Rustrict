@@ -1,10 +1,10 @@
-use std::net::Ipv4Addr;
 use rustrict::gateway::soap::SoapClient;
 use rustrict::resolver::extract_html_title;
 use rustrict::resolver::llmnr::parse_llmnr_response;
 use rustrict::resolver::mdns::parse_dns_name;
-use rustrict::types::{BitRate, Direction, Host, MacAddress, NameSource};
 use rustrict::state::PersistentState;
+use rustrict::types::{BitRate, Direction, Host, MacAddress, NameSource};
+use std::net::Ipv4Addr;
 
 #[test]
 fn test_soap_prefixed_tags() {
@@ -39,7 +39,10 @@ fn test_soap_prefixed_tags() {
 fn test_extract_html_title_with_unicode_and_case() {
     // UTF-8 characters prior to <title> must not cause byte-boundary slicing panics
     let html = "HTTP/1.1 200 OK\r\n\r\n<html><head><!-- Über schöne Grüße 🚀 --><TITLE> Router Setup Page </TITLE></head></html>";
-    assert_eq!(extract_html_title(html), Some("Router Setup Page".to_string()));
+    assert_eq!(
+        extract_html_title(html),
+        Some("Router Setup Page".to_string())
+    );
 
     let empty_title = "<html><head><title>   </title></head></html>";
     assert_eq!(extract_html_title(empty_title), None);
@@ -110,7 +113,10 @@ fn test_bitrate_overflow_protection() {
     // Normal rates
     assert_eq!(BitRate::from_str_custom("500kbit").unwrap().0, 500_000);
     assert_eq!(BitRate::from_str_custom("100mbit").unwrap().0, 100_000_000);
-    assert_eq!(BitRate::from_str_custom("10gbit").unwrap().0, 10_000_000_000);
+    assert_eq!(
+        BitRate::from_str_custom("10gbit").unwrap().0,
+        10_000_000_000
+    );
 
     // Astronomical number that would overflow u64 when multiplied by 1_000_000_000
     let huge = "9999999999999999999gbit";

@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod hosts;
 pub mod soap;
 pub mod ssdp;
@@ -6,11 +7,11 @@ pub use hosts::GatewayHostEntry;
 pub use soap::SoapClient;
 pub use ssdp::SsdpScanner;
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// High-level client for discovering and querying the local network router gateway
 pub struct GatewayClient {

@@ -69,7 +69,10 @@ pub fn audit_smb_posture(ip: Ipv4Addr) -> Vec<AuditFinding> {
                                     ip,
                                     Some(445),
                                     AuditSeverity::Info,
-                                    &format!("Endpoint accepted modern dialect 0x{:04x} ({}).", dialect, dialect_str),
+                                    &format!(
+                                        "Endpoint accepted modern dialect 0x{:04x} ({}).",
+                                        dialect, dialect_str
+                                    ),
                                     "Ensure SMBv1 remains disabled across the network.",
                                 ));
                             }
@@ -115,26 +118,26 @@ fn craft_smb2_negotiate() -> Vec<u8> {
     // SMB2 Header (64 bytes)
     packet.extend_from_slice(b"\xfeSMB"); // Protocol ID
     packet.extend_from_slice(&64u16.to_le_bytes()); // StructureSize = 64
-    packet.extend_from_slice(&0u16.to_le_bytes());  // CreditCharge = 0
-    packet.extend_from_slice(&0u32.to_le_bytes());  // Status = 0
-    packet.extend_from_slice(&0u16.to_le_bytes());  // Command = 0 (Negotiate)
-    packet.extend_from_slice(&0u16.to_le_bytes());  // CreditsRequested = 0
-    packet.extend_from_slice(&0u32.to_le_bytes());  // Flags = 0
-    packet.extend_from_slice(&0u32.to_le_bytes());  // NextCommand = 0
-    packet.extend_from_slice(&1u64.to_le_bytes());  // MessageId = 1
-    packet.extend_from_slice(&0u32.to_le_bytes());  // Reserved / ProcessId
-    packet.extend_from_slice(&0u32.to_le_bytes());  // TreeId = 0
-    packet.extend_from_slice(&0u64.to_le_bytes());  // SessionId = 0
-    packet.extend_from_slice(&[0u8; 16]);          // Signature
+    packet.extend_from_slice(&0u16.to_le_bytes()); // CreditCharge = 0
+    packet.extend_from_slice(&0u32.to_le_bytes()); // Status = 0
+    packet.extend_from_slice(&0u16.to_le_bytes()); // Command = 0 (Negotiate)
+    packet.extend_from_slice(&0u16.to_le_bytes()); // CreditsRequested = 0
+    packet.extend_from_slice(&0u32.to_le_bytes()); // Flags = 0
+    packet.extend_from_slice(&0u32.to_le_bytes()); // NextCommand = 0
+    packet.extend_from_slice(&1u64.to_le_bytes()); // MessageId = 1
+    packet.extend_from_slice(&0u32.to_le_bytes()); // Reserved / ProcessId
+    packet.extend_from_slice(&0u32.to_le_bytes()); // TreeId = 0
+    packet.extend_from_slice(&0u64.to_le_bytes()); // SessionId = 0
+    packet.extend_from_slice(&[0u8; 16]); // Signature
 
     // SMB2 Negotiate Request Body (36 bytes + dialects)
     packet.extend_from_slice(&36u16.to_le_bytes()); // StructureSize = 36
-    packet.extend_from_slice(&4u16.to_le_bytes());  // DialectCount = 4
+    packet.extend_from_slice(&4u16.to_le_bytes()); // DialectCount = 4
     packet.extend_from_slice(&0x01u16.to_le_bytes()); // SecurityMode = 1 (Signing Enabled)
-    packet.extend_from_slice(&0u16.to_le_bytes());  // Reserved
-    packet.extend_from_slice(&0u32.to_le_bytes());  // Capabilities = 0
-    packet.extend_from_slice(&[0xaa; 16]);         // ClientGuid (16 random bytes)
-    packet.extend_from_slice(&0u64.to_le_bytes());  // ClientStartTime
+    packet.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    packet.extend_from_slice(&0u32.to_le_bytes()); // Capabilities = 0
+    packet.extend_from_slice(&[0xaa; 16]); // ClientGuid (16 random bytes)
+    packet.extend_from_slice(&0u64.to_le_bytes()); // ClientStartTime
 
     // Dialects: SMB 2.0.2, 2.1, 3.0, 3.0.2 (Do not advertise 3.1.1 without negotiate contexts)
     packet.extend_from_slice(&0x0202u16.to_le_bytes());

@@ -17,6 +17,8 @@ pub fn print_banner(_version: &str) {
     println!("{}", line6.bright_red().bold());
     println!(
         "          {}\n",
-        "Windows Network Bandwidth Limiter & Controller".bright_cyan().bold()
+        "Windows Network Bandwidth Limiter & Controller"
+            .bright_cyan()
+            .bold()
     );
 }

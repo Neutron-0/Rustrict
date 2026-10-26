@@ -1,8 +1,8 @@
+use crate::types::MacAddress;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
-use serde::{Deserialize, Serialize};
-use crate::types::MacAddress;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ipv4Cidr {
@@ -15,13 +15,24 @@ impl Ipv4Cidr {
         if prefix > 32 {
             return Err("CIDR prefix must be between 0 and 32".into());
         }
-        let mask = if prefix == 0 { 0 } else { !((1u32 << (32 - prefix)) - 1) };
+        let mask = if prefix == 0 {
+            0
+        } else {
+            !((1u32 << (32 - prefix)) - 1)
+        };
         let normalized = Ipv4Addr::from(u32::from(network) & mask);
-        Ok(Self { network: normalized, prefix })
+        Ok(Self {
+            network: normalized,
+            prefix,
+        })
     }
 
     pub fn contains(&self, ip: &Ipv4Addr) -> bool {
-        let mask = if self.prefix == 0 { 0 } else { !((1u32 << (32 - self.prefix)) - 1) };
+        let mask = if self.prefix == 0 {
+            0
+        } else {
+            !((1u32 << (32 - self.prefix)) - 1)
+        };
         (u32::from(*ip) & mask) == (u32::from(self.network) & mask)
     }
 }
@@ -32,11 +43,17 @@ impl FromStr for Ipv4Cidr {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let clean = s.trim();
         if let Some((net_str, prefix_str)) = clean.split_once('/') {
-            let net = net_str.parse::<Ipv4Addr>().map_err(|e| format!("Invalid IP in CIDR: {}", e))?;
-            let prefix = prefix_str.parse::<u8>().map_err(|e| format!("Invalid prefix in CIDR: {}", e))?;
+            let net = net_str
+                .parse::<Ipv4Addr>()
+                .map_err(|e| format!("Invalid IP in CIDR: {}", e))?;
+            let prefix = prefix_str
+                .parse::<u8>()
+                .map_err(|e| format!("Invalid prefix in CIDR: {}", e))?;
             Self::new(net, prefix)
         } else {
-            let net = clean.parse::<Ipv4Addr>().map_err(|e| format!("Invalid IP address: {}", e))?;
+            let net = clean
+                .parse::<Ipv4Addr>()
+                .map_err(|e| format!("Invalid IP address: {}", e))?;
             Self::new(net, 32)
         }
     }
@@ -131,11 +148,17 @@ impl ScopeManager {
 
     pub fn validate_target(&self, ip: &Ipv4Addr, mac: Option<&MacAddress>) -> Result<(), String> {
         if self.excluded_ips.contains(ip) {
-            return Err(format!("Target IP {} is explicitly excluded from assessment scope.", ip));
+            return Err(format!(
+                "Target IP {} is explicitly excluded from assessment scope.",
+                ip
+            ));
         }
         if let Some(m) = mac {
             if self.excluded_macs.contains(m) {
-                return Err(format!("Target MAC {} is explicitly excluded from assessment scope.", m));
+                return Err(format!(
+                    "Target MAC {} is explicitly excluded from assessment scope.",
+                    m
+                ));
             }
         }
         if self.strict_mode {

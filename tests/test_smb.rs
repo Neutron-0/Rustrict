@@ -7,9 +7,9 @@ fn test_ntlmssp_challenge_parsing() {
 
     let ntlm_start = payload.len();
     payload.extend_from_slice(b"NTLMSSP\x00\x02\x00\x00\x00"); // 12 bytes
-    // Target Name Fields: len=8, max_len=8, offset will be 48
+                                                               // Target Name Fields: len=8, max_len=8, offset will be 48
     payload.extend_from_slice(&[0x08, 0x00, 0x08, 0x00, 0x30, 0x00, 0x00, 0x00]); // 8 bytes
-    // Negotiate Flags (4 bytes)
+                                                                                  // Negotiate Flags (4 bytes)
     payload.extend_from_slice(&[0x05, 0x82, 0x89, 0xe2]);
     // Server Challenge (8 bytes)
     payload.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);

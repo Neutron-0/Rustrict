@@ -34,7 +34,10 @@ fn test_oui_vendor_lookup() {
     assert_eq!(oui::lookup_vendor(&generic_mac), "Generic Network Device");
 
     let randomized_mac = MacAddress([0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33]);
-    assert_eq!(oui::lookup_vendor(&randomized_mac), "Private/Randomized MAC");
+    assert_eq!(
+        oui::lookup_vendor(&randomized_mac),
+        "Private/Randomized MAC"
+    );
 }
 
 #[test]

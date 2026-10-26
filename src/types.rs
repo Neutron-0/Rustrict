@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MacAddress(pub [u8; 6]);
 
-
 impl MacAddress {
     pub const BROADCAST: MacAddress = MacAddress([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
     pub const ZERO: MacAddress = MacAddress([0, 0, 0, 0, 0, 0]);
@@ -108,19 +107,19 @@ impl HostStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NameSource {
-    Local,       // This machine
-    Gateway,     // Default gateway / router
-    RouterUpnp,  // Retrieved from Router Gateway UPnP / TR-064 client list
-    Dhcp,        // Sniffed via DHCP Option 12
-    Smb,         // Extracted via SMB NTLMSSP challenge
-    Tls,         // Extracted from X.509 certificate CN
-    Mdns,        // Resolved via mDNS service/PTR
-    NetBios,     // Resolved via NBNS query
-    Llmnr,       // Resolved via LLMNR query
-    Dns,         // Resolved via Reverse DNS query
-    HttpTitle,   // Extracted from HTTP server title/banner
-    Manual,      // Assigned by user via add command
-    Unresolved,  // No authoritative hostname resolved
+    Local,      // This machine
+    Gateway,    // Default gateway / router
+    RouterUpnp, // Retrieved from Router Gateway UPnP / TR-064 client list
+    Dhcp,       // Sniffed via DHCP Option 12
+    Smb,        // Extracted via SMB NTLMSSP challenge
+    Tls,        // Extracted from X.509 certificate CN
+    Mdns,       // Resolved via mDNS service/PTR
+    NetBios,    // Resolved via NBNS query
+    Llmnr,      // Resolved via LLMNR query
+    Dns,        // Resolved via Reverse DNS query
+    HttpTitle,  // Extracted from HTTP server title/banner
+    Manual,     // Assigned by user via add command
+    Unresolved, // No authoritative hostname resolved
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +217,8 @@ impl BitRate {
             _ => return Err(format!("Unknown bitrate unit: {}", unit)),
         };
 
-        let value = num.checked_mul(multiplier)
+        let value = num
+            .checked_mul(multiplier)
             .ok_or_else(|| "Bitrate value overflows u64".to_string())?;
 
         Ok(BitRate(value))

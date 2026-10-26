@@ -1,6 +1,6 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use serde::Serialize;
 
 use crate::core::assessment::{AuditFinding, AuditSeverity, ServiceEntry};
 use crate::core::scope::ScopeManager;
@@ -27,15 +27,30 @@ pub fn export_markdown(
 
     // Scope Details
     out.push_str("## 1. Scope & Boundaries\n\n");
-    out.push_str(&format!("- **Strict Enforcement Mode:** {}\n", if scope.strict_mode { "ENABLED" } else { "DISABLED" }));
+    out.push_str(&format!(
+        "- **Strict Enforcement Mode:** {}\n",
+        if scope.strict_mode {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        }
+    ));
     if scope.allowed_cidrs.is_empty() {
-        out.push_str("- **Allowed CIDRs:** *None configured (All IPv4 allowed when strict mode is off)*\n");
+        out.push_str(
+            "- **Allowed CIDRs:** *None configured (All IPv4 allowed when strict mode is off)*\n",
+        );
     } else {
         let cidrs: Vec<String> = scope.allowed_cidrs.iter().map(|c| c.to_string()).collect();
         out.push_str(&format!("- **Allowed CIDRs:** {}\n", cidrs.join(", ")));
     }
-    out.push_str(&format!("- **Excluded Hosts (IP):** {}\n", scope.excluded_ips.len()));
-    out.push_str(&format!("- **Excluded Adapters (MAC):** {}\n\n", scope.excluded_macs.len()));
+    out.push_str(&format!(
+        "- **Excluded Hosts (IP):** {}\n",
+        scope.excluded_ips.len()
+    ));
+    out.push_str(&format!(
+        "- **Excluded Adapters (MAC):** {}\n\n",
+        scope.excluded_macs.len()
+    ));
 
     // Executive Metrics
     let mut crit = 0;
@@ -57,14 +72,26 @@ pub fn export_markdown(
     out.push_str("## 2. Assessment Summary & Metrics\n\n");
     out.push_str("| Metric | Value |\n");
     out.push_str("| --- | --- |\n");
-    out.push_str(&format!("| Hosts with Open Services | {} |\n", services.len()));
+    out.push_str(&format!(
+        "| Hosts with Open Services | {} |\n",
+        services.len()
+    ));
     let total_services: usize = services.values().map(|v| v.len()).sum();
-    out.push_str(&format!("| Total Discovered Services | {} |\n", total_services));
-    out.push_str(&format!("| Total Security Findings | {} |\n", findings.len()));
+    out.push_str(&format!(
+        "| Total Discovered Services | {} |\n",
+        total_services
+    ));
+    out.push_str(&format!(
+        "| Total Security Findings | {} |\n",
+        findings.len()
+    ));
     out.push_str(&format!("| Critical Vulnerabilities | {} |\n", crit));
     out.push_str(&format!("| High Risk Issues | {} |\n", high));
     out.push_str(&format!("| Medium Risk Issues | {} |\n", med));
-    out.push_str(&format!("| Low Risk / Informational | {} |\n\n", low + info));
+    out.push_str(&format!(
+        "| Low Risk / Informational | {} |\n\n",
+        low + info
+    ));
 
     // Discovered Services Table
     out.push_str("## 3. Discovered Network Services\n\n");
@@ -80,17 +107,23 @@ pub fn export_markdown(
             if let Some(entries) = services.get(ip) {
                 for s in entries {
                     let banner = s.banner.as_deref().unwrap_or("-");
-                    let clean_banner = banner.replace('|', "\\|").replace('\n', " ").replace('\r', "");
+                    let clean_banner = banner
+                        .replace('|', "\\|")
+                        .replace('\n', " ")
+                        .replace('\r', "");
                     out.push_str(&format!(
                         "| `{}` | `{}` | {} | {} | {} |\n",
-                        ip, s.port, s.transport.to_uppercase(), s.service_name, clean_banner
+                        ip,
+                        s.port,
+                        s.transport.to_uppercase(),
+                        s.service_name,
+                        clean_banner
                     ));
                 }
             }
         }
         out.push('\n');
     }
-
 
     // Security Posture Findings
     out.push_str("## 4. Security Posture & Exposure Findings\n\n");
@@ -111,11 +144,18 @@ pub fn export_markdown(
             let port_str = f.port.map(|p| format!(":{}", p)).unwrap_or_default();
             out.push_str(&format!(
                 "#### {}. [{:?}] {} (`{}`{})\n\n",
-                idx + 1, f.severity, f.title, f.target_ip, port_str
+                idx + 1,
+                f.severity,
+                f.title,
+                f.target_ip,
+                port_str
             ));
             out.push_str(&format!("- **Rule ID:** `{}`\n", f.rule_id));
             out.push_str(&format!("- **Description:** {}\n", f.description));
-            out.push_str(&format!("- **Recommended Remediation:** {}\n\n", f.remediation));
+            out.push_str(&format!(
+                "- **Recommended Remediation:** {}\n\n",
+                f.remediation
+            ));
         }
     }
 
@@ -168,37 +208,40 @@ pub fn export_sarif(findings: &[AuditFinding]) -> Result<String, serde_json::Err
         }
     }
 
-    let results: Vec<_> = findings.iter().map(|f| {
-        let level = match f.severity {
-            AuditSeverity::Critical | AuditSeverity::High => "error",
-            AuditSeverity::Medium => "warning",
-            AuditSeverity::Low | AuditSeverity::Info => "note",
-        };
+    let results: Vec<_> = findings
+        .iter()
+        .map(|f| {
+            let level = match f.severity {
+                AuditSeverity::Critical | AuditSeverity::High => "error",
+                AuditSeverity::Medium => "warning",
+                AuditSeverity::Low | AuditSeverity::Info => "note",
+            };
 
-        let target_endpoint = if let Some(p) = f.port {
-            format!("{}:{}", f.target_ip, p)
-        } else {
-            f.target_ip.to_string()
-        };
+            let target_endpoint = if let Some(p) = f.port {
+                format!("{}:{}", f.target_ip, p)
+            } else {
+                f.target_ip.to_string()
+            };
 
-        json!({
-            "ruleId": f.rule_id,
-            "level": level,
-            "message": {
-                "text": format!("{}: {}", f.title, f.description)
-            },
-            "locations": [
-                {
-                    "logicalLocations": [
-                        {
-                            "name": target_endpoint,
-                            "kind": "network-endpoint"
-                        }
-                    ]
-                }
-            ]
+            json!({
+                "ruleId": f.rule_id,
+                "level": level,
+                "message": {
+                    "text": format!("{}: {}", f.title, f.description)
+                },
+                "locations": [
+                    {
+                        "logicalLocations": [
+                            {
+                                "name": target_endpoint,
+                                "kind": "network-endpoint"
+                            }
+                        ]
+                    }
+                ]
+            })
         })
-    }).collect();
+        .collect();
 
     let sarif = json!({
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",

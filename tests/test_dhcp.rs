@@ -15,7 +15,7 @@ fn test_dhcp_option12_parsing() {
     packet.extend_from_slice(&[0x00; 5]);
     packet.push(17); // UDP (17)
     packet.extend_from_slice(&[0x00, 0x00]); // Checksum
-    // Src IP: 192.168.18.55
+                                             // Src IP: 192.168.18.55
     packet.extend_from_slice(&[192, 168, 18, 55]);
     // Dst IP: 255.255.255.255
     packet.extend_from_slice(&[255, 255, 255, 255]);
@@ -29,7 +29,7 @@ fn test_dhcp_option12_parsing() {
     // DHCP body (240 bytes minimum + options)
     let mut dhcp_body = vec![0u8; 240];
     dhcp_body[0] = 1; // BOOTREQUEST
-    // ciaddr at 12: 192.168.18.55
+                      // ciaddr at 12: 192.168.18.55
     dhcp_body[12] = 192;
     dhcp_body[13] = 168;
     dhcp_body[14] = 18;

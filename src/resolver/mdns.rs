@@ -4,10 +4,15 @@ use std::time::Duration;
 /// Queries mDNS (UDP 5353) to resolve Apple, Android, Linux, and IoT device names
 pub fn query_mdns(ip: Ipv4Addr) -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.set_read_timeout(Some(Duration::from_millis(70))).ok()?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(70)))
+        .ok()?;
 
     let octets = ip.octets();
-    let ptr_name = format!("{}.{}.{}.{}.in-addr.arpa", octets[3], octets[2], octets[1], octets[0]);
+    let ptr_name = format!(
+        "{}.{}.{}.{}.in-addr.arpa",
+        octets[3], octets[2], octets[1], octets[0]
+    );
 
     // Send reverse PTR query as well as workstation query
     for query_domain in [&ptr_name, "_workstation._tcp.local"] {
@@ -47,9 +52,17 @@ pub fn parse_dns_name(buf: &[u8]) -> Option<String> {
 
     for pat in patterns {
         // Iterate through all occurrences of the pattern in buf
-        for (pos, _) in buf.windows(pat.len()).enumerate().filter(|(_, w)| *w == pat) {
+        for (pos, _) in buf
+            .windows(pat.len())
+            .enumerate()
+            .filter(|(_, w)| *w == pat)
+        {
             let mut start = pos;
-            while start > 0 && buf[start - 1] >= 0x20 && buf[start - 1] < 0x7f && buf[start - 1] != b'.' {
+            while start > 0
+                && buf[start - 1] >= 0x20
+                && buf[start - 1] < 0x7f
+                && buf[start - 1] != b'.'
+            {
                 start -= 1;
             }
 

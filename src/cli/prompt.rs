@@ -1,13 +1,25 @@
+use colored::*;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
-use colored::*;
+use std::sync::Arc;
 
 use crate::cli::table::{
-    render_findings_table, render_hosts_table, render_scope_table, render_services_table,
+    render_findings_table, render_hosts_table, render_router_capabilities_table,
+    render_router_devices_table, render_router_diagnostics_report, render_router_history_table,
+    render_router_inventory_table, render_router_plan_preview, render_router_policies_table,
+    render_router_policy_detail, render_router_providers_table,
+    render_router_unified_policies_table, render_scope_table, render_services_table,
 };
 use crate::core::assessment::{AuditFinding, ServiceEntry};
 use crate::core::scope::{Ipv4Cidr, ScopeManager};
+use crate::gateway::admin::{
+    find_ssh_client, AvmAdminProvider, HttpAvmTransport, HttpUnifiTransport,
+    HttpsMikroTikTransport, MikroTikAdminProvider, MockRouterAdminProvider, OpenWrtAdminProvider,
+    OperationPlanRequest, PolicyDuration, PolicyExecutionEngine, PolicyPersistence, PolicyScope,
+    RouterAdminProvider, RouterCredentials, RouterRegistry, SshConfig, SshOpenWrtTransport,
+    UnifiAdminProvider,
+};
 use crate::limiter::{FaultProfile, TrafficLimiter};
 use crate::scanner::SubnetScanner;
 use crate::spoofer::ArpSpoofer;
@@ -25,8 +37,44 @@ pub struct RustrictCli {
     scope: ScopeManager,
     services: HashMap<Ipv4Addr, Vec<ServiceEntry>>,
     findings: Vec<AuditFinding>,
+    admin_provider: Arc<dyn RouterAdminProvider>,
+    router_registry: Arc<RouterRegistry>,
+    policy_engine: Arc<PolicyExecutionEngine>,
 }
 
+/// Reads password from console with echo disabled to prevent credential leaking
+fn read_masked_password() -> io::Result<String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{
+            GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE,
+        };
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            let mut mode = 0;
+            if !handle.is_null()
+                && handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+                && GetConsoleMode(handle, &mut mode) != 0
+            {
+                let prev_mode = mode;
+                let no_echo = mode & !ENABLE_ECHO_INPUT;
+                SetConsoleMode(handle, no_echo);
+
+                let mut input = String::new();
+                let res = io::stdin().read_line(&mut input);
+
+                SetConsoleMode(handle, prev_mode);
+                println!(); // Print newline since Enter wasn't echoed
+
+                return res.map(|_| input.trim().to_string());
+            }
+        }
+    }
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
 
 impl RustrictCli {
     pub fn new(iface: NetworkInterface) -> Self {
@@ -100,6 +148,11 @@ impl RustrictCli {
             spoofer_clone.stop();
         });
 
+        let router_registry = Arc::new(RouterRegistry::new(iface.gateway));
+        router_registry.set_controller_ip(iface.ip);
+        let policy_engine = Arc::new(PolicyExecutionEngine::new(router_registry.clone()));
+        let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+
         Self {
             iface,
             scanner,
@@ -111,9 +164,31 @@ impl RustrictCli {
             scope,
             services: HashMap::new(),
             findings: Vec::new(),
+            admin_provider,
+            router_registry,
+            policy_engine,
         }
     }
 
+    pub fn with_admin_provider(mut self, provider: Arc<dyn RouterAdminProvider>) -> Self {
+        let _ = self
+            .router_registry
+            .connect("mock", provider.clone(), "internal://in-memory");
+        self.admin_provider = self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+        self
+    }
+
+    pub fn admin_provider(&self) -> &Arc<dyn RouterAdminProvider> {
+        &self.admin_provider
+    }
+
+    pub fn router_registry(&self) -> &Arc<RouterRegistry> {
+        &self.router_registry
+    }
+
+    pub fn policy_engine(&self) -> &Arc<PolicyExecutionEngine> {
+        &self.policy_engine
+    }
 
     pub fn shutdown(&mut self) {
         self.limiter.stop();
@@ -151,6 +226,7 @@ impl RustrictCli {
                 "block" => self.handle_block(&args[1..]),
                 "free" => self.handle_free(&args[1..]),
                 "add" => self.handle_add(&args[1..]),
+                "router" => self.handle_router(&args[1..]),
                 "clear" | "cls" => {
                     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
                     let _ = io::stdout().flush();
@@ -163,14 +239,16 @@ impl RustrictCli {
                 }
                 cmd => println!("{}: command not found. Type 'help' for commands.", cmd),
             }
-
         }
     }
 
     fn handle_scan(&mut self, args: &[&str]) {
         let is_fresh = args.contains(&"--fresh");
         if is_fresh {
-            println!("{}", "Performing clean fresh scan (bypassing cache)...".bright_yellow());
+            println!(
+                "{}",
+                "Performing clean fresh scan (bypassing cache)...".bright_yellow()
+            );
         } else {
             println!("{}", "Scanning subnet for online hosts...".yellow());
         }
@@ -181,7 +259,9 @@ impl RustrictCli {
             if pos + 1 < args.len() {
                 let parts: Vec<&str> = args[pos + 1].split('-').collect();
                 if parts.len() == 2 {
-                    if let (Ok(start), Ok(end)) = (parts[0].parse::<Ipv4Addr>(), parts[1].parse::<Ipv4Addr>()) {
+                    if let (Ok(start), Ok(end)) =
+                        (parts[0].parse::<Ipv4Addr>(), parts[1].parse::<Ipv4Addr>())
+                    {
                         custom_range = Some((start, end));
                     }
                 }
@@ -190,11 +270,19 @@ impl RustrictCli {
 
         let progress_cb = |scanned: usize, total: usize, discovered: usize| {
             let width = 28;
-            let ratio = if total > 0 { (scanned as f64) / (total as f64) } else { 1.0 };
+            let ratio = if total > 0 {
+                (scanned as f64) / (total as f64)
+            } else {
+                1.0
+            };
             let filled = ((ratio * width as f64) as usize).min(width);
             let empty = width - filled;
 
-            let bar = format!("{}{}", "█".repeat(filled).bright_cyan(), "░".repeat(empty).white().dimmed());
+            let bar = format!(
+                "{}{}",
+                "█".repeat(filled).bright_cyan(),
+                "░".repeat(empty).white().dimmed()
+            );
             let percent = (ratio * 100.0) as u32;
 
             print!(
@@ -227,8 +315,16 @@ impl RustrictCli {
         render_hosts_table(&self.hosts);
 
         if args.contains(&"--ports") {
-            println!("\n{} Performing service enumeration on discovered hosts...", "[SCAN]".cyan().bold());
-            let online_ips: Vec<Ipv4Addr> = self.hosts.iter().filter(|h| h.online).map(|h| h.ip).collect();
+            println!(
+                "\n{} Performing service enumeration on discovered hosts...",
+                "[SCAN]".cyan().bold()
+            );
+            let online_ips: Vec<Ipv4Addr> = self
+                .hosts
+                .iter()
+                .filter(|h| h.online)
+                .map(|h| h.ip)
+                .collect();
             let top_ports = crate::probes::get_top_port_numbers();
             for ip in online_ips {
                 let open = crate::probes::scan_host_ports(
@@ -245,12 +341,12 @@ impl RustrictCli {
         }
     }
 
-
-
     fn handle_hosts(&mut self) {
         // Merge passive discoveries from sniffer
         for (ip, mac, name) in self.sniffer.get_all_entries() {
-            if ip == self.iface.gateway || (self.iface.gateway_mac != MacAddress::ZERO && mac == self.iface.gateway_mac) {
+            if ip == self.iface.gateway
+                || (self.iface.gateway_mac != MacAddress::ZERO && mac == self.iface.gateway_mac)
+            {
                 continue;
             }
             if let Some(existing) = self.hosts.iter_mut().find(|h| h.ip == ip) {
@@ -263,14 +359,8 @@ impl RustrictCli {
             } else if !mac.is_zero() {
                 let id = self.hosts.len();
                 let vendor = crate::resolver::oui::lookup_vendor(&mac).to_string();
-                let mut new_h = Host::with_source(
-                    id,
-                    ip,
-                    mac,
-                    name,
-                    crate::types::NameSource::Dhcp,
-                    vendor,
-                );
+                let mut new_h =
+                    Host::with_source(id, ip, mac, name, crate::types::NameSource::Dhcp, vendor);
                 new_h.online = true;
                 self.hosts.push(new_h);
             }
@@ -322,7 +412,12 @@ impl RustrictCli {
         for id in ids {
             if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
-                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    println!(
+                        "{} Scope Error for {}: {}",
+                        "[ERR]".red().bold(),
+                        host.ip,
+                        reason
+                    );
                     continue;
                 }
                 host.status = HostStatus::Limited(rate, dir);
@@ -363,7 +458,12 @@ impl RustrictCli {
         for id in ids {
             if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
-                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    println!(
+                        "{} Scope Error for {}: {}",
+                        "[ERR]".red().bold(),
+                        host.ip,
+                        reason
+                    );
                     continue;
                 }
                 host.status = HostStatus::Blocked(dir);
@@ -380,7 +480,6 @@ impl RustrictCli {
             }
         }
     }
-
 
     fn handle_free(&mut self, args: &[&str]) {
         if args.is_empty() {
@@ -435,7 +534,8 @@ impl RustrictCli {
             }
         }
 
-        let identity = crate::resolver::resolve_identity(ip, &mac, self.iface.ip, self.iface.gateway);
+        let identity =
+            crate::resolver::resolve_identity(ip, &mac, self.iface.ip, self.iface.gateway);
 
         // Check if host already exists; update it instead of creating duplicates
         if let Some(existing) = self.hosts.iter_mut().find(|h| h.ip == ip) {
@@ -443,11 +543,28 @@ impl RustrictCli {
             existing.name = identity.hostname;
             existing.name_source = identity.source;
             existing.vendor = identity.vendor;
-            println!("{} Updated existing host {} ({})", "OK".green().bold(), existing.ip, existing.mac);
+            println!(
+                "{} Updated existing host {} ({})",
+                "OK".green().bold(),
+                existing.ip,
+                existing.mac
+            );
         } else {
             let id = self.hosts.len();
-            let host = Host::with_source(id, ip, mac, identity.hostname, identity.source, identity.vendor);
-            println!("{} Added host {} ({})", "OK".green().bold(), host.ip, host.mac);
+            let host = Host::with_source(
+                id,
+                ip,
+                mac,
+                identity.hostname,
+                identity.source,
+                identity.vendor,
+            );
+            println!(
+                "{} Added host {} ({})",
+                "OK".green().bold(),
+                host.ip,
+                host.mac
+            );
             self.hosts.push(host);
         }
 
@@ -468,21 +585,27 @@ impl RustrictCli {
             self.hosts.retain(|h| {
                 h.persistent_block
                     || h.status != HostStatus::Free
-                    || new_hosts.iter().any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac))
+                    || new_hosts
+                        .iter()
+                        .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac))
             });
         }
 
         // Update reachability flags for remaining existing hosts
         for h in &mut self.hosts {
-            let is_alive = new_hosts.iter().any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac));
+            let is_alive = new_hosts
+                .iter()
+                .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac));
             h.online = is_alive;
         }
 
         // Upsert newly discovered/confirmed hosts
         for new_h in new_hosts {
-            if let Some(existing) = self.hosts.iter_mut().find(|h| {
-                (h.mac != MacAddress::ZERO && h.mac == new_h.mac) || h.ip == new_h.ip
-            }) {
+            if let Some(existing) = self
+                .hosts
+                .iter_mut()
+                .find(|h| (h.mac != MacAddress::ZERO && h.mac == new_h.mac) || h.ip == new_h.ip)
+            {
                 existing.ip = new_h.ip;
                 existing.mac = new_h.mac;
                 existing.online = true;
@@ -636,7 +759,12 @@ impl RustrictCli {
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
-                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    println!(
+                        "{} Scope Error for {}: {}",
+                        "[ERR]".red().bold(),
+                        host.ip,
+                        reason
+                    );
                     continue;
                 }
 
@@ -677,7 +805,12 @@ impl RustrictCli {
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
-                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    println!(
+                        "{} Scope Error for {}: {}",
+                        "[ERR]".red().bold(),
+                        host.ip,
+                        reason
+                    );
                     continue;
                 }
 
@@ -694,7 +827,9 @@ impl RustrictCli {
                 if let Some(svcs) = self.services.get(&host.ip) {
                     for s in svcs {
                         let name_lower = s.service_name.to_lowercase();
-                        if (name_lower.contains("ssl") || name_lower.contains("https") || name_lower.contains("tls"))
+                        if (name_lower.contains("ssl")
+                            || name_lower.contains("https")
+                            || name_lower.contains("tls"))
                             && !tls_ports.contains(&s.port)
                         {
                             tls_ports.push(s.port);
@@ -711,11 +846,12 @@ impl RustrictCli {
                 let sf = crate::probes::audit_smb_posture(host.ip);
                 host_findings.extend(sf);
 
-
                 render_findings_table(&host_findings);
 
                 for f in host_findings {
-                    if !self.findings.iter().any(|ex| ex.rule_id == f.rule_id && ex.target_ip == f.target_ip && ex.port == f.port) {
+                    if !self.findings.iter().any(|ex| {
+                        ex.rule_id == f.rule_id && ex.target_ip == f.target_ip && ex.port == f.port
+                    }) {
                         self.findings.push(f);
                     }
                 }
@@ -741,7 +877,11 @@ impl RustrictCli {
             for id in ids {
                 if let Some(host) = self.hosts.iter().find(|h| h.id == id) {
                     self.limiter.clear_fault(&host.ip);
-                    println!("{} Cleared fault simulation for {}", "OK".green().bold(), host.ip);
+                    println!(
+                        "{} Cleared fault simulation for {}",
+                        "OK".green().bold(),
+                        host.ip
+                    );
                 }
             }
             return;
@@ -788,7 +928,12 @@ impl RustrictCli {
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
-                    println!("{} Scope Error for {}: {}", "[ERR]".red().bold(), host.ip, reason);
+                    println!(
+                        "{} Scope Error for {}: {}",
+                        "[ERR]".red().bold(),
+                        host.ip,
+                        reason
+                    );
                     continue;
                 }
 
@@ -804,11 +949,13 @@ impl RustrictCli {
                 );
             }
         }
-
     }
 
     fn handle_export(&self, args: &[&str]) {
-        let fmt = args.first().map(|s| s.to_lowercase()).unwrap_or_else(|| "markdown".to_string());
+        let fmt = args
+            .first()
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|| "markdown".to_string());
         let default_filename = match fmt.as_str() {
             "json" => "rustrict-assessment.json",
             "sarif" => "rustrict-assessment.sarif",
@@ -819,29 +966,38 @@ impl RustrictCli {
         let result = match fmt.as_str() {
             "json" => crate::cli::export::export_json(&self.scope, &self.services, &self.findings)
                 .map_err(|e| e.to_string()),
-            "sarif" => crate::cli::export::export_sarif(&self.findings)
-                .map_err(|e| e.to_string()),
-            "markdown" | "md" => Ok(crate::cli::export::export_markdown(&self.scope, &self.services, &self.findings)),
-            _ => Ok(crate::cli::export::export_markdown(&self.scope, &self.services, &self.findings)),
+            "sarif" => crate::cli::export::export_sarif(&self.findings).map_err(|e| e.to_string()),
+            "markdown" | "md" => Ok(crate::cli::export::export_markdown(
+                &self.scope,
+                &self.services,
+                &self.findings,
+            )),
+            _ => Ok(crate::cli::export::export_markdown(
+                &self.scope,
+                &self.services,
+                &self.findings,
+            )),
         };
 
-
         match result {
-            Ok(content) => {
-                match crate::cli::export::save_report(target_file, &content) {
-                    Ok(_) => {
-                        println!(
-                            "{} Successfully exported assessment report to '{}' ({} bytes)",
-                            "OK".green().bold(),
-                            target_file,
-                            content.len()
-                        );
-                    }
-                    Err(e) => {
-                        println!("{} Failed to write report to '{}': {}", "[ERR]".red().bold(), target_file, e);
-                    }
+            Ok(content) => match crate::cli::export::save_report(target_file, &content) {
+                Ok(_) => {
+                    println!(
+                        "{} Successfully exported assessment report to '{}' ({} bytes)",
+                        "OK".green().bold(),
+                        target_file,
+                        content.len()
+                    );
                 }
-            }
+                Err(e) => {
+                    println!(
+                        "{} Failed to write report to '{}': {}",
+                        "[ERR]".red().bold(),
+                        target_file,
+                        e
+                    );
+                }
+            },
             Err(e) => println!("{} Failed to generate export: {}", "[ERR]".red().bold(), e),
         }
     }
@@ -863,10 +1019,1567 @@ impl RustrictCli {
         println!("  block <id|ip|all> [...]                         Blocks host internet access [Persists across restarts]");
         println!("  free <id|ip|all>                                Removes limits and unblocks host [Clears persistent rule]");
         println!("  add <ip> [--mac <mac>]                          Manually adds a host to table");
+        println!("  router [capabilities|status|policies|preview|pause|resume|adjust|connect] [...] Router administration via authenticated firewall");
         println!("  clear                                           Clears screen");
         println!("  quit / exit                                     Exits rustrict and restores network\n");
     }
 
+    fn handle_router(&mut self, args: &[&str]) {
+        if args.is_empty() || args[0].eq_ignore_ascii_case("help") {
+            println!(
+                "{}",
+                "Router Administrative Commands:".bright_yellow().bold()
+            );
+            println!("  router inventory                                Normalized provider inventory with live vs cached router identity");
+            println!("  router providers                                List all supported router administration providers and capabilities");
+            println!("  router capabilities                             Inspect discovered router capabilities and evidence classification");
+            println!("  router status                                   Display current router identity and connection status");
+            println!("  router diagnostics / router diag                Run comprehensive read-only diagnostic checks without mutating rules");
+            println!("  router devices / router clients                 List connected client devices discovered on router (where supported)");
+            println!("  router policies [policy_id]                     Display unified router policies or inspect specific policy");
+            println!("  router policy <policy_id>                       Display detailed inspection and event timeline of a policy");
+            println!("  router refresh / router reconcile               Safely verify active router policies without mutating router rules");
+            println!("  router history / router records                 Display persistent audit records of policy executions on Windows");
+            println!("  router preview <all|id|ip> [options]            Dry-run preview of an administrative policy without executing it");
+            println!("  router pause <all|id|ip> [options]              Enforce an internet pause on the router (requires auth)");
+            println!("  router resume <all|id|ip>                       Revoke router-enforced pause and resume internet access");
+            println!("  router adjust <all|id|ip> --duration <secs>     Extend or shorten an existing policy's expiration");
+            println!("  router connect <provider> [endpoint] [options]  Connect to a router provider explicitly");
+            println!("  router disconnect                               Cleanly disconnect active provider (no fallback to ARP poisoning)");
+            println!("  router connect http [endpoint] [--user <user>]  Connect to OpenWrt via authenticated HTTP JSON-RPC");
+            println!("  router connect ssh [host] [options]             Connect to OpenWrt via authenticated SSH");
+            println!("  router connect mikrotik [endpoint] [options]    Connect to MikroTik RouterOS via HTTPS REST API");
+            println!("  router connect avm [endpoint] [options]         Connect to AVM FRITZ!Box via TR-064 SOAP API");
+            println!("  router connect unifi [endpoint] [options]       Connect to Ubiquiti UniFi Controller via HTTPS REST API");
+            println!("  router connect mock                             Connect to in-memory Mock Router Provider");
+            println!("    UniFi Options:");
+            println!("      --site <site-id>       UniFi site identifier (default: default)");
+            println!("      --user <username>      UniFi username or \"api-key\" (default: admin)");
+            println!(
+                "      --ca-cert <path>       Custom CA certificate path for TLS verification"
+            );
+            println!("    AVM Options:");
+            println!("      --user <username>      FRITZ!Box username (default: admin)");
+            println!(
+                "      --ca-cert <path>       Custom CA certificate path for TLS verification"
+            );
+            println!("    MikroTik Options:");
+            println!("      --user <username>      RouterOS username (default: admin)");
+            println!(
+                "      --ca-cert <path>       Custom CA certificate path for TLS verification"
+            );
+            println!("    SSH Options:");
+            println!("      --port <port>          SSH port (default: 22)");
+            println!("      --user <username>      SSH username (default: root)");
+            println!(
+                "      --key <key_path>       Path to SSH private key (e.g. ~/.ssh/id_ed25519)"
+            );
+            println!("      --pin <host_key>       Pin expected host public key / fingerprint");
+            println!("    Policy Options:");
+            println!("      --duration <seconds>   Temporary duration with autonomous router-side expiry (e.g. --duration 300)");
+            println!("      --persistent           Configure policy to persist on router across reboots/disconnects");
+            return;
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "inventory" => {
+                let inventory = self.policy_engine.get_inventory();
+                render_router_inventory_table(&inventory);
+            }
+            "providers" => {
+                let providers = self.router_registry.list_providers();
+                let active_id = self.router_registry.active_provider_id();
+                render_router_providers_table(&providers, active_id.as_deref());
+            }
+            "disconnect" => {
+                if self.router_registry.is_connected() {
+                    let prev_id = self
+                        .router_registry
+                        .active_provider_id()
+                        .unwrap_or_default();
+                    self.router_registry.disconnect();
+                    self.admin_provider =
+                        self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+                    println!("{} Disconnected router provider '{}'. Subsystem cleanly disconnected without fallback to ARP poisoning.", "[INFO]".cyan().bold(), prev_id);
+                } else {
+                    println!(
+                        "{} No router provider currently connected.",
+                        "[INFO]".cyan().bold()
+                    );
+                }
+            }
+            "capabilities" | "caps" => {
+                let caps = self.admin_provider.inspect_capabilities();
+                render_router_capabilities_table(&caps);
+            }
+            "status" => {
+                let reg_status = self.router_registry.get_status();
+                if !reg_status.is_connected {
+                    println!(
+                        "{}",
+                        "Router Identity & Administration Status:"
+                            .bright_yellow()
+                            .bold()
+                    );
+                    println!("  • Status:         {}", "DISCONNECTED".red().bold());
+                    println!("  • Connection:     No router provider is currently connected");
+                    println!("  • Available:      Use 'router inventory' or 'router providers' to view options, and 'router connect <provider>' to connect.");
+                    if let Some(err) = self.policy_engine.last_persistence_error() {
+                        println!(
+                            "  • Persistence Alert: {}",
+                            format!("DISK WRITE FAILED: {}", err).red().bold()
+                        );
+                    }
+                    return;
+                }
+                match self.admin_provider.detect_identity() {
+                    Ok(id) => {
+                        println!(
+                            "{}",
+                            "Router Identity & Administration Status:"
+                                .bright_yellow()
+                                .bold()
+                        );
+                        println!(
+                            "  • Provider:       {}",
+                            self.admin_provider.name().bright_cyan()
+                        );
+                        if let Some(id_str) = self.router_registry.active_provider_id() {
+                            println!("  • Provider ID:    {}", id_str.bright_cyan());
+                        }
+                        if let Some(ep) = &reg_status.endpoint {
+                            println!(
+                                "  • Endpoint:       {}",
+                                crate::gateway::admin::sanitize_endpoint(ep).bright_white()
+                            );
+                        }
+                        println!("  • Router:         {}", id.display_summary());
+                        if reg_status.provider_id.as_deref() == Some("mock") {
+                            println!(
+                                "  • Mode:           {}",
+                                "[SIMULATED / TEST MODE] (In-memory mock router; no physical hardware modified)"
+                                    .bright_yellow()
+                                    .bold()
+                            );
+                        }
+                        println!(
+                            "  • Authenticated:  {}",
+                            if self.admin_provider.is_authenticated() {
+                                "YES".green().bold()
+                            } else {
+                                "NO".red().bold()
+                            }
+                        );
+                        if let Some(contact) = reg_status.last_contact_unix {
+                            println!("  • Last Contact:   Unix timestamp {} (LIVE)", contact);
+                        }
+                        println!(
+                            "  • Enforcement:    Router-Side Forwarding Rejection (Hardware L3/L4)"
+                        );
+                        println!(
+                            "  • Management:     Router administration & intra-LAN preserved 100%"
+                        );
+                        if let Some(err) = self.policy_engine.last_persistence_error() {
+                            println!(
+                                "  • Persistence Alert: {}",
+                                format!("DISK WRITE FAILED: {}", err).red().bold()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "{} Failed to query router identity: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                    }
+                }
+            }
+            "diagnostics" | "diag" => {
+                println!(
+                    "{} Executing read-only router diagnostic checks...",
+                    "[INFO]".cyan().bold()
+                );
+                let report = self.policy_engine.run_diagnostics();
+                render_router_diagnostics_report(&report);
+            }
+            "devices" | "clients" => {
+                let reg_status = self.router_registry.get_status();
+                let active_id = self.router_registry.active_provider_id();
+
+                if !reg_status.is_connected {
+                    println!(
+                        "{}",
+                        "Router Connected Client Device Inventory:"
+                            .bright_yellow()
+                            .bold()
+                    );
+                    println!("  • Connection Status: {}", "DISCONNECTED".red().bold());
+                    println!("  • Selected Provider: None");
+                    println!(
+                        "  • Query Mode:        Unavailable (Live router connection required)"
+                    );
+                    println!();
+                    println!(
+                        "{} No router provider is currently connected. Establish a connection first with 'router connect <provider>'.",
+                        "[INFO]".cyan().bold()
+                    );
+
+                    if !self.hosts.is_empty() {
+                        println!(
+                            "{} Displaying {} host(s) discovered via local PC passive ARP/subnet scanning (NOT router-verified):",
+                            "[LOCAL PC SCAN]".yellow().bold(),
+                            self.hosts.len()
+                        );
+                        render_hosts_table(&self.hosts);
+                        println!(
+                            "{} Note: The devices above reflect controller PC scan data, NOT router-enforced client leases.",
+                            "[NOTE]".cyan().bold()
+                        );
+                    }
+                    return;
+                }
+
+                let pid = active_id.unwrap_or_else(|| "unknown".into());
+                let provider_name = self.admin_provider.name();
+                println!(
+                    "{}",
+                    "Router Connected Client Device Inventory:"
+                        .bright_yellow()
+                        .bold()
+                );
+                println!(
+                    "  • Selected Provider: {} ({})",
+                    provider_name.bright_cyan(),
+                    pid.bright_cyan()
+                );
+                if let Some(ep) = &reg_status.endpoint {
+                    println!(
+                        "  • Management Endpoint: {}",
+                        crate::gateway::admin::sanitize_endpoint(ep).bright_white()
+                    );
+                }
+                println!("  • Query Mode:        Live Router Inventory (Read-Only)");
+                println!();
+
+                match self.policy_engine.list_devices() {
+                    Ok(devices) => {
+                        if devices.is_empty() {
+                            println!(
+                                "{} No connected devices returned by provider '{}' (inventory is currently empty).",
+                                "[INFO]".cyan().bold(),
+                                pid
+                            );
+                        } else {
+                            render_router_devices_table(&devices);
+                        }
+                    }
+                    Err(crate::gateway::admin::AdminError::UnsupportedOperation(msg)) => {
+                        println!(
+                            "{} Client device inventory unsupported on provider '{}': {}",
+                            "[INFO]".yellow().bold(),
+                            pid,
+                            msg
+                        );
+                        println!(
+                            "  (Device inventory is supported on UniFi Network REST and AVM FRITZ!Box TR-064)"
+                        );
+                        println!(
+                            "  (OpenWrt and MikroTik RouterOS do not currently support client device inventory via this transport)"
+                        );
+                    }
+                    Err(e) => {
+                        let sanitized = crate::gateway::admin::sanitize_error(e);
+                        println!(
+                            "{} Failed to query router devices: {}",
+                            "[ERR]".red().bold(),
+                            sanitized
+                        );
+                    }
+                }
+            }
+            "policy" => {
+                if args.len() < 2 {
+                    println!("Usage: router policy <policy_id>");
+                    return;
+                }
+                self.show_policy_detail(args[1]);
+            }
+            "policies" => {
+                if let Some(err) = self.policy_engine.last_persistence_error() {
+                    println!(
+                        "{} Persistence alert: Policy state could not be persisted to disk: {}",
+                        "[ALERT]".yellow().bold(),
+                        err
+                    );
+                }
+                if args.len() > 1 && !args[1].is_empty() {
+                    self.show_policy_detail(args[1]);
+                } else {
+                    let unified = self.policy_engine.list_unified_policies();
+                    render_router_unified_policies_table(&unified);
+                }
+            }
+            "history" | "records" => {
+                let records = self.policy_engine.store().records();
+                render_router_history_table(&records);
+            }
+            "refresh" | "reconcile" => {
+                if !self.router_registry.is_connected() {
+                    println!(
+                        "{} No router provider currently connected. Querying live router rules requires an active provider connection.",
+                        "[INFO]".cyan().bold()
+                    );
+                    println!(
+                        "{} Displaying persistent historical state (unverified local state marked UNKNOWN until verified):",
+                        "[LOCAL STATE]".yellow().bold()
+                    );
+                    let hist = self.policy_engine.store().historical_policies();
+                    render_router_policies_table(&hist);
+                    return;
+                }
+
+                if !self.admin_provider.is_authenticated() {
+                    println!(
+                        "{} Router provider is connected but not authenticated. Run 'router connect' with credentials to authenticate.",
+                        "[WARN]".yellow().bold()
+                    );
+                    let hist = self.policy_engine.store().historical_policies();
+                    render_router_policies_table(&hist);
+                    return;
+                }
+
+                println!(
+                    "{} Querying live router firewall rules via {} (read-only verification)...",
+                    "[INFO]".cyan().bold(),
+                    self.admin_provider.name()
+                );
+
+                match self.admin_provider.reconcile_policies() {
+                    Ok(policies) => {
+                        println!(
+                            "{} Successfully refreshed router state! Discovered {} verified live policy rule(s).",
+                            "[SUCCESS]".green().bold(),
+                            policies.len()
+                        );
+                        render_router_policies_table(&policies);
+                    }
+                    Err(e) => {
+                        println!(
+                            "{} Failed to query live router rules: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                    }
+                }
+            }
+            "preview" => {
+                if args.len() < 2 {
+                    println!(
+                        "Usage: router preview <all|id|ip> [--duration <secs>] [--persistent]"
+                    );
+                    return;
+                }
+
+                let target_arg = args[1];
+                let mut duration = PolicyDuration::Indefinite;
+                let mut persistence = PolicyPersistence::VolatileSession;
+
+                let mut idx = 2;
+                while idx < args.len() {
+                    match args[idx].to_lowercase().as_str() {
+                        "--duration" | "-d" => {
+                            if idx + 1 < args.len() {
+                                if let Ok(secs) = args[idx + 1].parse::<u64>() {
+                                    if secs == 0 {
+                                        println!(
+                                            "{} Duration must be a positive number of seconds.",
+                                            "[ERR]".red().bold()
+                                        );
+                                        return;
+                                    }
+                                    duration = PolicyDuration::Temporary(
+                                        std::time::Duration::from_secs(secs),
+                                    );
+                                    idx += 2;
+                                    continue;
+                                }
+                            }
+                            println!(
+                                "{} Invalid or missing duration seconds. Example: --duration 300",
+                                "[ERR]".red().bold()
+                            );
+                            return;
+                        }
+                        "--persistent" | "-p" => {
+                            persistence = PolicyPersistence::RouterPersistent;
+                            idx += 1;
+                        }
+                        _ => {
+                            println!(
+                                "{} Unknown option '{}'",
+                                "[WARN]".yellow().bold(),
+                                args[idx]
+                            );
+                            idx += 1;
+                        }
+                    }
+                }
+
+                let (scope, target_macs) = if target_arg.eq_ignore_ascii_case("all") {
+                    (PolicyScope::NetworkWide, Vec::new())
+                } else {
+                    match self.resolve_single_target(target_arg) {
+                        Ok((ip, mac)) => {
+                            if let Err(e) = self.scope.validate_target(&ip, mac.as_ref()) {
+                                println!(
+                                    "{} Target {} is blocked by operational scope: {}",
+                                    "[ERR]".red().bold(),
+                                    ip,
+                                    e
+                                );
+                                return;
+                            }
+                            let macs = mac.into_iter().collect();
+                            (PolicyScope::SpecificTargets(vec![ip]), macs)
+                        }
+                        Err(e) => {
+                            println!("{} {}", "[ERR]".red().bold(), e);
+                            return;
+                        }
+                    }
+                };
+
+                let req = OperationPlanRequest {
+                    scope,
+                    duration,
+                    persistence,
+                    target_macs,
+                };
+
+                match self.admin_provider.plan_operation(&req) {
+                    Ok(plan) => {
+                        render_router_plan_preview(&plan);
+                    }
+                    Err(e) => {
+                        println!(
+                            "{} Failed to plan router operation: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                    }
+                }
+            }
+            "pause" => {
+                if args.len() < 2 {
+                    println!("Usage: router pause <all|id|ip> [--duration <secs>] [--persistent]");
+                    return;
+                }
+
+                if !self.admin_provider.is_authenticated() {
+                    println!(
+                        "{} Router administrative provider is not authenticated. Configure credentials or run 'router connect' first.",
+                        "[ERR]".red().bold()
+                    );
+                    println!(
+                        "{} Refusing to execute: will NOT silently fall back to ARP spoofing.",
+                        "[SECURITY]".yellow().bold()
+                    );
+                    return;
+                }
+
+                let target_arg = args[1];
+                let is_all = target_arg.eq_ignore_ascii_case("all");
+
+                if is_all {
+                    print!(
+                        "{} WARNING: You are requesting to pause internet transit for ALL network devices.\nConfirm network-wide router enforcement? [yes/N]: ",
+                        "[CONFIRMATION REQUIRED]".bright_red().bold()
+                    );
+                    let _ = io::stdout().flush();
+                    let mut confirm = String::new();
+                    if io::stdin().read_line(&mut confirm).is_err()
+                        || !confirm.trim().eq_ignore_ascii_case("yes")
+                    {
+                        println!(
+                            "{} Network-wide pause cancelled by administrator.",
+                            "[INFO]".cyan().bold()
+                        );
+                        return;
+                    }
+                }
+
+                let mut duration = PolicyDuration::Indefinite;
+                let mut persistence = PolicyPersistence::VolatileSession;
+
+                let mut idx = 2;
+                while idx < args.len() {
+                    match args[idx].to_lowercase().as_str() {
+                        "--duration" | "-d" => {
+                            if idx + 1 < args.len() {
+                                if let Ok(secs) = args[idx + 1].parse::<u64>() {
+                                    if secs == 0 {
+                                        println!(
+                                            "{} Duration must be a positive number of seconds.",
+                                            "[ERR]".red().bold()
+                                        );
+                                        return;
+                                    }
+                                    duration = PolicyDuration::Temporary(
+                                        std::time::Duration::from_secs(secs),
+                                    );
+                                    idx += 2;
+                                    continue;
+                                }
+                            }
+                            println!(
+                                "{} Invalid or missing duration seconds. Example: --duration 300",
+                                "[ERR]".red().bold()
+                            );
+                            return;
+                        }
+                        "--persistent" | "-p" => {
+                            persistence = PolicyPersistence::RouterPersistent;
+                            idx += 1;
+                        }
+                        _ => {
+                            println!(
+                                "{} Unknown option '{}'",
+                                "[WARN]".yellow().bold(),
+                                args[idx]
+                            );
+                            idx += 1;
+                        }
+                    }
+                }
+
+                let (scope, target_macs) = if is_all {
+                    (PolicyScope::NetworkWide, Vec::new())
+                } else {
+                    match self.resolve_single_target(target_arg) {
+                        Ok((ip, mac)) => {
+                            if let Err(e) = self.scope.validate_target(&ip, mac.as_ref()) {
+                                println!(
+                                    "{} Target {} is blocked by operational scope: {}",
+                                    "[ERR]".red().bold(),
+                                    ip,
+                                    e
+                                );
+                                return;
+                            }
+                            let macs = mac.into_iter().collect();
+                            (PolicyScope::SpecificTargets(vec![ip]), macs)
+                        }
+                        Err(e) => {
+                            println!("{} {}", "[ERR]".red().bold(), e);
+                            return;
+                        }
+                    }
+                };
+
+                let req = OperationPlanRequest {
+                    scope,
+                    duration,
+                    persistence,
+                    target_macs,
+                };
+
+                println!(
+                    "{} Applying policy via router firewall provider: {} (Enforcement: Router-side transit rejection)",
+                    "[EXEC]".cyan().bold(),
+                    self.admin_provider.name()
+                );
+
+                match self.admin_provider.apply_policy(&req) {
+                    Ok(active) => {
+                        println!(
+                            "{} Policy successfully applied by router! Policy ID: {}",
+                            "[SUCCESS]".green().bold(),
+                            active.policy_id.bright_yellow()
+                        );
+                        if self.router_registry.active_provider_id().as_deref() == Some("mock") {
+                            println!(
+                                "  • Notice:         {}",
+                                "[SIMULATED] Mock router test mode - no physical hardware changed."
+                                    .bright_yellow()
+                                    .bold()
+                            );
+                        }
+                        if let Some(exp) = active.expires_at_unix {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let remaining = exp.saturating_sub(now);
+                            println!(
+                                "  • Expiration: {:.1} minutes remaining (Unix timestamp: {})",
+                                remaining as f64 / 60.0,
+                                exp
+                            );
+                        } else {
+                            println!("  • Duration: Indefinite (manual 'router resume' required)");
+                        }
+                        println!(
+                            "  • Persistence: {}",
+                            if active.is_persistent {
+                                "Committed to Router Storage"
+                            } else {
+                                "Volatile Session"
+                            }
+                        );
+                        println!("  • Intra-LAN traffic & router administration port 80/443 remain 100% accessible.");
+                    }
+                    Err(e) => {
+                        println!(
+                            "{} Failed to apply router policy: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                        println!(
+                            "{} Refusing to fall back to ARP poisoning.",
+                            "[SECURITY]".yellow().bold()
+                        );
+                    }
+                }
+            }
+            "resume" => {
+                if args.len() < 2 {
+                    println!("Usage: router resume <all|id|ip>");
+                    return;
+                }
+
+                if !self.admin_provider.is_authenticated() {
+                    println!(
+                        "{} Router administrative provider is not authenticated.",
+                        "[ERR]".red().bold()
+                    );
+                    return;
+                }
+
+                let target_arg = args[1];
+                let is_all = target_arg.eq_ignore_ascii_case("all");
+
+                let scope = if is_all {
+                    PolicyScope::NetworkWide
+                } else if target_arg.starts_with("pol-")
+                    || self
+                        .policy_engine
+                        .store()
+                        .historical_policies()
+                        .iter()
+                        .any(|p| p.policy_id == target_arg)
+                {
+                    if let Some(pol) = self
+                        .policy_engine
+                        .store()
+                        .historical_policies()
+                        .iter()
+                        .find(|p| p.policy_id == target_arg)
+                    {
+                        pol.scope.clone()
+                    } else {
+                        println!(
+                            "{} Policy ID '{}' not found in recorded policies.",
+                            "[ERR]".red().bold(),
+                            target_arg
+                        );
+                        return;
+                    }
+                } else {
+                    match self.resolve_single_target(target_arg) {
+                        Ok((ip, _mac)) => PolicyScope::SpecificTargets(vec![ip]),
+                        Err(e) => {
+                            println!("{} {}", "[ERR]".red().bold(), e);
+                            return;
+                        }
+                    }
+                };
+
+                println!(
+                    "{} Revoking router policy rules via {}...",
+                    "[EXEC]".cyan().bold(),
+                    self.admin_provider.name()
+                );
+
+                match if is_all {
+                    self.admin_provider.resume_all()
+                } else {
+                    self.admin_provider.resume_policy(&scope)
+                } {
+                    Ok(resumed) => {
+                        println!(
+                            "{} Successfully resumed internet access! Removed {} policy rule(s): {:?}",
+                            "[SUCCESS]".green().bold(),
+                            resumed.len(),
+                            resumed
+                        );
+                        if self.router_registry.active_provider_id().as_deref() == Some("mock") {
+                            println!(
+                                "  • Notice:         {}",
+                                "[SIMULATED] Mock router test mode - no physical hardware changed."
+                                    .bright_yellow()
+                                    .bold()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "{} Failed to resume router policy: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                    }
+                }
+            }
+            "adjust" => {
+                if args.len() < 2 {
+                    println!("Usage: router adjust <all|id|ip> --duration <secs>");
+                    return;
+                }
+
+                if !self.admin_provider.is_authenticated() {
+                    println!(
+                        "{} Router administrative provider is not authenticated.",
+                        "[ERR]".red().bold()
+                    );
+                    return;
+                }
+
+                let target_arg = args[1];
+                let is_all = target_arg.eq_ignore_ascii_case("all");
+
+                let mut duration = None;
+                let mut idx = 2;
+                while idx < args.len() {
+                    match args[idx].to_lowercase().as_str() {
+                        "--duration" | "-d" => {
+                            if idx + 1 < args.len() {
+                                if let Ok(secs) = args[idx + 1].parse::<u64>() {
+                                    if secs > 0 {
+                                        duration = Some(PolicyDuration::Temporary(
+                                            std::time::Duration::from_secs(secs),
+                                        ));
+                                        idx += 2;
+                                        continue;
+                                    }
+                                }
+                            }
+                            println!(
+                                "{} Invalid duration seconds. Example: --duration 600",
+                                "[ERR]".red().bold()
+                            );
+                            return;
+                        }
+                        "--indefinite" => {
+                            duration = Some(PolicyDuration::Indefinite);
+                            idx += 1;
+                        }
+                        _ => {
+                            idx += 1;
+                        }
+                    }
+                }
+
+                let new_duration = match duration {
+                    Some(d) => d,
+                    None => {
+                        println!("Usage: router adjust <all|id|ip> --duration <secs>");
+                        return;
+                    }
+                };
+
+                let scope = if is_all {
+                    PolicyScope::NetworkWide
+                } else if target_arg.starts_with("pol-")
+                    || self
+                        .policy_engine
+                        .store()
+                        .historical_policies()
+                        .iter()
+                        .any(|p| p.policy_id == target_arg)
+                {
+                    if let Some(pol) = self
+                        .policy_engine
+                        .store()
+                        .historical_policies()
+                        .iter()
+                        .find(|p| p.policy_id == target_arg)
+                    {
+                        pol.scope.clone()
+                    } else {
+                        println!(
+                            "{} Policy ID '{}' not found in recorded policies.",
+                            "[ERR]".red().bold(),
+                            target_arg
+                        );
+                        return;
+                    }
+                } else {
+                    match self.resolve_single_target(target_arg) {
+                        Ok((ip, _mac)) => PolicyScope::SpecificTargets(vec![ip]),
+                        Err(e) => {
+                            println!("{} {}", "[ERR]".red().bold(), e);
+                            return;
+                        }
+                    }
+                };
+
+                println!(
+                    "{} Adjusting policy duration via {}...",
+                    "[EXEC]".cyan().bold(),
+                    self.admin_provider.name()
+                );
+
+                match self
+                    .admin_provider
+                    .adjust_policy_duration(&scope, &new_duration)
+                {
+                    Ok(updated) => {
+                        println!(
+                            "{} Successfully updated policy duration! Policy ID: {}",
+                            "[SUCCESS]".green().bold(),
+                            updated.policy_id.bright_yellow()
+                        );
+                        if let Some(exp) = updated.expires_at_unix {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let remaining = exp.saturating_sub(now);
+                            println!(
+                                "  • New Expiration: {:.1} minutes remaining (Unix timestamp: {})",
+                                remaining as f64 / 60.0,
+                                exp
+                            );
+                        } else {
+                            println!(
+                                "  • New Duration: Indefinite (manual 'router resume' required)"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "{} Failed to adjust policy duration: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                    }
+                }
+            }
+            "connect" => {
+                if args.len() > 1 && args[1].eq_ignore_ascii_case("mock") {
+                    let provider = Arc::new(MockRouterAdminProvider::new(self.iface.gateway));
+                    match self
+                        .router_registry
+                        .connect("mock", provider.clone(), "internal://mock")
+                    {
+                        Ok(id) => {
+                            self.admin_provider =
+                                self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+                            println!(
+                                "{} Connected to Mock Router Provider (Identity: {})",
+                                "[SUCCESS]".green().bold(),
+                                id.display_summary()
+                            );
+                        }
+                        Err(e) => {
+                            println!(
+                                "{} Failed to connect mock provider: {}",
+                                "[ERR]".red().bold(),
+                                e
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                if args.len() > 1
+                    && (args[1].eq_ignore_ascii_case("ssh")
+                        || args[1].eq_ignore_ascii_case("openwrt-ssh"))
+                {
+                    let mut host = self.iface.gateway;
+                    let mut port = 22;
+                    let mut username = "root".to_string();
+                    let mut key_path = None;
+                    let mut pin_key = None;
+
+                    let mut idx = 2;
+                    while idx < args.len() {
+                        let arg = args[idx];
+                        if !arg.starts_with('-') && idx == 2 {
+                            if let Ok(ip) = arg.parse::<Ipv4Addr>() {
+                                host = ip;
+                                idx += 1;
+                                continue;
+                            }
+                        }
+                        match arg.to_lowercase().as_str() {
+                            "--port" | "-p" => {
+                                if idx + 1 < args.len() {
+                                    if let Ok(p) = args[idx + 1].parse::<u16>() {
+                                        port = p;
+                                        idx += 2;
+                                        continue;
+                                    }
+                                }
+                                println!("{} Invalid port specified.", "[ERR]".red().bold());
+                                return;
+                            }
+                            "--user" | "-u" | "--username" => {
+                                if idx + 1 < args.len() {
+                                    username = args[idx + 1].to_string();
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing username.", "[ERR]".red().bold());
+                                return;
+                            }
+                            "--key" | "-k" | "-i" | "--identity" => {
+                                if idx + 1 < args.len() {
+                                    key_path = Some(std::path::PathBuf::from(args[idx + 1]));
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing private key path.", "[ERR]".red().bold());
+                                return;
+                            }
+                            "--pin" | "--fingerprint" => {
+                                if idx + 1 < args.len() {
+                                    pin_key = Some(args[idx + 1].to_string());
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing host key pin value.", "[ERR]".red().bold());
+                                return;
+                            }
+                            _ => {
+                                idx += 1;
+                            }
+                        }
+                    }
+
+                    match find_ssh_client() {
+                        Ok(p) => {
+                            println!(
+                                "{} Discovered local OpenSSH client: {}",
+                                "[INFO]".cyan().bold(),
+                                p.display()
+                            );
+                        }
+                        Err(e) => {
+                            println!("{} {}", "[ERR]".red().bold(), e);
+                            return;
+                        }
+                    }
+
+                    let mut ssh_config =
+                        SshConfig::new(host).with_port(port).with_username(username);
+                    if let Some(key) = key_path {
+                        ssh_config = ssh_config.with_key_path(key);
+                    }
+                    if let Some(pin) = pin_key {
+                        ssh_config = ssh_config.with_pinned_host_key(pin);
+                    }
+
+                    let ssh_transport = SshOpenWrtTransport::new(ssh_config);
+                    let provider =
+                        OpenWrtAdminProvider::new(host, format!("ssh://{}:{}", host, port))
+                            .with_transport(Box::new(ssh_transport));
+
+                    println!(
+                        "{} Connecting to OpenWrt gateway via SSH at {}:{}...",
+                        "[INFO]".cyan().bold(),
+                        host,
+                        port
+                    );
+
+                    match provider.login() {
+                        Ok(_) => match provider.detect_identity() {
+                            Ok(id) => {
+                                println!(
+                                    "{} Successfully connected via SSH to {}!",
+                                    "[SUCCESS]".green().bold(),
+                                    id.display_summary()
+                                );
+                                println!(
+                                    "  • Transport:        {}",
+                                    "SSH (Strict Host Key Checking, BatchMode)".bright_cyan()
+                                );
+                                println!(
+                                    "  • User Privileges:  {}",
+                                    "Root (UID 0 verified)".bright_green().bold()
+                                );
+                                let provider_arc = Arc::new(provider);
+                                let _ = self.router_registry.connect(
+                                    "openwrt-ssh",
+                                    provider_arc.clone(),
+                                    format!("ssh://{}:{}", host, port),
+                                );
+                                self.admin_provider =
+                                    self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{} SSH session opened but identity check failed: {}",
+                                    "[WARN]".yellow().bold(),
+                                    e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            println!(
+                                "{} Failed to authenticate via SSH: {}",
+                                "[ERR]".red().bold(),
+                                e
+                            );
+                            println!(
+                                "{} Refusing to fall back to unauthenticated transports or ARP poisoning.",
+                                "[SECURITY]".yellow().bold()
+                            );
+                        }
+                    }
+                } else if args.len() > 1
+                    && (args[1].eq_ignore_ascii_case("mikrotik")
+                        || args[1].eq_ignore_ascii_case("routeros")
+                        || args[1].eq_ignore_ascii_case("mikrotik-rest"))
+                {
+                    let mut endpoint = None;
+                    let mut username = "admin".to_string();
+                    let mut ca_cert_path = None;
+
+                    let mut idx = 2;
+                    while idx < args.len() {
+                        let arg = args[idx];
+                        if !arg.starts_with('-') && endpoint.is_none() {
+                            endpoint = Some(arg.to_string());
+                            idx += 1;
+                            continue;
+                        }
+                        match arg.to_lowercase().as_str() {
+                            "--user" | "-u" | "--username" => {
+                                if idx + 1 < args.len() {
+                                    username = args[idx + 1].to_string();
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing username.", "[ERR]".red().bold());
+                                return;
+                            }
+                            "--ca-cert" | "--cert" | "--ca" => {
+                                if idx + 1 < args.len() {
+                                    ca_cert_path = Some(std::path::PathBuf::from(args[idx + 1]));
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing CA certificate path.", "[ERR]".red().bold());
+                                return;
+                            }
+                            _ => {
+                                idx += 1;
+                            }
+                        }
+                    }
+
+                    let raw_endpoint = endpoint
+                        .unwrap_or_else(|| format!("https://{}:443/rest", self.iface.gateway));
+                    let endpoint = if !raw_endpoint.starts_with("http://")
+                        && !raw_endpoint.starts_with("https://")
+                    {
+                        format!("https://{}/rest", raw_endpoint)
+                    } else {
+                        raw_endpoint.clone()
+                    };
+
+                    print!(
+                        "Enter administrative password for MikroTik RouterOS user '{}': ",
+                        username
+                    );
+                    let _ = io::stdout().flush();
+                    let password = match read_masked_password() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            println!("{} Failed to read password input.", "[ERR]".red().bold());
+                            return;
+                        }
+                    };
+                    if password.is_empty() {
+                        println!("{} Password cannot be empty.", "[ERR]".red().bold());
+                        return;
+                    }
+
+                    let mut transport = HttpsMikroTikTransport::new();
+                    if let Some(ca) = ca_cert_path {
+                        transport = transport.with_ca_cert(ca);
+                    }
+
+                    let provider = MikroTikAdminProvider::new(self.iface.gateway, &endpoint)
+                        .with_transport(Box::new(transport));
+                    provider.set_credentials(RouterCredentials::new(username, password));
+
+                    println!(
+                        "{} Authenticating with MikroTik RouterOS gateway at {}...",
+                        "[INFO]".cyan().bold(),
+                        endpoint
+                    );
+                    match provider.login() {
+                        Ok(_) => match provider.detect_identity() {
+                            Ok(id) => {
+                                println!(
+                                    "{} Successfully connected to {}!",
+                                    "[SUCCESS]".green().bold(),
+                                    id.display_summary()
+                                );
+                                println!(
+                                    "  • Transport:        {}",
+                                    "HTTPS (REST API, Strict TLS & Certificate Verification)"
+                                        .bright_cyan()
+                                );
+                                println!(
+                                    "  • Enforcement:      {}",
+                                    "RouterOS L3 Forward Filter Rules (icmp-network-unreachable)"
+                                        .bright_green()
+                                );
+                                println!(
+                                    "  • Autonomous Task:  {}",
+                                    "RouterOS /system/script & /system/scheduler Watchdog"
+                                        .bright_green()
+                                );
+                                let provider_arc = Arc::new(provider);
+                                let _ = self.router_registry.connect(
+                                    "mikrotik-rest",
+                                    provider_arc.clone(),
+                                    &raw_endpoint,
+                                );
+                                self.admin_provider =
+                                    self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{} Authentication succeeded but identity check failed: {}",
+                                    "[WARN]".yellow().bold(),
+                                    e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            println!(
+                                "{} Failed to authenticate with MikroTik RouterOS: {}",
+                                "[ERR]".red().bold(),
+                                e
+                            );
+                            println!(
+                                "{} Refusing to fall back to unencrypted HTTP, OpenWrt, or ARP poisoning.",
+                                "[SECURITY]".yellow().bold()
+                            );
+                        }
+                    }
+                } else if args.len() > 1
+                    && (args[1].eq_ignore_ascii_case("avm")
+                        || args[1].eq_ignore_ascii_case("fritzbox")
+                        || args[1].eq_ignore_ascii_case("fritz")
+                        || args[1].eq_ignore_ascii_case("avm-tr064"))
+                {
+                    let mut endpoint = None;
+                    let mut username = "admin".to_string();
+                    let mut ca_cert_path = None;
+
+                    let mut idx = 2;
+                    while idx < args.len() {
+                        let arg = args[idx];
+                        if !arg.starts_with('-') && endpoint.is_none() {
+                            endpoint = Some(arg.to_string());
+                            idx += 1;
+                            continue;
+                        }
+                        match arg.to_lowercase().as_str() {
+                            "--user" | "-u" | "--username" => {
+                                if idx + 1 < args.len() {
+                                    username = args[idx + 1].to_string();
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing username.", "[ERR]".red().bold());
+                                return;
+                            }
+                            "--ca-cert" | "--cert" | "--ca" => {
+                                if idx + 1 < args.len() {
+                                    ca_cert_path = Some(std::path::PathBuf::from(args[idx + 1]));
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing CA certificate path.", "[ERR]".red().bold());
+                                return;
+                            }
+                            _ => {
+                                idx += 1;
+                            }
+                        }
+                    }
+
+                    let raw_endpoint = endpoint.unwrap_or_else(|| {
+                        format!("https://{}:49443/tr64desc.xml", self.iface.gateway)
+                    });
+
+                    print!(
+                        "Enter administrative password for AVM FRITZ!Box user '{}': ",
+                        username
+                    );
+                    let _ = io::stdout().flush();
+                    let password = match read_masked_password() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            println!("{} Failed to read password input.", "[ERR]".red().bold());
+                            return;
+                        }
+                    };
+                    if password.is_empty() {
+                        println!("{} Password cannot be empty.", "[ERR]".red().bold());
+                        return;
+                    }
+
+                    let mut transport = HttpAvmTransport::new();
+                    if let Some(ca) = ca_cert_path {
+                        transport = transport.with_ca_cert(ca);
+                    }
+
+                    let provider = AvmAdminProvider::new(self.iface.gateway, &raw_endpoint)
+                        .with_transport(Box::new(transport));
+                    provider.set_credentials(RouterCredentials::new(username, password));
+
+                    println!(
+                        "{} Authenticating with AVM FRITZ!Box gateway at {}...",
+                        "[INFO]".cyan().bold(),
+                        raw_endpoint
+                    );
+                    match provider.login() {
+                        Ok(_) => match provider.detect_identity() {
+                            Ok(id) => {
+                                println!(
+                                    "{} Successfully connected to {}!",
+                                    "[SUCCESS]".green().bold(),
+                                    id.display_summary()
+                                );
+                                println!(
+                                    "  • Transport:        {}",
+                                    "TR-064/SOAP (HTTP Digest Authentication, Strict TLS)"
+                                        .bright_cyan()
+                                );
+                                println!(
+                                    "  • Enforcement:      {}",
+                                    "AVM X_AVM-DE_HostFilter (DisallowWANAccessByIP)"
+                                        .bright_green()
+                                );
+                                println!(
+                                    "  • Management:       {}",
+                                    "Router administration & intra-LAN preserved 100%"
+                                        .bright_green()
+                                );
+                                println!(
+                                    "  • Limitations:      {}",
+                                    "IPv4 only (IPv6 unblocked); Autonomous timed recovery unsupported".yellow()
+                                );
+                                let provider_arc = Arc::new(provider);
+                                let _ = self.router_registry.connect(
+                                    "avm-tr064",
+                                    provider_arc.clone(),
+                                    &raw_endpoint,
+                                );
+                                self.admin_provider =
+                                    self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{} Authentication succeeded but identity check failed: {}",
+                                    "[WARN]".yellow().bold(),
+                                    e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            println!(
+                                "{} Failed to authenticate with AVM FRITZ!Box: {}",
+                                "[ERR]".red().bold(),
+                                e
+                            );
+                            println!(
+                                "{} Refusing to fall back to unauthenticated transports, OpenWrt, MikroTik, or ARP poisoning.",
+                                "[SECURITY]".yellow().bold()
+                            );
+                        }
+                    }
+                } else if args.len() > 1
+                    && (args[1].eq_ignore_ascii_case("unifi")
+                        || args[1].eq_ignore_ascii_case("ubnt")
+                        || args[1].eq_ignore_ascii_case("ubiquiti")
+                        || args[1].eq_ignore_ascii_case("unifi-rest"))
+                {
+                    let mut endpoint = None;
+                    let mut site = "default".to_string();
+                    let mut username = "admin".to_string();
+                    let mut ca_cert_path = None;
+
+                    let mut idx = 2;
+                    while idx < args.len() {
+                        let arg = args[idx];
+                        if !arg.starts_with('-') && endpoint.is_none() {
+                            endpoint = Some(arg.to_string());
+                            idx += 1;
+                            continue;
+                        }
+                        match arg.to_lowercase().as_str() {
+                            "--site" | "-s" => {
+                                if idx + 1 < args.len() {
+                                    site = args[idx + 1].to_string();
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing site identifier.", "[ERR]".red().bold());
+                                return;
+                            }
+                            "--user" | "-u" | "--username" => {
+                                if idx + 1 < args.len() {
+                                    username = args[idx + 1].to_string();
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing username.", "[ERR]".red().bold());
+                                return;
+                            }
+                            "--ca-cert" | "--cert" | "--ca" => {
+                                if idx + 1 < args.len() {
+                                    ca_cert_path = Some(std::path::PathBuf::from(args[idx + 1]));
+                                    idx += 2;
+                                    continue;
+                                }
+                                println!("{} Missing CA certificate path.", "[ERR]".red().bold());
+                                return;
+                            }
+                            _ => {
+                                idx += 1;
+                            }
+                        }
+                    }
+
+                    let raw_endpoint =
+                        endpoint.unwrap_or_else(|| format!("https://{}:443", self.iface.gateway));
+
+                    print!(
+                        "Enter administrative password or API key for UniFi user '{}': ",
+                        username
+                    );
+                    let _ = io::stdout().flush();
+                    let password = match read_masked_password() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            println!("{} Failed to read password input.", "[ERR]".red().bold());
+                            return;
+                        }
+                    };
+                    if password.is_empty() {
+                        println!(
+                            "{} Password or API key cannot be empty.",
+                            "[ERR]".red().bold()
+                        );
+                        return;
+                    }
+
+                    let mut transport = HttpUnifiTransport::new();
+                    if let Some(ca) = ca_cert_path {
+                        transport = transport.with_ca_cert(ca);
+                    }
+
+                    let provider = UnifiAdminProvider::new(self.iface.gateway, &raw_endpoint)
+                        .with_site(site.clone())
+                        .with_transport(Box::new(transport));
+                    provider.set_credentials(RouterCredentials::new(username, password));
+
+                    println!(
+                        "{} Authenticating with Ubiquiti UniFi Controller at {} (Site: {})...",
+                        "[INFO]".cyan().bold(),
+                        raw_endpoint,
+                        site
+                    );
+                    match provider.login() {
+                        Ok(_) => match provider.detect_identity() {
+                            Ok(id) => {
+                                println!(
+                                    "{} Successfully connected to {}!",
+                                    "[SUCCESS]".green().bold(),
+                                    id.display_summary()
+                                );
+                                println!(
+                                    "  • Transport:        {}",
+                                    "HTTPS REST (Session Token & Strict TLS Verification)"
+                                        .bright_cyan()
+                                );
+                                println!("  • Active Site:      {}", site.bright_green().bold());
+                                println!(
+                                    "  • Enforcement:      {}",
+                                    "UniFi Traffic Rules Engine (Per-Device IP & MAC Block)"
+                                        .bright_green()
+                                );
+                                println!(
+                                    "  • Management:       {}",
+                                    "UniFi Console & intra-LAN switching preserved 100%"
+                                        .bright_green()
+                                );
+                                let provider_arc = Arc::new(provider);
+                                let _ = self.router_registry.connect(
+                                    "unifi-rest",
+                                    provider_arc.clone(),
+                                    &raw_endpoint,
+                                );
+                                self.admin_provider =
+                                    self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{} Authentication succeeded but identity check failed: {}",
+                                    "[WARN]".yellow().bold(),
+                                    e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            println!(
+                                "{} Failed to authenticate with UniFi Controller: {}",
+                                "[ERR]".red().bold(),
+                                e
+                            );
+                            println!(
+                                "{} Refusing to fall back to unauthenticated transports or ARP poisoning.",
+                                "[SECURITY]".yellow().bold()
+                            );
+                        }
+                    }
+                } else {
+                    let endpoint = if args.len() > 1
+                        && !args[1].starts_with('-')
+                        && !args[1].eq_ignore_ascii_case("http")
+                    {
+                        args[1].to_string()
+                    } else if args.len() > 2
+                        && args[1].eq_ignore_ascii_case("http")
+                        && !args[2].starts_with('-')
+                    {
+                        args[2].to_string()
+                    } else {
+                        format!("http://{}:80/ubus", self.iface.gateway)
+                    };
+
+                    let username = if let Some(pos) = args
+                        .iter()
+                        .position(|&a| a == "--user" || a == "-u" || a == "--username")
+                    {
+                        args.get(pos + 1)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "root".to_string())
+                    } else {
+                        "root".to_string()
+                    };
+
+                    print!(
+                        "Enter administrative password for OpenWrt user '{}': ",
+                        username
+                    );
+                    let _ = io::stdout().flush();
+                    let password = match read_masked_password() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            println!("{} Failed to read password input.", "[ERR]".red().bold());
+                            return;
+                        }
+                    };
+                    if password.is_empty() {
+                        println!("{} Password cannot be empty.", "[ERR]".red().bold());
+                        return;
+                    }
+
+                    let provider = OpenWrtAdminProvider::new(self.iface.gateway, &endpoint);
+                    provider.set_credentials(RouterCredentials::new(username, password));
+
+                    println!(
+                        "{} Authenticating with OpenWrt gateway at {}...",
+                        "[INFO]".cyan().bold(),
+                        endpoint
+                    );
+                    match provider.login() {
+                        Ok(_) => match provider.detect_identity() {
+                            Ok(id) => {
+                                println!(
+                                    "{} Successfully connected to {}!",
+                                    "[SUCCESS]".green().bold(),
+                                    id.display_summary()
+                                );
+                                let provider_arc = Arc::new(provider);
+                                let _ = self.router_registry.connect(
+                                    "openwrt-http",
+                                    provider_arc.clone(),
+                                    &endpoint,
+                                );
+                                self.admin_provider =
+                                    self.policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{} Authentication succeeded but identity check failed: {}",
+                                    "[WARN]".yellow().bold(),
+                                    e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            println!(
+                                "{} Failed to authenticate with OpenWrt router: {}",
+                                "[ERR]".red().bold(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {
+                println!(
+                    "{} Unknown router subcommand '{}'. Use 'router help' for available commands.",
+                    "[WARN]".yellow().bold(),
+                    args[0]
+                );
+            }
+        }
+    }
+
+    fn resolve_single_target(&self, arg: &str) -> Result<(Ipv4Addr, Option<MacAddress>), String> {
+        if let Ok(ip) = arg.parse::<Ipv4Addr>() {
+            let mac = self.hosts.iter().find(|h| h.ip == ip).map(|h| h.mac);
+            return Ok((ip, mac));
+        }
+        if let Ok(id) = arg.parse::<usize>() {
+            if let Some(h) = self.hosts.iter().find(|h| h.id == id) {
+                return Ok((h.ip, Some(h.mac)));
+            } else {
+                return Err(format!("Device ID {} not found in known hosts table.", id));
+            }
+        }
+        Err(format!("Invalid target '{}'. Expected 'all', a device ID (e.g. 1), or IPv4 address (e.g. 192.168.1.50).", arg))
+    }
+
+    fn show_policy_detail(&self, policy_id: &str) {
+        match self.policy_engine.get_policy_detail(policy_id) {
+            Some(detail) => {
+                render_router_policy_detail(&detail);
+            }
+            None => {
+                println!(
+                    "{} Policy ID '{}' not found in active router policies or persistent history records.",
+                    "[ERR]".red().bold(),
+                    policy_id
+                );
+                println!(
+                    "  Use 'router policies' to list all registered and historical policy IDs."
+                );
+            }
+        }
+    }
 }
 
 impl Drop for RustrictCli {
@@ -905,14 +2618,13 @@ pub fn resolve_targets(hosts: &[Host], arg: &str) -> Result<Vec<usize>, String> 
                     ids.push(id);
                 }
             } else {
-                return Err(format!("Device with ID {} not found in known hosts table.", id));
+                return Err(format!(
+                    "Device with ID {} not found in known hosts table.",
+                    id
+                ));
             }
         } else if let Ok(ip) = t.parse::<Ipv4Addr>() {
-            let matches: Vec<usize> = hosts
-                .iter()
-                .filter(|h| h.ip == ip)
-                .map(|h| h.id)
-                .collect();
+            let matches: Vec<usize> = hosts.iter().filter(|h| h.ip == ip).map(|h| h.id).collect();
 
             if matches.is_empty() {
                 return Err(format!(

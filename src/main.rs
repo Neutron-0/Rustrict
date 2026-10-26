@@ -17,17 +17,29 @@ fn main() {
     }
 
     if !env_status.npcap_available {
-        eprintln!("{} Warning: {}", "[WARN]".yellow().bold(), env_status.npcap_details);
+        eprintln!(
+            "{} Warning: {}",
+            "[WARN]".yellow().bold(),
+            env_status.npcap_details
+        );
     }
     if !env_status.windivert_available {
-        eprintln!("{} Warning: {}", "[WARN]".yellow().bold(), env_status.windivert_details);
+        eprintln!(
+            "{} Warning: {}",
+            "[WARN]".yellow().bold(),
+            env_status.windivert_details
+        );
     }
 
     // 2. Discover default network interface and gateway
     let iface = match platform::get_default_interface() {
         Ok(iface) => iface,
         Err(e) => {
-            eprintln!("{} Failed to resolve network interface: {}", "[ERR]".bright_red().bold(), e);
+            eprintln!(
+                "{} Failed to resolve network interface: {}",
+                "[ERR]".bright_red().bold(),
+                e
+            );
             std::process::exit(1);
         }
     };
@@ -47,7 +59,11 @@ fn main() {
 
     // 3. Enable IP forwarding
     if let Err(e) = platform::enable_ip_forwarding() {
-        eprintln!("{} Warning: Could not enable IP forwarding: {}", "[WARN]".yellow().bold(), e);
+        eprintln!(
+            "{} Warning: Could not enable IP forwarding: {}",
+            "[WARN]".yellow().bold(),
+            e
+        );
     }
 
     // 4. Start interactive REPL

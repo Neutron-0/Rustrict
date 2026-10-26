@@ -1,12 +1,12 @@
-use std::net::Ipv4Addr;
-use std::time::Duration;
-use rustrict::types::{Direction, Host, MacAddress};
+use rustrict::core::scope::{Ipv4Cidr, ScopeManager};
+use rustrict::limiter::token_bucket::TokenBucket;
+use rustrict::scanner::arp::SubnetScanner;
 use rustrict::spoofer::engine::BLACKHOLE_MAC;
 use rustrict::spoofer::raw_l2::{craft_arp_reply, parse_arp_reply};
-use rustrict::limiter::token_bucket::TokenBucket;
-use rustrict::core::scope::{Ipv4Cidr, ScopeManager};
 use rustrict::state::PersistentState;
-use rustrict::scanner::arp::SubnetScanner;
+use rustrict::types::{Direction, Host, MacAddress};
+use std::net::Ipv4Addr;
+use std::time::Duration;
 
 #[test]
 fn test_blackhole_mac_spec_and_properties() {
@@ -14,7 +14,11 @@ fn test_blackhole_mac_spec_and_properties() {
     assert_eq!(BLACKHOLE_MAC.0, [0x02, 0xbf, 0x00, 0x00, 0x00, 0x01]);
 
     // 1. Unicast check: least significant bit of first octet must be 0 (0 = Unicast, 1 = Multicast/Broadcast)
-    assert_eq!(BLACKHOLE_MAC.0[0] & 0x01, 0, "Blackhole MAC must be a UNICAST MAC so switches drop it rather than flooding all ports");
+    assert_eq!(
+        BLACKHOLE_MAC.0[0] & 0x01,
+        0,
+        "Blackhole MAC must be a UNICAST MAC so switches drop it rather than flooding all ports"
+    );
 
     // 2. Locally Administered check: second least significant bit of first octet must be 1 (0 = Globally Unique, 2 = Locally Administered)
     assert_eq!(BLACKHOLE_MAC.0[0] & 0x02, 2, "Blackhole MAC must be locally administered to avoid OUI collisions with legitimate hardware");
@@ -46,7 +50,10 @@ fn test_blocked_vs_limited_arp_frame_crafting() {
 
     let parsed_victim = parse_arp_reply(&pkt_to_victim_blocked).expect("Must parse as ARP reply");
     assert_eq!(parsed_victim.0, gateway_ip);
-    assert_eq!(parsed_victim.1, BLACKHOLE_MAC, "Victim must map Gateway IP to BLACKHOLE_MAC");
+    assert_eq!(
+        parsed_victim.1, BLACKHOLE_MAC,
+        "Victim must map Gateway IP to BLACKHOLE_MAC"
+    );
     // Verify Ethernet source and destination headers
     assert_eq!(&pkt_to_victim_blocked[0..6], &victim_mac.0);
     assert_eq!(&pkt_to_victim_blocked[6..12], &BLACKHOLE_MAC.0);
@@ -63,21 +70,23 @@ fn test_blocked_vs_limited_arp_frame_crafting() {
 
     let parsed_gw = parse_arp_reply(&pkt_to_gw_blocked).expect("Must parse as ARP reply");
     assert_eq!(parsed_gw.0, victim_ip);
-    assert_eq!(parsed_gw.1, BLACKHOLE_MAC, "Gateway must map Victim IP to BLACKHOLE_MAC");
+    assert_eq!(
+        parsed_gw.1, BLACKHOLE_MAC,
+        "Gateway must map Victim IP to BLACKHOLE_MAC"
+    );
 
     // --- Scenario B: Device is LIMITED (MITM mode) ---
     // Target must be told Gateway is at local_mac
     let pkt_to_victim_limited = craft_arp_reply(
-        victim_mac,
-        local_mac,
-        gateway_ip,
-        local_mac,
-        victim_ip,
-        victim_mac,
+        victim_mac, local_mac, gateway_ip, local_mac, victim_ip, victim_mac,
     );
-    let parsed_victim_mitm = parse_arp_reply(&pkt_to_victim_limited).expect("Must parse as ARP reply");
+    let parsed_victim_mitm =
+        parse_arp_reply(&pkt_to_victim_limited).expect("Must parse as ARP reply");
     assert_eq!(parsed_victim_mitm.0, gateway_ip);
-    assert_eq!(parsed_victim_mitm.1, local_mac, "In limited mode, victim maps Gateway IP to host local_mac");
+    assert_eq!(
+        parsed_victim_mitm.1, local_mac,
+        "In limited mode, victim maps Gateway IP to host local_mac"
+    );
 
     // Gateway must be told Victim is at local_mac
     let pkt_to_gw_limited = craft_arp_reply(
@@ -90,7 +99,10 @@ fn test_blocked_vs_limited_arp_frame_crafting() {
     );
     let parsed_gw_mitm = parse_arp_reply(&pkt_to_gw_limited).expect("Must parse as ARP reply");
     assert_eq!(parsed_gw_mitm.0, victim_ip);
-    assert_eq!(parsed_gw_mitm.1, local_mac, "In limited mode, gateway maps Victim IP to host local_mac");
+    assert_eq!(
+        parsed_gw_mitm.1, local_mac,
+        "In limited mode, gateway maps Victim IP to host local_mac"
+    );
 }
 
 #[test]
@@ -101,7 +113,10 @@ fn test_token_bucket_shaping_and_refill() {
 
     // Initially, capacity is 2x rate = 160,000 bits (20,000 bytes)
     // Try to consume 1,500 byte packet (12,000 bits) -> should succeed
-    assert!(tb.try_consume(12_000), "Initial tokens must allow first packet");
+    assert!(
+        tb.try_consume(12_000),
+        "Initial tokens must allow first packet"
+    );
 
     // Repeatedly consume to exhaust tokens
     for _ in 0..12 {
@@ -110,7 +125,10 @@ fn test_token_bucket_shaping_and_refill() {
 
     // Now tokens should be exhausted
     let consumed_when_empty = tb.try_consume(100_000);
-    assert!(!consumed_when_empty, "Should drop packet when tokens are exhausted");
+    assert!(
+        !consumed_when_empty,
+        "Should drop packet when tokens are exhausted"
+    );
 
     // Sleep 150ms to allow refill: 80,000 * 0.150s = 12,000 bits
     std::thread::sleep(Duration::from_millis(150));
@@ -143,11 +161,15 @@ fn test_scope_manager_persistence_and_enforcement() {
     assert!(scope.validate_target(&excluded_ip, None).is_err());
 
     // 4. Excluded MAC in scope -> rejected
-    assert!(scope.validate_target(&valid_ip, Some(&excluded_mac)).is_err());
+    assert!(scope
+        .validate_target(&valid_ip, Some(&excluded_mac))
+        .is_err());
 
     // Test persistence round-trip in PersistentState
-    let mut state = PersistentState::default();
-    state.scope = Some(scope.clone());
+    let mut state = PersistentState {
+        scope: Some(scope.clone()),
+        ..Default::default()
+    };
     let host = Host::with_source(
         1,
         valid_ip,
@@ -159,14 +181,17 @@ fn test_scope_manager_persistence_and_enforcement() {
     state.add_blocked(&host, Direction::Both);
 
     let serialized = serde_json::to_string(&state).expect("Serialization must succeed");
-    let deserialized: PersistentState = serde_json::from_str(&serialized).expect("Deserialization must succeed");
+    let deserialized: PersistentState =
+        serde_json::from_str(&serialized).expect("Deserialization must succeed");
 
     assert_eq!(deserialized.blocked_hosts.len(), 1);
     assert_eq!(deserialized.blocked_hosts[0].ip, valid_ip);
     assert_eq!(deserialized.blocked_hosts[0].mac, valid_mac.to_string());
 
     let restored_scope = deserialized.scope.expect("Scope must be restored");
-    assert!(restored_scope.validate_target(&valid_ip, Some(&valid_mac)).is_ok());
+    assert!(restored_scope
+        .validate_target(&valid_ip, Some(&valid_mac))
+        .is_ok());
     assert!(restored_scope.validate_target(&external_ip, None).is_err());
     assert!(restored_scope.validate_target(&excluded_ip, None).is_err());
 }

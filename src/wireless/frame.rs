@@ -109,7 +109,11 @@ impl<'a> Dot11Frame<'a> {
                 // Tag 0 = SSID
                 let ssid_bytes = &self.body[offset..offset + tag_len];
                 let ssid = String::from_utf8_lossy(ssid_bytes).to_string();
-                return Some(if ssid.is_empty() { "<Hidden SSID>".into() } else { ssid });
+                return Some(if ssid.is_empty() {
+                    "<Hidden SSID>".into()
+                } else {
+                    ssid
+                });
             }
 
             offset += tag_len;

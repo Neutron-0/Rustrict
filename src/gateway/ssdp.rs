@@ -153,7 +153,9 @@ impl SsdpScanner {
                 let raw_end = std::cmp::min(svc_pos + 1000, xml.len());
                 let window_end = xml.floor_char_boundary(raw_end);
                 let window = &xml[svc_pos..window_end];
-                if let Some(ctrl) = crate::gateway::soap::SoapClient::extract_tag_value(window, "controlURL") {
+                if let Some(ctrl) =
+                    crate::gateway::soap::SoapClient::extract_tag_value(window, "controlURL")
+                {
                     let path = if ctrl.starts_with('/') {
                         ctrl
                     } else {
