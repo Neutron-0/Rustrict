@@ -1035,6 +1035,7 @@ impl RustrictCli {
             println!("  router capabilities                             Inspect discovered router capabilities and evidence classification");
             println!("  router status                                   Display current router identity and connection status");
             println!("  router diagnostics / router diag                Run comprehensive read-only diagnostic checks without mutating rules");
+            println!("  router export-evidence [path] [--overwrite]     Export full sanitized read-only evidence bundle (JSON)");
             println!("  router devices / router clients                 List connected client devices discovered on router (where supported)");
             println!("  router policies [policy_id]                     Display unified router policies or inspect specific policy");
             println!("  router policy <policy_id>                       Display detailed inspection and event timeline of a policy");
@@ -1202,6 +1203,80 @@ impl RustrictCli {
                 );
                 let report = self.policy_engine.run_diagnostics();
                 render_router_diagnostics_report(&report);
+            }
+            "export-evidence" | "export" => {
+                let mut path = None;
+                let mut overwrite = false;
+                let mut idx = 1;
+                while idx < args.len() {
+                    match args[idx].to_lowercase().as_str() {
+                        "--overwrite" | "-f" => {
+                            overwrite = true;
+                            idx += 1;
+                        }
+                        other if !other.starts_with('-') && path.is_none() => {
+                            path = Some(std::path::PathBuf::from(args[idx]));
+                            idx += 1;
+                        }
+                        _ => {
+                            idx += 1;
+                        }
+                    }
+                }
+
+                let target_path = path.unwrap_or_else(|| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    std::path::PathBuf::from(format!("rustrict-evidence-{}.json", now))
+                });
+
+                println!(
+                    "{} Generating sanitized read-only diagnostic evidence bundle...",
+                    "[EXEC]".cyan().bold()
+                );
+
+                match self
+                    .policy_engine
+                    .export_evidence_bundle(&target_path, overwrite)
+                {
+                    Ok(bundle) => {
+                        let size = std::fs::metadata(&target_path)
+                            .map(|m| m.len())
+                            .unwrap_or_default();
+                        println!(
+                            "{} Diagnostic evidence bundle successfully exported to: {}",
+                            "[SUCCESS]".green().bold(),
+                            target_path.display().to_string().bright_yellow()
+                        );
+                        println!("  • File Size:      {} bytes", size);
+                        println!("  • Timestamp:      {}", bundle.generated_at_iso8601);
+                        println!(
+                            "  • Provider:       {} ({})",
+                            bundle.provider_name, bundle.provider_id
+                        );
+                        let identity_str = bundle
+                            .router_identity
+                            .as_ref()
+                            .map(|id| id.display_summary())
+                            .unwrap_or_else(|| "Unknown / Disconnected".into());
+                        println!("  • Router:         {}", identity_str);
+                        println!("  • Active Policies: {}", bundle.active_policies.len());
+                        println!("  • Devices:        {}", bundle.device_inventory.len());
+                        println!("  • Sanitization:   All credentials and session tokens strictly redacted");
+                        println!(
+                            "  • Safety:         Zero router configuration mutations performed"
+                        );
+                    }
+                    Err(e) => {
+                        println!(
+                            "{} Failed to export evidence bundle: {}",
+                            "[ERR]".red().bold(),
+                            e
+                        );
+                    }
+                }
             }
             "devices" | "clients" => {
                 let reg_status = self.router_registry.get_status();

@@ -412,3 +412,143 @@ fn test_no_provider_fallback_on_query_failure() {
         "Must remain on explicitly selected provider"
     );
 }
+
+#[test]
+fn test_evidence_bundle_export_schema_and_zero_mutations() {
+    let temp_dir = TestTempDir::new("bundle_export");
+    let bundle_file = temp_dir.path().join("evidence.json");
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock.clone(), "internal://mock")
+        .expect("Connect mock");
+
+    let engine = PolicyExecutionEngine::new(registry);
+
+    let bundle = engine
+        .export_evidence_bundle(&bundle_file, false)
+        .expect("Export bundle succeeds");
+
+    assert_eq!(bundle.schema_version, "rustrict-evidence-v1.0");
+    assert!(bundle.generated_at_unix > 0);
+    assert!(bundle.generated_at_iso8601.contains("T"));
+    assert!(bundle.generated_at_iso8601.ends_with("Z"));
+    assert_eq!(bundle.provider_id, "mock");
+    assert_eq!(bundle.provider_name, "Mock Router Provider");
+    assert!(bundle
+        .capability_matrix
+        .ipv4_policy_enforcement
+        .is_operational());
+
+    // Verify file exists on disk and is non-empty valid JSON
+    assert!(bundle_file.exists());
+    let content = fs::read_to_string(&bundle_file).expect("Read bundle file");
+    assert!(content.contains("\"schema_version\": \"rustrict-evidence-v1.0\""));
+    assert!(content.contains("\"generated_at_iso8601\""));
+
+    // Verify zero mutations occurred
+    assert!(engine.query_active_policies().expect("query").is_empty());
+    assert!(engine.execution_history().is_empty());
+}
+
+#[test]
+fn test_evidence_bundle_credential_sanitization() {
+    let temp_dir = TestTempDir::new("bundle_sanitization");
+    let bundle_file = temp_dir.path().join("sanitized_evidence.json");
+    let state_file = temp_dir.path().join("state.json");
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect(
+            "mock",
+            mock,
+            "https://admin:SuperSecretRouterPass@192.168.1.1:8443/api?token=BearerSuperSecret123",
+        )
+        .expect("Connect mock");
+
+    let store = Arc::new(PolicyStore::with_path(&state_file));
+    let secret_err = PolicyExecutionRecord {
+        execution_id: "exec_secret_leak".into(),
+        timestamp_unix: 1715000000,
+        operation: "apply".into(),
+        provider_id: "mock".into(),
+        provider_name: "Mock Provider".into(),
+        target_scope: rustrict::gateway::admin::PolicyScope::NetworkWide,
+        initial_state: PolicyLifecycleState::PendingApplication,
+        final_state: PolicyLifecycleState::Failed("Failed with password=SuperSecretRouterPass and Authorization: Bearer BearerSuperSecret123".into()),
+        duration: rustrict::gateway::admin::PolicyDuration::Indefinite,
+        persistence: rustrict::gateway::admin::PolicyPersistence::VolatileSession,
+        autonomous_recovery_guaranteed: false,
+        policy_id: None,
+        error: Some("Failed with password=SuperSecretRouterPass and Authorization: Bearer BearerSuperSecret123".into()),
+    };
+    store.append_record(&secret_err).expect("Append record");
+
+    let engine = PolicyExecutionEngine::with_store(registry, store);
+
+    let bundle = engine
+        .export_evidence_bundle(&bundle_file, false)
+        .expect("Export succeeds");
+
+    let file_content = fs::read_to_string(&bundle_file).expect("Read exported file");
+
+    // Strictly verify no secret strings appear in the exported file
+    assert!(
+        !file_content.contains("SuperSecretRouterPass"),
+        "Leaked router password in exported evidence!"
+    );
+    assert!(
+        !file_content.contains("BearerSuperSecret123"),
+        "Leaked bearer token in exported evidence!"
+    );
+
+    // Verify [REDACTED] appears in exported file
+    assert!(
+        file_content.contains("[REDACTED]"),
+        "Exported evidence should contain [REDACTED] placeholder"
+    );
+
+    // Verify in-memory bundle structure is also sanitized
+    for err in &bundle.sanitized_errors {
+        assert!(!err.contains("SuperSecretRouterPass"));
+        assert!(!err.contains("BearerSuperSecret123"));
+        assert!(err.contains("[REDACTED]"));
+    }
+}
+
+#[test]
+fn test_evidence_bundle_refuses_to_overwrite_without_flag() {
+    let temp_dir = TestTempDir::new("bundle_overwrite");
+    let bundle_file = temp_dir.path().join("evidence_overwrite.json");
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock, "internal://mock")
+        .expect("Connect mock");
+
+    let engine = PolicyExecutionEngine::new(registry);
+
+    // First export succeeds
+    assert!(engine.export_evidence_bundle(&bundle_file, false).is_ok());
+    assert!(bundle_file.exists());
+
+    // Second export without overwrite flag fails
+    match engine.export_evidence_bundle(&bundle_file, false) {
+        Err(AdminError::SecurityViolation(msg)) => {
+            assert!(msg.contains("Refusing to overwrite"));
+        }
+        other => panic!(
+            "Expected SecurityViolation on existing file, got {:?}",
+            other
+        ),
+    }
+
+    // Export with overwrite flag succeeds
+    assert!(engine.export_evidence_bundle(&bundle_file, true).is_ok());
+}

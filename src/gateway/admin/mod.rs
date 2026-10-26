@@ -26,9 +26,9 @@ pub use credentials::{
 };
 pub use curl_util::{find_curl, AutoCleanFile};
 pub use diagnostics::{
-    sanitize_endpoint, ConnectionDiagnostic, DataSource, DiagnosticResult,
+    sanitize_endpoint, unix_to_iso8601, ConnectionDiagnostic, DataSource, DiagnosticResult,
     NormalizedRouterInventoryItem, ProviderConnectionState, RouterDeviceEntry,
-    RouterDiagnosticReport,
+    RouterDiagnosticReport, RouterEvidenceBundle,
 };
 pub use engine::{
     sanitize_error, sanitize_text, MutationPreflightReport, PolicyExecutionEngine,

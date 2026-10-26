@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::gateway::admin::capabilities::RouterCapabilityMatrix;
 use crate::gateway::admin::diagnostics::{
-    sanitize_endpoint, ConnectionDiagnostic, DataSource, DiagnosticResult,
+    sanitize_endpoint, unix_to_iso8601, ConnectionDiagnostic, DataSource, DiagnosticResult,
     NormalizedRouterInventoryItem, ProviderConnectionState, RouterDeviceEntry,
-    RouterDiagnosticReport,
+    RouterDiagnosticReport, RouterEvidenceBundle,
 };
 use crate::gateway::admin::persistence::PolicyStore;
 use crate::gateway::admin::plan::{
@@ -1559,6 +1560,91 @@ impl PolicyExecutionEngine {
             capability_assessment: caps_diag,
             recent_errors,
         }
+    }
+
+    /// Constructs a complete, sanitized read-only diagnostic evidence bundle
+    pub fn build_evidence_bundle(&self) -> RouterEvidenceBundle {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let iso8601 = unix_to_iso8601(now);
+
+        let diag_report = self.run_diagnostics();
+        let active_policies = match &diag_report.active_policies {
+            DiagnosticResult::Supported(p) => p.clone(),
+            _ => Vec::new(),
+        };
+        let device_inventory = match &diag_report.connected_devices {
+            DiagnosticResult::Supported(d) => d.clone(),
+            _ => Vec::new(),
+        };
+        let router_identity = match &diag_report.identity_and_version {
+            DiagnosticResult::Supported(id) => Some(id.clone()),
+            _ => self.registry.get_status().verified_identity,
+        };
+        let caps = match &diag_report.capability_assessment {
+            DiagnosticResult::Supported(c) => c.clone(),
+            _ => RouterCapabilityMatrix::unsupported(),
+        };
+
+        let historical_policies = self.store.historical_policies();
+        let execution_records = self.store.records();
+        let sanitized_errors = diag_report.recent_errors.clone();
+
+        let raw_bundle = RouterEvidenceBundle {
+            schema_version: "rustrict-evidence-v1.0".to_string(),
+            generated_at_unix: now,
+            generated_at_iso8601: iso8601,
+            provider_id: diag_report.provider_id.clone(),
+            provider_name: diag_report.provider_name.clone(),
+            endpoint: diag_report.endpoint.clone(),
+            connection_status: diag_report.connection_status.clone(),
+            router_identity,
+            capability_matrix: caps,
+            diagnostic_report: diag_report,
+            active_policies,
+            historical_policies,
+            execution_records,
+            device_inventory,
+            sanitized_errors,
+        };
+
+        // Redact any credentials from all sections of the bundle
+        let json_str = serde_json::to_string_pretty(&raw_bundle).unwrap_or_default();
+        let sanitized_json = sanitize_text(&json_str);
+        serde_json::from_str(&sanitized_json).unwrap_or(raw_bundle)
+    }
+
+    /// Exports the sanitized evidence bundle to a JSON file on disk atomically
+    pub fn export_evidence_bundle(
+        &self,
+        path: &Path,
+        overwrite: bool,
+    ) -> Result<RouterEvidenceBundle, AdminError> {
+        if path.exists() && !overwrite {
+            return Err(AdminError::SecurityViolation(format!(
+                "Refusing to overwrite existing evidence bundle at '{}' without explicit overwrite flag.",
+                path.display()
+            )));
+        }
+
+        let bundle = self.build_evidence_bundle();
+        let json_str = serde_json::to_string_pretty(&bundle).map_err(|e| {
+            AdminError::CommunicationError(format!("Failed to serialize evidence bundle: {}", e))
+        })?;
+        let sanitized_json = sanitize_text(&json_str);
+
+        crate::gateway::admin::persistence::atomic_write_file(path, sanitized_json.as_bytes())
+            .map_err(|e| {
+                AdminError::CommunicationError(format!(
+                    "Failed to write evidence bundle to '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+        Ok(bundle)
     }
 }
 
