@@ -22,7 +22,7 @@ pub use avm::{
 pub use capabilities::{CapabilityClassification, RouterCapabilityMatrix};
 pub use credentials::{
     dpapi_decrypt, dpapi_encrypt, load_protected_credentials, save_protected_credentials,
-    ProtectedString, RouterCredentials,
+    zero_slice, ProtectedBuffer, ProtectedString, RouterCredentials,
 };
 pub use curl_util::{find_curl, AutoCleanFile};
 pub use diagnostics::{

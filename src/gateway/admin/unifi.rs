@@ -156,10 +156,12 @@ impl UnifiTransport for HttpUnifiTransport {
                 ))
             })?;
 
+        let mut curl_cfg_bytes = curl_cfg.into_bytes();
         if let Some(mut stdin) = child.stdin.take() {
             // Send only configuration on stdin
-            let _ = stdin.write_all(curl_cfg.as_bytes());
+            let _ = stdin.write_all(&curl_cfg_bytes);
         }
+        crate::gateway::admin::credentials::zero_slice(&mut curl_cfg_bytes);
 
         let output = child.wait_with_output().map_err(|e| {
             AdminError::CommunicationError(format!("Failed to wait for curl.exe output: {}", e))

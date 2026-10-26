@@ -140,7 +140,9 @@ impl MikroTikTransport for HttpsMikroTikTransport {
 
         if let Some(creds) = credentials {
             let auth_plain = format!("{}:{}", creds.username, creds.password.expose());
-            let auth_b64 = base64_encode(auth_plain.as_bytes());
+            let mut auth_bytes = auth_plain.into_bytes();
+            let auth_b64 = base64_encode(&auth_bytes);
+            crate::gateway::admin::credentials::zero_slice(&mut auth_bytes);
             stdin_config.push_str(&format!("header = \"Authorization: Basic {}\"\n", auth_b64));
         }
 
@@ -159,10 +161,12 @@ impl MikroTikTransport for HttpsMikroTikTransport {
             AdminError::CommunicationError(format!("Failed to spawn HTTPS client: {}", e))
         })?;
 
+        let mut stdin_bytes = stdin_config.into_bytes();
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            let _ = stdin.write_all(stdin_config.as_bytes());
+            let _ = stdin.write_all(&stdin_bytes);
         }
+        crate::gateway::admin::credentials::zero_slice(&mut stdin_bytes);
 
         let output = child.wait_with_output().map_err(|e| {
             AdminError::CommunicationError(format!("Failed waiting for HTTPS request: {}", e))

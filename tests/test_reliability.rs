@@ -244,3 +244,76 @@ fn test_engine_persistence_error_tracking() {
             || err_str.contains("path")
     );
 }
+
+#[test]
+fn test_credential_hygiene_and_protected_buffer_zeroing() {
+    use rustrict::gateway::admin::{
+        dpapi_decrypt, dpapi_encrypt, zero_slice, ProtectedBuffer, ProtectedString,
+        RouterCredentials,
+    };
+
+    // 1. Redaction in Debug and Display
+    let secret = "SuperSecretPassword123!";
+    let pstr = ProtectedString::new(secret);
+    assert_eq!(format!("{:?}", pstr), "[REDACTED]");
+    assert_eq!(format!("{}", pstr), "[REDACTED]");
+    assert_eq!(pstr.expose(), secret);
+
+    let creds = RouterCredentials::new("admin_operator", secret);
+    let creds_debug = format!("{:?}", creds);
+    assert!(!creds_debug.contains(secret));
+    assert!(creds_debug.contains("[REDACTED]"));
+    assert!(creds_debug.contains("admin_operator"));
+
+    // 2. ProtectedBuffer redaction and zeroing
+    let mut pbuf = ProtectedBuffer::new(secret.as_bytes().to_vec());
+    let buf_debug = format!("{:?}", pbuf);
+    assert!(!buf_debug.contains(secret));
+    assert!(buf_debug.contains("[REDACTED_BUFFER"));
+    assert_eq!(format!("{}", pbuf), "[REDACTED]");
+    assert_eq!(&*pbuf, secret.as_bytes());
+
+    pbuf.clear();
+    assert_eq!(pbuf.len(), 0);
+
+    // 3. Volatile zero slice verification
+    let mut sensitive_bytes = *b"SensitiveIntermediateTokenBuffer";
+    zero_slice(&mut sensitive_bytes);
+    assert!(sensitive_bytes.iter().all(|&b| b == 0));
+
+    // 4. DPAPI roundtrip returns ProtectedBuffer with redaction
+    let encrypted = dpapi_encrypt(secret.as_bytes()).expect("DPAPI encrypt succeeds");
+    assert_ne!(encrypted, secret.as_bytes());
+
+    let decrypted = dpapi_decrypt(&encrypted).expect("DPAPI decrypt succeeds");
+    assert_eq!(decrypted, secret.as_bytes());
+    assert_eq!(
+        format!("{:?}", decrypted),
+        format!("[REDACTED_BUFFER (len={})]", secret.len())
+    );
+    assert_eq!(format!("{}", decrypted), "[REDACTED]");
+}
+
+#[test]
+fn test_protected_credentials_file_roundtrip_with_zeroization() {
+    use rustrict::gateway::admin::{
+        load_protected_credentials, save_protected_credentials, RouterCredentials,
+    };
+
+    let temp_dir = TestTempDir::new("dpapi_creds_test");
+    let creds_path = temp_dir.path().join("router_auth.dat");
+
+    let creds = RouterCredentials::new("sec_admin", "UltraStrongPassphrase!#492");
+    save_protected_credentials(&creds_path, &creds).expect("save protected credentials succeeds");
+
+    // File on disk must NOT contain plaintext password
+    let on_disk_bytes = fs::read(&creds_path).expect("read raw credentials file");
+    let raw_str = String::from_utf8_lossy(&on_disk_bytes);
+    assert!(!raw_str.contains("UltraStrongPassphrase!#492"));
+
+    // Loading credentials succeeds and exposes expected password
+    let loaded =
+        load_protected_credentials(&creds_path).expect("load protected credentials succeeds");
+    assert_eq!(loaded.username, "sec_admin");
+    assert_eq!(loaded.password.expose(), "UltraStrongPassphrase!#492");
+}

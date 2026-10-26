@@ -4,6 +4,119 @@ use std::path::Path;
 
 use crate::gateway::admin::plan::AdminError;
 
+/// Securely zeroes a byte slice in memory using volatile writes
+/// to prevent compiler dead-store elimination.
+pub fn zero_slice(slice: &mut [u8]) {
+    for byte in slice.iter_mut() {
+        unsafe {
+            std::ptr::write_volatile(byte, 0);
+        }
+    }
+}
+
+/// A security-hardened byte buffer that zeroes its memory on Drop
+/// and redacts itself in Debug and Display formatting.
+#[derive(Clone, Eq)]
+pub struct ProtectedBuffer {
+    inner: Vec<u8>,
+}
+
+impl ProtectedBuffer {
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+        Self { inner: data.into() }
+    }
+
+    pub fn push(&mut self, byte: u8) {
+        self.inner.push(byte);
+    }
+
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.inner.extend_from_slice(bytes);
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.inner
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.inner
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        zero_slice(&mut self.inner);
+        self.inner.clear();
+    }
+}
+
+impl Drop for ProtectedBuffer {
+    fn drop(&mut self) {
+        zero_slice(&mut self.inner);
+    }
+}
+
+impl std::ops::Deref for ProtectedBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for ProtectedBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl AsRef<[u8]> for ProtectedBuffer {
+    fn as_ref(&self) -> &[u8] {
+        &self.inner
+    }
+}
+
+impl fmt::Debug for ProtectedBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[REDACTED_BUFFER (len={})]", self.inner.len())
+    }
+}
+
+impl fmt::Display for ProtectedBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl PartialEq for ProtectedBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl PartialEq<[u8]> for ProtectedBuffer {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.inner.as_slice() == other
+    }
+}
+
+impl PartialEq<&[u8]> for ProtectedBuffer {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.inner.as_slice() == *other
+    }
+}
+
+impl PartialEq<Vec<u8>> for ProtectedBuffer {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        &self.inner == other
+    }
+}
+
 /// A security-hardened string wrapper that zeroes its allocated memory on Drop
 /// and prevents accidental leak via Debug or Display formatting.
 #[derive(Clone, PartialEq, Eq)]
@@ -34,16 +147,16 @@ impl ProtectedString {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
+    pub fn clear(&mut self) {
+        zero_slice(&mut self.inner);
+        self.inner.clear();
+    }
 }
 
 impl Drop for ProtectedString {
     fn drop(&mut self) {
-        // Volatile zeroing to prevent compiler dead-store elimination
-        for byte in self.inner.iter_mut() {
-            unsafe {
-                std::ptr::write_volatile(byte, 0);
-            }
-        }
+        zero_slice(&mut self.inner);
     }
 }
 
@@ -138,7 +251,7 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>, AdminError> {
 }
 
 #[cfg(windows)]
-pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>, AdminError> {
+pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<ProtectedBuffer, AdminError> {
     use std::ptr;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
@@ -172,10 +285,14 @@ pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>, AdminError> {
         ));
     }
 
-    let decrypted =
-        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
+    let slice = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
+    let decrypted = ProtectedBuffer::new(slice.to_vec());
 
+    // Volatile zero DPAPI memory before freeing back to Windows LocalAlloc heap
     unsafe {
+        for i in 0..(out_blob.cbData as usize) {
+            std::ptr::write_volatile(out_blob.pbData.add(i), 0);
+        }
         LocalFree(out_blob.pbData as _);
     }
 
@@ -183,9 +300,9 @@ pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>, AdminError> {
 }
 
 #[cfg(not(windows))]
-pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>, AdminError> {
+pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<ProtectedBuffer, AdminError> {
     let unmasked: Vec<u8> = ciphertext.iter().map(|b| b ^ 0x5A).collect();
-    Ok(unmasked)
+    Ok(ProtectedBuffer::new(unmasked))
 }
 
 /// Persists router credentials protected at rest using Windows DPAPI.
@@ -194,8 +311,15 @@ pub fn save_protected_credentials(
     path: &Path,
     creds: &RouterCredentials,
 ) -> Result<(), AdminError> {
-    let raw = format!("{}:{}", creds.username, creds.password.expose());
-    let encrypted = dpapi_encrypt(raw.as_bytes())?;
+    let mut raw = ProtectedBuffer::new(Vec::with_capacity(
+        creds.username.len() + 1 + creds.password.len(),
+    ));
+    raw.extend_from_slice(creds.username.as_bytes());
+    raw.push(b':');
+    raw.extend_from_slice(creds.password.as_bytes());
+
+    let encrypted = dpapi_encrypt(&raw)?;
+    drop(raw);
 
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -222,16 +346,22 @@ pub fn load_protected_credentials(path: &Path) -> Result<RouterCredentials, Admi
     })?;
 
     let decrypted = dpapi_decrypt(&encrypted)?;
-    let text = String::from_utf8(decrypted).map_err(|_| {
+    let colon_pos = decrypted.iter().position(|&b| b == b':');
+    let pos = match colon_pos {
+        Some(p) => p,
+        None => {
+            return Err(AdminError::AuthenticationFailed(
+                "Malformed protected credential structure".into(),
+            ));
+        }
+    };
+
+    let user_str = std::str::from_utf8(&decrypted[..pos]).map_err(|_| {
+        AdminError::AuthenticationFailed("Decrypted credentials contain invalid UTF-8".into())
+    })?;
+    let pass_str = std::str::from_utf8(&decrypted[(pos + 1)..]).map_err(|_| {
         AdminError::AuthenticationFailed("Decrypted credentials contain invalid UTF-8".into())
     })?;
 
-    let parts: Vec<&str> = text.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(AdminError::AuthenticationFailed(
-            "Malformed protected credential structure".into(),
-        ));
-    }
-
-    Ok(RouterCredentials::new(parts[0], parts[1]))
+    Ok(RouterCredentials::new(user_str, pass_str))
 }

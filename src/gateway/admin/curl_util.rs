@@ -93,6 +93,24 @@ impl AutoCleanFile {
 
 impl Drop for AutoCleanFile {
     fn drop(&mut self) {
+        // Securely zero file contents on disk before unlinking
+        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&self.path) {
+            if let Ok(meta) = f.metadata() {
+                let len = meta.len() as usize;
+                if len > 0 {
+                    let zeroes = vec![0u8; len.min(65536)];
+                    let mut remaining = len;
+                    while remaining > 0 {
+                        let to_write = remaining.min(zeroes.len());
+                        if f.write_all(&zeroes[..to_write]).is_err() {
+                            break;
+                        }
+                        remaining -= to_write;
+                    }
+                    let _ = f.flush();
+                }
+            }
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
