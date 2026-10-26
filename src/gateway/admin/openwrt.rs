@@ -858,16 +858,26 @@ impl RouterAdminProvider for OpenWrtAdminProvider {
                     );
 
                     if let Err(e) = add_res {
-                        // Revert uncommitted changes on partial failure
-                        let _ = self.transport.call(
+                        // Revert uncommitted changes on partial failure, capturing rollback status
+                        let revert_res = self.transport.call(
                             &self.endpoint,
                             "uci",
                             "revert",
                             json!({ "config": "firewall" }),
                             &session,
                         );
+                        if let Err(rb_err) = revert_res {
+                            let applied_strs: Vec<String> =
+                                targets.iter().take(idx).map(|ip| ip.to_string()).collect();
+                            return Err(AdminError::RollbackFailed {
+                                applied_targets: applied_strs,
+                                failed_target: target_ip.to_string(),
+                                original_error: e.to_string(),
+                                rollback_errors: vec![format!("uci revert failed: {}", rb_err)],
+                            });
+                        }
                         return Err(AdminError::TransactionFailed(format!(
-                            "Failed to insert firewall rule for target {} on OpenWrt: {}",
+                            "Failed to insert firewall rule for target {} on OpenWrt (staged rules reverted): {}",
                             target_ip, e
                         )));
                     }

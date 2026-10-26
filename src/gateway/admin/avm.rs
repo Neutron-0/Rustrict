@@ -1315,24 +1315,39 @@ impl RouterAdminProvider for AvmAdminProvider {
                     match res {
                         Ok(()) => applied_targets.push(*target_ip),
                         Err(e) => {
-                            // Roll back previously applied targets on partial failure
+                            // Roll back previously applied targets on partial failure, capturing rollback outcomes
+                            let mut rollback_errors = Vec::new();
                             for applied_ip in &applied_targets {
                                 let rollback_args = format!(
                                     "<NewIPv4Address>{}</NewIPv4Address><NewDisallow>0</NewDisallow>",
                                     applied_ip
                                 );
-                                let _ = self.transport.execute_soap(
+                                if let Err(rb_err) = self.transport.execute_soap(
                                     &ctrl_url,
                                     service_urn,
                                     "DisallowWANAccessByIP",
                                     &rollback_args,
                                     Some(creds),
-                                );
+                                ) {
+                                    rollback_errors
+                                        .push(format!("target {}: {}", applied_ip, rb_err));
+                                }
                             }
-                            return Err(AdminError::TransactionFailed(format!(
-                                "Failed to disallow WAN access for target {} on AVM (rolled back): {}",
-                                target_ip, e
-                            )));
+                            if rollback_errors.is_empty() {
+                                return Err(AdminError::TransactionFailed(format!(
+                                    "Failed to disallow WAN access for target {} on AVM (all {} prior targets rolled back): {}",
+                                    target_ip, applied_targets.len(), e
+                                )));
+                            } else {
+                                let applied_strs: Vec<String> =
+                                    applied_targets.iter().map(|ip| ip.to_string()).collect();
+                                return Err(AdminError::RollbackFailed {
+                                    applied_targets: applied_strs,
+                                    failed_target: target_ip.to_string(),
+                                    original_error: e.to_string(),
+                                    rollback_errors,
+                                });
+                            }
                         }
                     }
                 }

@@ -436,6 +436,21 @@ pub fn render_router_policies_table(policies: &[crate::gateway::admin::ActivePol
             crate::gateway::admin::PolicyLifecycleState::Failed(err) => {
                 Cell::new(format!("FAILED: {}", err)).fg(Color::Red)
             }
+            crate::gateway::admin::PolicyLifecycleState::PartialFailure {
+                failed_target,
+                rollback_errors,
+                ..
+            } => {
+                if rollback_errors.is_empty() {
+                    Cell::new(format!("FAILED: {} (Rolled back)", failed_target)).fg(Color::Red)
+                } else {
+                    Cell::new(format!(
+                        "CRITICAL PARTIAL FAILURE: {} (Rollback failed)",
+                        failed_target
+                    ))
+                    .fg(Color::Red)
+                }
+            }
             crate::gateway::admin::PolicyLifecycleState::Unknown => {
                 let desc = p.last_error.as_deref().unwrap_or("Unverified local state");
                 Cell::new(format!("UNKNOWN ({})", desc)).fg(Color::Magenta)
@@ -530,6 +545,18 @@ pub fn render_router_unified_policies_table(
                     format!("FAILED: {}...", &err[..27])
                 } else {
                     format!("FAILED: {}", err)
+                };
+                (s, Color::Red)
+            }
+            crate::gateway::admin::PolicyLifecycleState::PartialFailure {
+                failed_target,
+                rollback_errors,
+                ..
+            } => {
+                let s = if rollback_errors.is_empty() {
+                    format!("PARTIAL FAIL: {} (Rolled back)", failed_target)
+                } else {
+                    format!("CRITICAL: {} (Rollback failed)", failed_target)
                 };
                 (s, Color::Red)
             }
@@ -723,6 +750,29 @@ pub fn render_router_policy_detail(detail: &crate::gateway::admin::PolicyDetailV
         }
         crate::gateway::admin::PolicyLifecycleState::Failed(err) => {
             (format!("FAILED: {}", err), Color::Red)
+        }
+        crate::gateway::admin::PolicyLifecycleState::PartialFailure {
+            failed_target,
+            rollback_errors,
+            ..
+        } => {
+            if rollback_errors.is_empty() {
+                (
+                    format!(
+                        "PARTIAL FAILURE: {} (All prior rules rolled back)",
+                        failed_target
+                    ),
+                    Color::Red,
+                )
+            } else {
+                (
+                    format!(
+                        "CRITICAL PARTIAL FAILURE: {} (ROLLBACK FAILED: {:?})",
+                        failed_target, rollback_errors
+                    ),
+                    Color::Red,
+                )
+            }
         }
         crate::gateway::admin::PolicyLifecycleState::Unknown => (
             "UNKNOWN (Unverified local state)".to_string(),

@@ -162,6 +162,11 @@ pub enum PolicyLifecycleState {
     RecoveryInProgress,
     Recovered,
     Failed(String),
+    PartialFailure {
+        applied_targets: Vec<String>,
+        failed_target: String,
+        rollback_errors: Vec<String>,
+    },
     Unknown,
 }
 
@@ -175,6 +180,28 @@ impl fmt::Display for PolicyLifecycleState {
             Self::RecoveryInProgress => write!(f, "RECOVERY IN PROGRESS"),
             Self::Recovered => write!(f, "RECOVERED"),
             Self::Failed(err) => write!(f, "FAILED: {}", err),
+            Self::PartialFailure {
+                applied_targets,
+                failed_target,
+                rollback_errors,
+            } => {
+                if rollback_errors.is_empty() {
+                    write!(
+                        f,
+                        "PARTIAL FAILURE (Rolled back): target {} failed, {} prior targets rolled back",
+                        failed_target,
+                        applied_targets.len()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "CRITICAL PARTIAL FAILURE: target {} failed; ROLLBACK FAILED for {} target(s): {:?}",
+                        failed_target,
+                        rollback_errors.len(),
+                        rollback_errors
+                    )
+                }
+            }
             Self::Unknown => write!(f, "UNKNOWN"),
         }
     }
@@ -277,6 +304,12 @@ pub enum AdminError {
     DuplicatePolicy(String),
     PolicyNotFound(String),
     TransactionFailed(String),
+    RollbackFailed {
+        applied_targets: Vec<String>,
+        failed_target: String,
+        original_error: String,
+        rollback_errors: Vec<String>,
+    },
     SecurityViolation(String),
 }
 
@@ -294,6 +327,22 @@ impl fmt::Display for AdminError {
             Self::DuplicatePolicy(msg) => write!(f, "Duplicate Policy: {}", msg),
             Self::PolicyNotFound(msg) => write!(f, "Policy Not Found: {}", msg),
             Self::TransactionFailed(msg) => write!(f, "Transaction Failed: {}", msg),
+            Self::RollbackFailed {
+                applied_targets,
+                failed_target,
+                original_error,
+                rollback_errors,
+            } => {
+                write!(
+                    f,
+                    "CRITICAL: Transaction failed for target '{}' ({}) AND rollback failed for {} target(s): {:?}. Manual verification required on physical router for applied targets: {:?}",
+                    failed_target,
+                    original_error,
+                    rollback_errors.len(),
+                    rollback_errors,
+                    applied_targets
+                )
+            }
             Self::SecurityViolation(msg) => write!(f, "Security Violation: {}", msg),
         }
     }

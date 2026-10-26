@@ -1127,20 +1127,38 @@ impl RouterAdminProvider for MikroTikAdminProvider {
                             created_ids.push(rule_id);
                         }
                         Err(e) => {
-                            // Rollback created rules on partial failure
+                            // Rollback created rules on partial failure, capturing any rollback errors
+                            let mut rollback_errors = Vec::new();
                             for created_id in &created_ids {
-                                let _ = self.transport.request(
+                                if let Err(rb_err) = self.transport.request(
                                     &self.endpoint,
                                     "DELETE",
                                     &format!("/rest/ip/firewall/filter/{}", created_id),
                                     None,
                                     Some(creds),
-                                );
+                                ) {
+                                    rollback_errors
+                                        .push(format!("rule {}: {}", created_id, rb_err));
+                                }
                             }
-                            return Err(AdminError::TransactionFailed(format!(
-                                "Failed to commit firewall policy rule for target {} on MikroTik (rolled back): {}",
-                                target_ip, e
-                            )));
+                            if rollback_errors.is_empty() {
+                                return Err(AdminError::TransactionFailed(format!(
+                                    "Failed to commit firewall policy rule for target {} on MikroTik (all {} prior rules rolled back): {}",
+                                    target_ip, created_ids.len(), e
+                                )));
+                            } else {
+                                let applied_strs: Vec<String> = targets
+                                    .iter()
+                                    .take(created_ids.len())
+                                    .map(|ip| ip.to_string())
+                                    .collect();
+                                return Err(AdminError::RollbackFailed {
+                                    applied_targets: applied_strs,
+                                    failed_target: target_ip.to_string(),
+                                    original_error: e.to_string(),
+                                    rollback_errors,
+                                });
+                            }
                         }
                     }
                 }

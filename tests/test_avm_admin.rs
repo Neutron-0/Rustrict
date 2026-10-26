@@ -548,3 +548,87 @@ fn test_avm_multi_target_policy_enforcement_and_recovery() {
         assert!(!disallowed.contains(&target3));
     }
 }
+
+#[test]
+fn test_avm_rollback_failure_reporting() {
+    use rustrict::gateway::admin::avm::AvmTransport;
+
+    struct AvmRollbackFailTransport {
+        inner: MockAvmTransport,
+    }
+    impl AvmTransport for AvmRollbackFailTransport {
+        fn transport_name(&self) -> &'static str {
+            "Mock-AvmRollbackFail"
+        }
+        fn fetch_description(
+            &self,
+            description_url: &str,
+            credentials: Option<&RouterCredentials>,
+        ) -> Result<String, AdminError> {
+            self.inner.fetch_description(description_url, credentials)
+        }
+        fn execute_soap(
+            &self,
+            control_url: &str,
+            service_urn: &str,
+            action: &str,
+            args_xml: &str,
+            creds: Option<&RouterCredentials>,
+        ) -> Result<String, AdminError> {
+            if action == "DisallowWANAccessByIP" {
+                if args_xml.contains("<NewDisallow>1</NewDisallow>") {
+                    let disallowed = self.inner.active_disallowed_ips.read().len();
+                    if disallowed >= 1 {
+                        return Err(AdminError::CommunicationError(
+                            "Target 2 disallow failed".into(),
+                        ));
+                    }
+                } else if args_xml.contains("<NewDisallow>0</NewDisallow>") {
+                    return Err(AdminError::CommunicationError(
+                        "Rollback re-allow failed over SOAP".into(),
+                    ));
+                }
+            }
+            self.inner
+                .execute_soap(control_url, service_urn, action, args_xml, creds)
+        }
+    }
+
+    let fail_transport = AvmRollbackFailTransport {
+        inner: MockAvmTransport::default(),
+    };
+    let fail_provider = AvmAdminProvider::new(
+        Ipv4Addr::new(192, 168, 178, 1),
+        "http://192.168.178.1:49000",
+    )
+    .with_transport(Box::new(fail_transport));
+    fail_provider.set_credentials(RouterCredentials::new("admin", "admin_password"));
+
+    let req = OperationPlanRequest::new(
+        PolicyScope::SpecificTargets(vec![
+            Ipv4Addr::new(192, 168, 178, 10),
+            Ipv4Addr::new(192, 168, 178, 20),
+        ]),
+        PolicyDuration::Indefinite,
+        PolicyPersistence::VolatileSession,
+    );
+
+    let err = fail_provider
+        .apply_policy(&req)
+        .expect_err("Must report AVM rollback failure");
+    match err {
+        AdminError::RollbackFailed {
+            applied_targets,
+            failed_target,
+            original_error,
+            rollback_errors,
+        } => {
+            assert_eq!(applied_targets, vec!["192.168.178.10".to_string()]);
+            assert_eq!(failed_target, "192.168.178.20");
+            assert!(original_error.contains("Target 2 disallow failed"));
+            assert_eq!(rollback_errors.len(), 1);
+            assert!(rollback_errors[0].contains("Rollback re-allow failed over SOAP"));
+        }
+        other => panic!("Expected RollbackFailed, got: {:?}", other),
+    }
+}

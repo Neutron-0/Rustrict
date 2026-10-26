@@ -669,3 +669,77 @@ fn test_mikrotik_ipv6_honesty_check() {
         CapabilityClassification::NotImplemented
     );
 }
+
+#[test]
+fn test_mikrotik_rollback_failure_reporting() {
+    use rustrict::gateway::admin::mikrotik::MikroTikTransport;
+
+    struct RollbackFailTransport {
+        inner: MockMikroTikTransport,
+    }
+    impl MikroTikTransport for RollbackFailTransport {
+        fn transport_name(&self) -> &'static str {
+            "Mock-RollbackFail"
+        }
+        fn request(
+            &self,
+            endpoint: &str,
+            method: &str,
+            path: &str,
+            body: Option<serde_json::Value>,
+            creds: Option<&RouterCredentials>,
+        ) -> Result<serde_json::Value, AdminError> {
+            if method == "POST" && path == "/rest/ip/firewall/filter" {
+                let rules_count = self.inner.firewall_rules.read().len();
+                if rules_count >= 1 {
+                    return Err(AdminError::CommunicationError(
+                        "Target 2 POST failed".into(),
+                    ));
+                }
+                return self.inner.request(endpoint, method, path, body, creds);
+            }
+            if method == "DELETE" {
+                return Err(AdminError::CommunicationError(
+                    "Router unreachable during rollback DELETE".into(),
+                ));
+            }
+            self.inner.request(endpoint, method, path, body, creds)
+        }
+    }
+
+    let fail_transport = RollbackFailTransport {
+        inner: MockMikroTikTransport::default(),
+    };
+    let fail_provider =
+        MikroTikAdminProvider::new(Ipv4Addr::new(192, 168, 88, 1), "https://192.168.88.1")
+            .with_transport(Box::new(fail_transport));
+    fail_provider.set_credentials(RouterCredentials::new("admin", "admin_password"));
+
+    let req = OperationPlanRequest::new(
+        PolicyScope::SpecificTargets(vec![
+            Ipv4Addr::new(192, 168, 88, 10),
+            Ipv4Addr::new(192, 168, 88, 20),
+        ]),
+        PolicyDuration::Indefinite,
+        PolicyPersistence::VolatileSession,
+    );
+
+    let err = fail_provider
+        .apply_policy(&req)
+        .expect_err("Must report rollback failure");
+    match err {
+        AdminError::RollbackFailed {
+            applied_targets,
+            failed_target,
+            original_error,
+            rollback_errors,
+        } => {
+            assert_eq!(applied_targets, vec!["192.168.88.10".to_string()]);
+            assert_eq!(failed_target, "192.168.88.20");
+            assert!(original_error.contains("Target 2 POST failed"));
+            assert_eq!(rollback_errors.len(), 1);
+            assert!(rollback_errors[0].contains("Router unreachable during rollback"));
+        }
+        other => panic!("Expected RollbackFailed, got: {:?}", other),
+    }
+}

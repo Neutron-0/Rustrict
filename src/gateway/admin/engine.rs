@@ -126,6 +126,23 @@ pub fn sanitize_error(err: AdminError) -> AdminError {
         AdminError::DuplicatePolicy(msg) => AdminError::DuplicatePolicy(sanitize_text(&msg)),
         AdminError::PolicyNotFound(msg) => AdminError::PolicyNotFound(sanitize_text(&msg)),
         AdminError::TransactionFailed(msg) => AdminError::TransactionFailed(sanitize_text(&msg)),
+        AdminError::RollbackFailed {
+            applied_targets,
+            failed_target,
+            original_error,
+            rollback_errors,
+        } => AdminError::RollbackFailed {
+            applied_targets: applied_targets
+                .into_iter()
+                .map(|t| sanitize_text(&t))
+                .collect(),
+            failed_target: sanitize_text(&failed_target),
+            original_error: sanitize_text(&original_error),
+            rollback_errors: rollback_errors
+                .into_iter()
+                .map(|e| sanitize_text(&e))
+                .collect(),
+        },
         AdminError::SecurityViolation(msg) => AdminError::SecurityViolation(sanitize_text(&msg)),
     }
 }
@@ -424,6 +441,20 @@ impl PolicyExecutionEngine {
             }
             Err(e) => {
                 let sanitized_err = sanitize_error(e);
+                let final_state = match &sanitized_err {
+                    AdminError::RollbackFailed {
+                        applied_targets,
+                        failed_target,
+                        rollback_errors,
+                        ..
+                    } => PolicyLifecycleState::PartialFailure {
+                        applied_targets: applied_targets.clone(),
+                        failed_target: failed_target.clone(),
+                        rollback_errors: rollback_errors.clone(),
+                    },
+                    _ => PolicyLifecycleState::Failed(sanitized_err.to_string()),
+                };
+
                 let record = PolicyExecutionRecord {
                     execution_id,
                     timestamp_unix: now,
@@ -432,7 +463,7 @@ impl PolicyExecutionEngine {
                     provider_name: desc.name.clone(),
                     target_scope: req.scope.clone(),
                     initial_state: PolicyLifecycleState::PendingApplication,
-                    final_state: PolicyLifecycleState::Failed(sanitized_err.to_string()),
+                    final_state,
                     duration: req.duration.clone(),
                     persistence: req.persistence.clone(),
                     autonomous_recovery_guaranteed: false,
