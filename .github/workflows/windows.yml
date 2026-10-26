@@ -1,0 +1,39 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Native Windows Verification
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify Code Formatting
+        run: cargo fmt --check
+
+      - name: Check All Targets
+        run: cargo check --all-targets
+
+      - name: Run Clippy Linter
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Test Suite
+        run: cargo test --all-targets
