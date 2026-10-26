@@ -175,6 +175,24 @@ pub struct RouterEvidenceBundle {
     pub sanitized_errors: Vec<String>,
 }
 
+/// Detailed offline report from validating an exported evidence bundle
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceValidationReport {
+    pub valid: bool,
+    pub schema_version: String,
+    pub generated_at_iso8601: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub endpoint: Option<String>,
+    pub router_identity: Option<String>,
+    pub active_policy_count: usize,
+    pub historical_policy_count: usize,
+    pub execution_record_count: usize,
+    pub device_count: usize,
+    pub issues: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 /// Converts Unix epoch seconds into an ISO 8601 UTC timestamp string
 pub fn unix_to_iso8601(unix_secs: u64) -> String {
     let days_since_epoch = unix_secs / 86400;

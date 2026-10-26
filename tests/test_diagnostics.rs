@@ -552,3 +552,136 @@ fn test_evidence_bundle_refuses_to_overwrite_without_flag() {
     // Export with overwrite flag succeeds
     assert!(engine.export_evidence_bundle(&bundle_file, true).is_ok());
 }
+
+#[test]
+fn test_evidence_bundle_offline_validation_valid() {
+    let temp_dir = TestTempDir::new("bundle_validate_valid");
+    let bundle_file = temp_dir.path().join("evidence.json");
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock, "internal://mock")
+        .expect("Connect mock");
+
+    let engine = PolicyExecutionEngine::new(registry);
+    engine
+        .export_evidence_bundle(&bundle_file, false)
+        .expect("Export bundle");
+
+    // Offline validation with zero network calls
+    let report = PolicyExecutionEngine::validate_evidence_file(&bundle_file)
+        .expect("Validate evidence file");
+
+    assert!(
+        report.valid,
+        "Exported bundle should be valid: issues = {:?}",
+        report.issues
+    );
+    assert_eq!(report.schema_version, "rustrict-evidence-v1.0");
+    assert_eq!(report.provider_id, "mock");
+    assert!(report.endpoint.is_some());
+    assert!(report.router_identity.is_some());
+    assert_eq!(report.active_policy_count, 0);
+    assert!(report.issues.is_empty());
+}
+
+#[test]
+fn test_evidence_bundle_offline_validation_corrupted_json() {
+    let temp_dir = TestTempDir::new("bundle_validate_corrupt");
+    let corrupt_file = temp_dir.path().join("corrupted.json");
+    fs::write(
+        &corrupt_file,
+        b"{\"schema_version\": \"rustrict-evidence-v1.0\", corrupt json...",
+    )
+    .unwrap();
+
+    let err = PolicyExecutionEngine::validate_evidence_file(&corrupt_file).unwrap_err();
+    assert!(matches!(err, AdminError::CommunicationError(_)));
+}
+
+#[test]
+fn test_evidence_bundle_offline_validation_nonexistent_file() {
+    let non_existent = Path::new("target/does_not_exist_evidence_123456.json");
+    let err = PolicyExecutionEngine::validate_evidence_file(non_existent).unwrap_err();
+    assert!(matches!(err, AdminError::CommunicationError(_)));
+}
+
+#[test]
+fn test_evidence_bundle_offline_validation_schema_mismatch() {
+    let temp_dir = TestTempDir::new("bundle_validate_schema");
+    let bundle_file = temp_dir.path().join("evidence_schema.json");
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock, "internal://mock")
+        .expect("Connect mock");
+
+    let engine = PolicyExecutionEngine::new(registry);
+    engine
+        .export_evidence_bundle(&bundle_file, false)
+        .expect("Export bundle");
+
+    // Mutate schema version to incompatible version
+    let raw = fs::read_to_string(&bundle_file).unwrap();
+    assert!(raw.contains("rustrict-evidence-v1.0"));
+    let mutated = raw.replace("rustrict-evidence-v1.0", "rustrict-evidence-v0.9");
+    assert_ne!(raw, mutated);
+    fs::write(&bundle_file, mutated).unwrap();
+
+    let report = PolicyExecutionEngine::validate_evidence_file(&bundle_file)
+        .expect("Validate evidence file");
+
+    assert!(
+        !report.valid,
+        "Modified schema version must be flagged as invalid"
+    );
+    assert!(report
+        .issues
+        .iter()
+        .any(|i| i.contains("Unexpected schema version")));
+}
+
+#[test]
+fn test_evidence_bundle_offline_validation_unredacted_secret_flagged() {
+    let temp_dir = TestTempDir::new("bundle_validate_secret");
+    let bundle_file = temp_dir.path().join("evidence_secret.json");
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+    let registry = Arc::new(RouterRegistry::new(gateway_ip));
+    let mock = Arc::new(MockRouterAdminProvider::new(gateway_ip));
+    registry
+        .connect("mock", mock, "internal://mock")
+        .expect("Connect mock");
+
+    let engine = PolicyExecutionEngine::new(registry);
+    engine
+        .export_evidence_bundle(&bundle_file, false)
+        .expect("Export bundle");
+
+    // Inject unredacted password string into json while keeping valid JSON structure
+    let raw = fs::read_to_string(&bundle_file).unwrap();
+    assert!(raw.contains("\"provider_id\":"));
+    let mutated = raw.replace(
+        "\"provider_id\": \"mock\"",
+        "\"provider_id\": \"mock\",\n  \"password\": \"unredacted_secret\"",
+    );
+    assert_ne!(raw, mutated, "Mutation must replace provider_id");
+    fs::write(&bundle_file, mutated).unwrap();
+
+    let report = PolicyExecutionEngine::validate_evidence_file(&bundle_file)
+        .expect("Validate evidence file");
+
+    assert!(
+        !report.valid,
+        "Leaked secret must cause validation to fail: issues = {:?}",
+        report.issues
+    );
+    assert!(report
+        .issues
+        .iter()
+        .any(|i| i.contains("unredacted password credential")));
+}

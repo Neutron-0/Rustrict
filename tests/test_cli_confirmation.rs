@@ -203,3 +203,20 @@ fn test_cli_mock_mode_notice() {
         "Mock mode successfully creates policy in mock store"
     );
 }
+
+#[test]
+fn test_cli_validate_evidence_command() {
+    let mut cli = RustrictCli::new_for_testing();
+    cli.handle_router(&["connect", "mock"]);
+
+    let temp_file = std::env::temp_dir().join(format!("cli_val_{}.json", std::process::id()));
+    cli.policy_engine()
+        .export_evidence_bundle(&temp_file, false)
+        .expect("Export bundle");
+
+    // Command should parse, validate, and report with 0 network calls
+    cli.handle_router(&["validate-evidence", temp_file.to_str().unwrap()]);
+    cli.handle_router(&["validate", temp_file.to_str().unwrap()]);
+
+    let _ = std::fs::remove_file(temp_file);
+}

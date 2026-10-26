@@ -1351,6 +1351,57 @@ impl RustrictCli {
                     }
                 }
             }
+            "validate-evidence" | "validate" => {
+                if args.len() < 2 {
+                    println!("Usage: router validate-evidence <path-to-json-bundle>");
+                    return;
+                }
+                let bundle_path = std::path::Path::new(args[1]);
+                match PolicyExecutionEngine::validate_evidence_file(bundle_path) {
+                    Ok(report) => {
+                        if report.valid {
+                            println!(
+                                "{} Evidence Bundle is VALID: {}",
+                                "[VALID]".green().bold(),
+                                bundle_path.display()
+                            );
+                        } else {
+                            println!(
+                                "{} Evidence Bundle has ISSUES: {}",
+                                "[INVALID]".red().bold(),
+                                bundle_path.display()
+                            );
+                        }
+                        println!("  • Schema Version:      {}", report.schema_version);
+                        println!("  • Generated (UTC):     {}", report.generated_at_iso8601);
+                        println!("  • Provider ID:         {}", report.provider_id);
+                        println!("  • Provider Name:       {}", report.provider_name);
+                        if let Some(ep) = &report.endpoint {
+                            println!("  • Endpoint:            {}", ep);
+                        }
+                        if let Some(id) = &report.router_identity {
+                            println!("  • Router Identity:     {}", id);
+                        }
+                        println!("  • Active Policies:     {}", report.active_policy_count);
+                        println!(
+                            "  • Historical Policies: {}",
+                            report.historical_policy_count
+                        );
+                        println!("  • Execution Records:   {}", report.execution_record_count);
+                        println!("  • Device Inventory:    {}", report.device_count);
+
+                        for issue in &report.issues {
+                            println!("  • {} {}", "[ISSUE]".red().bold(), issue);
+                        }
+                        for warning in &report.warnings {
+                            println!("  • {} {}", "[WARN]".yellow().bold(), warning);
+                        }
+                    }
+                    Err(e) => {
+                        println!("{} Evidence validation failed: {}", "[ERR]".red().bold(), e);
+                    }
+                }
+            }
             "devices" | "clients" => {
                 let reg_status = self.router_registry.get_status();
                 let active_id = self.router_registry.active_provider_id();

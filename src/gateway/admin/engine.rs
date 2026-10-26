@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::gateway::admin::capabilities::RouterCapabilityMatrix;
 use crate::gateway::admin::diagnostics::{
     sanitize_endpoint, unix_to_iso8601, ConnectionDiagnostic, DataSource, DiagnosticResult,
-    NormalizedRouterInventoryItem, ProviderConnectionState, RouterDeviceEntry,
-    RouterDiagnosticReport, RouterEvidenceBundle,
+    EvidenceValidationReport, NormalizedRouterInventoryItem, ProviderConnectionState,
+    RouterDeviceEntry, RouterDiagnosticReport, RouterEvidenceBundle,
 };
 use crate::gateway::admin::persistence::PolicyStore;
 use crate::gateway::admin::plan::{
@@ -1646,6 +1646,135 @@ impl PolicyExecutionEngine {
             })?;
 
         Ok(bundle)
+    }
+
+    /// Validates an exported evidence bundle JSON file offline with zero network mutations.
+    pub fn validate_evidence_file(path: &Path) -> Result<EvidenceValidationReport, AdminError> {
+        if !path.exists() {
+            return Err(AdminError::CommunicationError(format!(
+                "Evidence bundle file does not exist at '{}'",
+                path.display()
+            )));
+        }
+
+        let metadata = std::fs::metadata(path).map_err(|e| {
+            AdminError::CommunicationError(format!(
+                "Failed to read evidence bundle metadata at '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        if metadata.len() > 10 * 1024 * 1024 {
+            return Err(AdminError::CommunicationError(format!(
+                "Evidence bundle file at '{}' exceeds maximum allowed size (10 MiB)",
+                path.display()
+            )));
+        }
+
+        let raw_bytes = std::fs::read(path).map_err(|e| {
+            AdminError::CommunicationError(format!(
+                "Failed to read evidence bundle file at '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let raw_str = String::from_utf8(raw_bytes).map_err(|e| {
+            AdminError::CommunicationError(format!(
+                "Evidence bundle at '{}' is not valid UTF-8: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let bundle: RouterEvidenceBundle = serde_json::from_str(&raw_str).map_err(|e| {
+            AdminError::CommunicationError(format!(
+                "Evidence bundle at '{}' is not valid JSON or does not match bundle schema: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let mut issues = Vec::new();
+        let mut warnings = Vec::new();
+
+        if bundle.schema_version != "rustrict-evidence-v1.0" {
+            issues.push(format!(
+                "Unexpected schema version '{}' (expected 'rustrict-evidence-v1.0')",
+                bundle.schema_version
+            ));
+        }
+
+        if bundle.generated_at_unix == 0 {
+            issues.push("Invalid timestamp: generated_at_unix is 0".to_string());
+        }
+
+        if bundle.generated_at_iso8601.trim().is_empty() {
+            issues.push("Invalid timestamp: generated_at_iso8601 is empty".to_string());
+        }
+
+        if bundle.provider_id.trim().is_empty() {
+            issues.push("Required field 'provider_id' is empty".to_string());
+        }
+
+        if bundle.provider_name.trim().is_empty() {
+            issues.push("Required field 'provider_name' is empty".to_string());
+        }
+
+        // Secret leakage scanner: Ensure no raw Basic auth, Bearer tokens, or passwords exist in the bundle
+        for line in raw_str.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("authorization:") && !lower.contains("[redacted]") {
+                issues.push(
+                    "Potential unredacted Authorization header detected in evidence file"
+                        .to_string(),
+                );
+                break;
+            }
+            if lower.contains("password")
+                && !lower.contains("[redacted]")
+                && !lower.contains("\"password\": null")
+                && (lower.contains("password = \"") || lower.contains("\"password\": \""))
+            {
+                issues.push(
+                    "Potential unredacted password credential detected in evidence file"
+                        .to_string(),
+                );
+                break;
+            }
+        }
+
+        if bundle.active_policies.is_empty() && bundle.historical_policies.is_empty() {
+            warnings.push(
+                "Evidence bundle contains zero active and zero historical policies".to_string(),
+            );
+        }
+
+        if bundle.device_inventory.is_empty() {
+            warnings.push("Evidence bundle contains zero discovered device entries".to_string());
+        }
+
+        let router_identity_str = bundle
+            .router_identity
+            .as_ref()
+            .map(|id| id.display_summary());
+
+        Ok(EvidenceValidationReport {
+            valid: issues.is_empty(),
+            schema_version: bundle.schema_version,
+            generated_at_iso8601: bundle.generated_at_iso8601,
+            provider_id: bundle.provider_id,
+            provider_name: bundle.provider_name,
+            endpoint: bundle.endpoint,
+            router_identity: router_identity_str,
+            active_policy_count: bundle.active_policies.len(),
+            historical_policy_count: bundle.historical_policies.len(),
+            execution_record_count: bundle.execution_records.len(),
+            device_count: bundle.device_inventory.len(),
+            issues,
+            warnings,
+        })
     }
 }
 
