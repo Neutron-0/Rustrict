@@ -121,6 +121,12 @@ impl MikroTikTransport for HttpsMikroTikTransport {
         let mut cmd = Command::new(&curl_bin);
         cmd.arg("-s");
         cmd.arg("-S");
+        cmd.arg("--retry")
+            .arg("2")
+            .arg("--retry-delay")
+            .arg("0")
+            .arg("--retry-connrefused")
+            .arg("--retry-all-errors");
         cmd.arg("-X").arg(method);
         cmd.arg("--connect-timeout")
             .arg(self.connect_timeout.as_secs().max(1).to_string());

@@ -236,6 +236,12 @@ impl AvmTransport for HttpAvmTransport {
         )?;
 
         let mut child = Command::new(&curl_bin)
+            .arg("--retry")
+            .arg("2")
+            .arg("--retry-delay")
+            .arg("0")
+            .arg("--retry-connrefused")
+            .arg("--retry-all-errors")
             .arg("--config")
             .arg("-")
             .arg("--data-binary")
@@ -330,6 +336,12 @@ impl AvmTransport for HttpAvmTransport {
 
         let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
         let mut child = Command::new(&curl_bin)
+            .arg("--retry")
+            .arg("2")
+            .arg("--retry-delay")
+            .arg("0")
+            .arg("--retry-connrefused")
+            .arg("--retry-all-errors")
             .arg("--config")
             .arg("-")
             .stdin(std::process::Stdio::piped())

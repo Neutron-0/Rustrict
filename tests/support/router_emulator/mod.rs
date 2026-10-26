@@ -162,6 +162,7 @@ impl RouterEmulator {
         mutation_count: Arc<Mutex<usize>>,
     ) {
         let _ = stream.set_nodelay(true);
+        let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::from_secs(2)));
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
@@ -261,8 +262,9 @@ impl RouterEmulator {
                     return;
                 }
                 FailMode::SoapFault { code, message } => {
-                    let fault_body = format!(
-                        r#"<?xml version="1.0"?>
+                    if !path.contains("tr64desc.xml") {
+                        let fault_body = format!(
+                            r#"<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
   <s:Body>
     <s:Fault>
@@ -272,14 +274,17 @@ impl RouterEmulator {
     </s:Fault>
   </s:Body>
 </s:Envelope>"#,
-                        code, message
-                    );
-                    let resp = format!(
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        fault_body.len(), fault_body
-                    );
-                    let _ = stream.write_all(resp.as_bytes());
-                    return;
+                            code, message
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            fault_body.len(), fault_body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                        return;
+                    }
                 }
                 FailMode::MalformedJson => {
                     let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{invalid_json:]";

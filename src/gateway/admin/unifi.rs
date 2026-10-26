@@ -128,7 +128,14 @@ impl UnifiTransport for HttpUnifiTransport {
 
         let curl_bin = crate::gateway::admin::curl_util::find_curl()?;
         let mut cmd = Command::new(&curl_bin);
-        cmd.arg("--config").arg("-");
+        cmd.arg("--retry")
+            .arg("2")
+            .arg("--retry-delay")
+            .arg("0")
+            .arg("--retry-connrefused")
+            .arg("--retry-all-errors")
+            .arg("--config")
+            .arg("-");
 
         let body_str = body.map(|b| b.to_string()).unwrap_or_default();
         let _payload_guard = if !body_str.is_empty() {

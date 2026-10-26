@@ -31,3 +31,11 @@
 ### 6. `7af23a0` — `fix(test): eliminate duplicate socket handle and drain sleep in emulator`
 - **Scope**: `tests/support/router_emulator/mod.rs`
 - **Description**: Resolves socket handle duplication and removes blocking receive drain in the test emulator. Ensures seamless Windows Winsock TCP teardown across both native Windows MSVC and GitHub Actions runner environments for MSRV 1.88.0 and stable Rust.
+
+### 7. `3b1cfb8` — `docs(manifest): record final Phase 17 commit manifest`
+- **Scope**: `audit/phase-17-protocol-integration-2026-10-26/COMMIT_MANIFEST.md`
+- **Description**: Records completed Phase 17 commits up through the emulator socket handle and drain sleep remediation.
+
+### 8. (Pending) — `fix(transport): add transient retry and socket lingering to curl router adapters`
+- **Scope**: `src/gateway/admin/avm.rs`, `src/gateway/admin/mikrotik.rs`, `src/gateway/admin/unifi.rs`, `tests/support/router_emulator/mod.rs`
+- **Description**: Configures `--retry 2 --retry-delay 0 --retry-connrefused --retry-all-errors` across AVM TR-064, UniFi Network, and MikroTik REST curl adapters to ensure resilience against transient Windows loopback connection aborts (Winsock 10053/10054 / exit code 56). Sets `SO_LINGER` on simulated router streams to guarantee graceful TCP teardown without abrupt connection resets.
