@@ -40,6 +40,7 @@ pub struct RustrictCli {
     admin_provider: Arc<dyn RouterAdminProvider>,
     router_registry: Arc<RouterRegistry>,
     policy_engine: Arc<PolicyExecutionEngine>,
+    simulated_inputs: Vec<String>,
 }
 
 /// Reads password from console with echo disabled to prevent credential leaking
@@ -167,7 +168,86 @@ impl RustrictCli {
             admin_provider,
             router_registry,
             policy_engine,
+            simulated_inputs: Vec::new(),
         }
+    }
+
+    pub fn new_for_testing() -> Self {
+        let iface = NetworkInterface {
+            name: "test_iface".into(),
+            description: "Loopback Test Interface".into(),
+            ip: Ipv4Addr::new(127, 0, 0, 1),
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            gateway: Ipv4Addr::new(127, 0, 0, 1),
+            gateway_mac: MacAddress::ZERO,
+            mac: MacAddress::ZERO,
+            device_path: "\\Device\\NPF_Loopback".into(),
+        };
+        let scanner = SubnetScanner::new(iface.ip, iface.netmask, iface.gateway);
+        let spoofer = ArpSpoofer::new_inactive(iface.mac, iface.gateway, iface.gateway_mac);
+        let limiter = TrafficLimiter::new();
+        let sniffer = crate::resolver::passive::PassiveIdentitySniffer::new_inactive();
+        let persistent_state = crate::state::PersistentState::default();
+        let mut scope = ScopeManager::default();
+        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, 24) {
+            scope.add_cidr_direct(local_cidr);
+        }
+        let router_registry = Arc::new(RouterRegistry::new(iface.gateway));
+        router_registry.set_controller_ip(iface.ip);
+        let policy_engine = Arc::new(PolicyExecutionEngine::new(router_registry.clone()));
+        let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+
+        Self {
+            iface,
+            scanner,
+            spoofer,
+            limiter,
+            sniffer,
+            hosts: Vec::new(),
+            persistent_state,
+            scope,
+            services: HashMap::new(),
+            findings: Vec::new(),
+            admin_provider,
+            router_registry,
+            policy_engine,
+            simulated_inputs: Vec::new(),
+        }
+    }
+
+    pub fn with_simulated_inputs(mut self, inputs: Vec<String>) -> Self {
+        self.simulated_inputs = inputs;
+        self
+    }
+
+    pub fn add_simulated_input(&mut self, input: impl Into<String>) {
+        self.simulated_inputs.push(input.into());
+    }
+
+    pub fn read_confirmation_input(&mut self) -> io::Result<String> {
+        if !self.simulated_inputs.is_empty() {
+            Ok(self.simulated_inputs.remove(0))
+        } else {
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            Ok(input)
+        }
+    }
+
+    pub fn router_registry(&self) -> &Arc<RouterRegistry> {
+        &self.router_registry
+    }
+
+    pub fn policy_engine(&self) -> &Arc<PolicyExecutionEngine> {
+        &self.policy_engine
+    }
+
+    pub fn set_hosts(&mut self, hosts: Vec<Host>) {
+        self.hosts = hosts;
+    }
+
+    pub fn add_host(&mut self, host: Host) {
+        self.hosts.push(host);
     }
 
     pub fn with_admin_provider(mut self, provider: Arc<dyn RouterAdminProvider>) -> Self {
@@ -180,14 +260,6 @@ impl RustrictCli {
 
     pub fn admin_provider(&self) -> &Arc<dyn RouterAdminProvider> {
         &self.admin_provider
-    }
-
-    pub fn router_registry(&self) -> &Arc<RouterRegistry> {
-        &self.router_registry
-    }
-
-    pub fn policy_engine(&self) -> &Arc<PolicyExecutionEngine> {
-        &self.policy_engine
     }
 
     pub fn shutdown(&mut self) {
@@ -1024,7 +1096,7 @@ impl RustrictCli {
         println!("  quit / exit                                     Exits rustrict and restores network\n");
     }
 
-    fn handle_router(&mut self, args: &[&str]) {
+    pub fn handle_router(&mut self, args: &[&str]) {
         if args.is_empty() || args[0].eq_ignore_ascii_case("help") {
             println!(
                 "{}",
@@ -1036,6 +1108,7 @@ impl RustrictCli {
             println!("  router status                                   Display current router identity and connection status");
             println!("  router diagnostics / router diag                Run comprehensive read-only diagnostic checks without mutating rules");
             println!("  router export-evidence [path] [--overwrite]     Export full sanitized read-only evidence bundle (JSON)");
+            println!("  router validate-evidence <path>                 Validate exported evidence bundle offline");
             println!("  router devices / router clients                 List connected client devices discovered on router (where supported)");
             println!("  router policies [policy_id]                     Display unified router policies or inspect specific policy");
             println!("  router policy <policy_id>                       Display detailed inspection and event timeline of a policy");
@@ -1699,10 +1772,8 @@ impl RustrictCli {
                         prompt_text
                     );
                     let _ = io::stdout().flush();
-                    let mut confirm = String::new();
-                    if io::stdin().read_line(&mut confirm).is_err()
-                        || !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y")
-                    {
+                    let confirm = self.read_confirmation_input().unwrap_or_default();
+                    if !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y") {
                         println!(
                             "{} Policy enforcement cancelled by administrator. Zero router mutations performed.",
                             "[INFO]".cyan().bold()
@@ -1876,10 +1947,8 @@ impl RustrictCli {
                         "[CONFIRMATION REQUIRED]".bright_red().bold()
                     );
                     let _ = io::stdout().flush();
-                    let mut confirm = String::new();
-                    if io::stdin().read_line(&mut confirm).is_err()
-                        || !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y")
-                    {
+                    let confirm = self.read_confirmation_input().unwrap_or_default();
+                    if !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y") {
                         println!(
                             "{} Policy revocation cancelled by administrator. Zero router mutations performed.",
                             "[INFO]".cyan().bold()
@@ -2062,10 +2131,8 @@ impl RustrictCli {
                         "[CONFIRMATION REQUIRED]".bright_red().bold()
                     );
                     let _ = io::stdout().flush();
-                    let mut confirm = String::new();
-                    if io::stdin().read_line(&mut confirm).is_err()
-                        || !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y")
-                    {
+                    let confirm = self.read_confirmation_input().unwrap_or_default();
+                    if !matches!(confirm.trim().to_ascii_lowercase().as_str(), "yes" | "y") {
                         println!(
                             "{} Policy adjustment cancelled by administrator. Zero router mutations performed.",
                             "[INFO]".cyan().bold()

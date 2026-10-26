@@ -14,6 +14,14 @@ pub struct PassiveIdentitySniffer {
 }
 
 impl PassiveIdentitySniffer {
+    pub fn new_inactive() -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(false)),
+            handle: None,
+        }
+    }
+
     pub fn new(device_path: &str) -> Self {
         let entries = Arc::new(RwLock::new(HashMap::new()));
         let running = Arc::new(AtomicBool::new(true));

@@ -218,7 +218,11 @@ impl RouterEmulator {
             }
         }
 
-        if headers.get("expect").map(|v| v.to_ascii_lowercase().contains("100-continue")).unwrap_or(false) {
+        if headers
+            .get("expect")
+            .map(|v| v.to_ascii_lowercase().contains("100-continue"))
+            .unwrap_or(false)
+        {
             let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
             let _ = stream.flush();
         }
@@ -330,7 +334,14 @@ impl RouterEmulator {
         } else if is_soap || path.contains("tr64") || path.contains("upnp") {
             Self::handle_avm_tr064(&mut stream, &path, &soap_action, &body_raw, state);
         } else if path.starts_with("/api/") || path.starts_with("/proxy/") {
-            Self::handle_unifi_rest(&mut stream, &method, &path, &body_raw, &cookie_header, state);
+            Self::handle_unifi_rest(
+                &mut stream,
+                &method,
+                &path,
+                &body_raw,
+                &cookie_header,
+                state,
+            );
         } else if path.starts_with("/rest/") {
             Self::handle_mikrotik_rest(&mut stream, &method, &path, &body_raw, state);
         } else {
@@ -357,7 +368,10 @@ impl RouterEmulator {
         state: Arc<Mutex<SimulatedRouterState>>,
     ) {
         let req_json: Value = serde_json::from_str(body_raw).unwrap_or(Value::Null);
-        let method = req_json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let method = req_json
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
         let params = req_json.get("params").cloned().unwrap_or(json!([]));
 
         let resp_json = match method {
@@ -429,7 +443,8 @@ impl RouterEmulator {
                         })
                     }
                     ("uci", "add") => {
-                        let sec_id = format!("cfg_{}", state.lock().unwrap().openwrt_rules.len() + 1);
+                        let sec_id =
+                            format!("cfg_{}", state.lock().unwrap().openwrt_rules.len() + 1);
                         let mut r = args.get("values").cloned().unwrap_or(json!({}));
                         if let Some(map) = r.as_object_mut() {
                             map.insert("section".into(), json!(sec_id));
@@ -545,7 +560,8 @@ impl RouterEmulator {
       <NewSerialNumber>A0B1C2D3E4F5</NewSerialNumber>
     </u:GetInfoResponse>
   </s:Body>
-</s:Envelope>"#.to_string()
+</s:Envelope>"#
+                .to_string()
         } else if action_clean.ends_with("GetHostNumberOfEntries") {
             r#"<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
@@ -554,7 +570,8 @@ impl RouterEmulator {
       <NewHostNumberOfEntries>1</NewHostNumberOfEntries>
     </u:GetHostNumberOfEntriesResponse>
   </s:Body>
-</s:Envelope>"#.to_string()
+</s:Envelope>"#
+                .to_string()
         } else if action_clean.ends_with("GetGenericHostEntry") {
             r#"<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
@@ -567,7 +584,8 @@ impl RouterEmulator {
       <NewInterfaceType>Ethernet</NewInterfaceType>
     </u:GetGenericHostEntryResponse>
   </s:Body>
-</s:Envelope>"#.to_string()
+</s:Envelope>"#
+                .to_string()
         } else if action_clean.ends_with("DisallowWANAccessByIP") {
             // Extract IP from body
             if let Some(start) = body_raw.find("<NewIPv4Address>") {
@@ -589,7 +607,8 @@ impl RouterEmulator {
   <s:Body>
     <u:DisallowWANAccessByIPResponse xmlns:u="urn:dslforum-org:service:X_AVM-DE_HostFilter:1" />
   </s:Body>
-</s:Envelope>"#.to_string()
+</s:Envelope>"#
+                .to_string()
         } else if action_clean.ends_with("AllowWANAccessByIP") {
             if let Some(start) = body_raw.find("<NewIPv4Address>") {
                 let rest = &body_raw[start + 16..];
@@ -605,7 +624,8 @@ impl RouterEmulator {
   <s:Body>
     <u:AllowWANAccessByIPResponse xmlns:u="urn:dslforum-org:service:X_AVM-DE_HostFilter:1" />
   </s:Body>
-</s:Envelope>"#.to_string()
+</s:Envelope>"#
+                .to_string()
         } else if action_clean.ends_with("GetWANAccessByIP") {
             let mut is_disallowed = false;
             if let Some(start) = body_raw.find("<NewIPv4Address>") {
@@ -635,7 +655,8 @@ impl RouterEmulator {
   <s:Body>
     <u:DefaultResponse xmlns:u="urn:dslforum-org:service:Generic:1" />
   </s:Body>
-</s:Envelope>"#.to_string()
+</s:Envelope>"#
+                .to_string()
         };
 
         let resp = format!(
@@ -655,8 +676,14 @@ impl RouterEmulator {
     ) {
         if path.ends_with("/api/login") || path.ends_with("/api/auth/login") {
             let body_json: Value = serde_json::from_str(body_raw).unwrap_or(Value::Null);
-            let user = body_json.get("username").and_then(|u| u.as_str()).unwrap_or("");
-            let pass = body_json.get("password").and_then(|p| p.as_str()).unwrap_or("");
+            let user = body_json
+                .get("username")
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            let pass = body_json
+                .get("password")
+                .and_then(|p| p.as_str())
+                .unwrap_or("");
 
             if user == "admin" && pass == "admin_password" {
                 state
@@ -717,7 +744,8 @@ impl RouterEmulator {
                 }
                 "POST" => {
                     let mut rule: Value = serde_json::from_str(body_raw).unwrap_or(json!({}));
-                    let rule_id = format!("unifi_rule_{}", state.lock().unwrap().unifi_rules.len() + 1);
+                    let rule_id =
+                        format!("unifi_rule_{}", state.lock().unwrap().unifi_rules.len() + 1);
                     if let Some(map) = rule.as_object_mut() {
                         map.insert("_id".into(), json!(rule_id));
                     }
@@ -734,7 +762,7 @@ impl RouterEmulator {
                     let _ = stream.write_all(resp.as_bytes());
                 }
                 "DELETE" => {
-                    let rule_id = path.split('/').last().unwrap_or("");
+                    let rule_id = path.split('/').next_back().unwrap_or("");
                     state
                         .lock()
                         .unwrap()
@@ -772,7 +800,8 @@ impl RouterEmulator {
             return;
         }
 
-        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ =
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     }
 
     fn handle_mikrotik_rest(
@@ -835,13 +864,14 @@ impl RouterEmulator {
                     let _ = stream.write_all(resp.as_bytes());
                 }
                 "DELETE" => {
-                    let id = path.split('/').last().unwrap_or("");
+                    let id = path.split('/').next_back().unwrap_or("");
                     state
                         .lock()
                         .unwrap()
                         .mikrotik_rules
                         .retain(|r| r.get(".id").and_then(|i| i.as_str()) != Some(id));
-                    let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let resp =
+                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(resp.as_bytes());
                 }
                 _ => {}
@@ -871,7 +901,8 @@ impl RouterEmulator {
             return;
         }
 
-        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ =
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     }
 
     /// Cleanly terminates the background listener thread and resources

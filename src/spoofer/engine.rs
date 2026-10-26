@@ -25,6 +25,21 @@ pub struct ArpSpoofer {
 }
 
 impl ArpSpoofer {
+    pub fn new_inactive(
+        local_mac: MacAddress,
+        gateway_ip: Ipv4Addr,
+        gateway_mac: MacAddress,
+    ) -> Self {
+        Self {
+            sender: Arc::new(RwLock::new(None)),
+            local_mac,
+            gateway_ip,
+            gateway_mac,
+            targets: Arc::new(RwLock::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub fn new(
         iface_name: &str,
         local_mac: MacAddress,

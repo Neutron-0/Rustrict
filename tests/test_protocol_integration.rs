@@ -6,11 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustrict::gateway::admin::{
-    AdminError, AvmAdminProvider, HttpOpenWrtTransport,
-    HttpsMikroTikTransport, MikroTikAdminProvider, MikroTikTransport, MockSshExecutor,
-    OpenWrtAdminProvider, OperationPlanRequest, PolicyDuration, PolicyPersistence, PolicyScope,
-    RouterAdminProvider, RouterCredentials, SshConfig, SshOpenWrtTransport,
-    UnifiAdminProvider,
+    AdminError, AvmAdminProvider, HttpOpenWrtTransport, HttpsMikroTikTransport,
+    MikroTikAdminProvider, MikroTikTransport, MockSshExecutor, OpenWrtAdminProvider,
+    OperationPlanRequest, PolicyDuration, PolicyPersistence, PolicyScope, RouterAdminProvider,
+    RouterCredentials, SshConfig, SshOpenWrtTransport, UnifiAdminProvider,
 };
 use serde_json::{json, Value};
 use support::{FailMode, RouterEmulator};
@@ -47,8 +46,13 @@ fn test_openwrt_http_full_protocol_flow() {
         target_macs: Vec::new(),
     };
 
-    let status = provider.apply_policy(&req).expect("Apply multi-target policy");
-    assert_eq!(status.lifecycle_state, rustrict::gateway::admin::PolicyLifecycleState::Active);
+    let status = provider
+        .apply_policy(&req)
+        .expect("Apply multi-target policy");
+    assert_eq!(
+        status.lifecycle_state,
+        rustrict::gateway::admin::PolicyLifecycleState::Active
+    );
     assert!(status.policy_id.starts_with("rustrict_pause_"));
 
     // Verify rules were added to the emulator state
@@ -56,7 +60,9 @@ fn test_openwrt_http_full_protocol_flow() {
     assert_eq!(state.openwrt_rules.len(), 2);
 
     // 3. Query Active Policies
-    let active = provider.query_active_policies().expect("Query active policies");
+    let active = provider
+        .query_active_policies()
+        .expect("Query active policies");
     assert_eq!(active.len(), 2);
 
     // 4. Revoke / Resume Policy
@@ -75,7 +81,10 @@ fn test_openwrt_http_full_protocol_flow() {
     for r in requests {
         assert_eq!(r.method, "POST");
         assert_eq!(r.path, "/ubus");
-        assert!(!r.body.contains("admin_password"), "Password leaked in recorded request body!");
+        assert!(
+            !r.body.contains("admin_password"),
+            "Password leaked in recorded request body!"
+        );
     }
 }
 
@@ -87,14 +96,18 @@ fn test_openwrt_http_failure_modes() {
 
     // 1. Timeout failure mode
     emulator.set_fail_mode(Some(FailMode::Timeout(Duration::from_millis(500))));
-    let provider = OpenWrtAdminProvider::new(gw_ip, &ubus_url)
-        .with_transport(Box::new(HttpOpenWrtTransport {
+    let provider = OpenWrtAdminProvider::new(gw_ip, &ubus_url).with_transport(Box::new(
+        HttpOpenWrtTransport {
             timeout: Duration::from_millis(80),
-        }));
+        },
+    ));
     provider.set_credentials(RouterCredentials::new("root", "admin_password"));
     let err = provider.detect_identity().unwrap_err();
     assert!(
-        matches!(err, AdminError::Timeout(_) | AdminError::CommunicationError(_)),
+        matches!(
+            err,
+            AdminError::Timeout(_) | AdminError::CommunicationError(_)
+        ),
         "Expected timeout or communication error, got: {:?}",
         err
     );
@@ -122,12 +135,17 @@ fn test_openwrt_http_failure_modes() {
     );
 
     // 4. Redirect rejection failure mode (HTTP 302 must NOT be silently followed)
-    emulator.set_fail_mode(Some(FailMode::Redirect("http://evil-attacker.local/ubus".into())));
+    emulator.set_fail_mode(Some(FailMode::Redirect(
+        "http://evil-attacker.local/ubus".into(),
+    )));
     let provider = OpenWrtAdminProvider::new(gw_ip, &ubus_url);
     provider.set_credentials(RouterCredentials::new("root", "admin_password"));
     let err = provider.detect_identity().unwrap_err();
     assert!(
-        matches!(err, AdminError::SecurityViolation(_) | AdminError::CommunicationError(_)),
+        matches!(
+            err,
+            AdminError::SecurityViolation(_) | AdminError::CommunicationError(_)
+        ),
         "Expected security violation or communication error on redirect response, got: {:?}",
         err
     );
@@ -144,7 +162,9 @@ fn test_openwrt_multi_target_partial_failure_rollback() {
 
     // Inject partial failure: allow session login and watchdog, but fail during the 2nd target addition
     // First target addition succeeds (1st target mutation), 2nd target addition fails
-    emulator.set_fail_mode(Some(FailMode::MultiTargetPartialFail { succeed_targets: 1 }));
+    emulator.set_fail_mode(Some(FailMode::MultiTargetPartialFail {
+        succeed_targets: 1,
+    }));
 
     let target1 = Ipv4Addr::new(192, 168, 1, 10);
     let target2 = Ipv4Addr::new(192, 168, 1, 11);
@@ -156,7 +176,10 @@ fn test_openwrt_multi_target_partial_failure_rollback() {
     };
 
     let result = provider.apply_policy(&req);
-    assert!(result.is_err(), "Multi-target policy with failure must return Err");
+    assert!(
+        result.is_err(),
+        "Multi-target policy with failure must return Err"
+    );
 
     // Verify rollback: zero residual rules in emulator state
     let state = emulator.state();
@@ -198,7 +221,9 @@ fn test_avm_tr064_full_protocol_flow() {
         target_macs: Vec::new(),
     };
 
-    let status = provider.apply_policy(&req).expect("Apply multi-target AVM policy");
+    let status = provider
+        .apply_policy(&req)
+        .expect("Apply multi-target AVM policy");
     assert!(status.policy_id.contains("avm_pause_"));
 
     let state = emulator.state();
@@ -231,7 +256,10 @@ fn test_avm_tr064_soap_fault_and_malformed() {
     provider.set_credentials(RouterCredentials::new("admin", "fritz_pass"));
     let err = provider.detect_identity().unwrap_err();
     assert!(
-        matches!(err, AdminError::TransactionFailed(_) | AdminError::CommunicationError(_)),
+        matches!(
+            err,
+            AdminError::TransactionFailed(_) | AdminError::CommunicationError(_)
+        ),
         "Expected transaction or communication error on SOAP fault, got: {:?}",
         err
     );
@@ -242,7 +270,10 @@ fn test_avm_tr064_soap_fault_and_malformed() {
     provider.set_credentials(RouterCredentials::new("admin", "fritz_pass"));
     let err = provider.detect_identity().unwrap_err();
     assert!(
-        matches!(err, AdminError::CommunicationError(_) | AdminError::TransactionFailed(_)),
+        matches!(
+            err,
+            AdminError::CommunicationError(_) | AdminError::TransactionFailed(_)
+        ),
         "Expected error on malformed XML, got: {:?}",
         err
     );
@@ -260,7 +291,10 @@ fn test_unifi_rest_protocol_flow() {
     provider.login().expect("Authenticate UniFi controller");
     let identity = provider.detect_identity().expect("Detect UniFi identity");
     assert_eq!(identity.manufacturer.as_deref(), Some("Ubiquiti Networks"));
-    assert_eq!(identity.model_name.as_deref(), Some("UniFi Network Application"));
+    assert_eq!(
+        identity.model_name.as_deref(),
+        Some("UniFi Network Application")
+    );
     assert_eq!(identity.firmware_version.as_deref(), Some("8.0.28"));
 
     // 2. Query Client Inventory
@@ -278,14 +312,18 @@ fn test_unifi_rest_protocol_flow() {
         target_macs: Vec::new(),
     };
 
-    let status = provider.apply_policy(&req).expect("Apply multi-target UniFi traffic rule");
+    let status = provider
+        .apply_policy(&req)
+        .expect("Apply multi-target UniFi traffic rule");
     assert!(status.policy_id.starts_with("rustrict_pause_"));
 
     let state = emulator.state();
     assert_eq!(state.unifi_rules.len(), 1);
 
     // 4. Query Active Policies
-    let active = provider.query_active_policies().expect("Query active UniFi policies");
+    let active = provider
+        .query_active_policies()
+        .expect("Query active UniFi policies");
     assert_eq!(active.len(), 1);
 
     // 5. Revoke Policy
@@ -309,7 +347,11 @@ fn test_unifi_invalid_credentials_rejected() {
     let err = provider.login().unwrap_err();
     match err {
         AdminError::AuthenticationFailed(msg) => {
-            assert!(msg.contains("Invalid") || msg.contains("401"), "Error was: {}", msg);
+            assert!(
+                msg.contains("Invalid") || msg.contains("401"),
+                "Error was: {}",
+                msg
+            );
         }
         other => panic!("Expected AuthenticationFailed, got: {:?}", other),
     }
@@ -337,7 +379,10 @@ fn test_mikrotik_rejects_unencrypted_http() {
                 msg
             );
         }
-        other => panic!("Expected SecurityViolation for unencrypted HTTP, got: {:?}", other),
+        other => panic!(
+            "Expected SecurityViolation for unencrypted HTTP, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -374,20 +419,22 @@ impl MikroTikTransport for LoopbackMikroTikTransport {
         req.push_str("\r\n");
         req.push_str(&body_str);
 
-        stream.write_all(req.as_bytes()).map_err(|e| {
-            AdminError::CommunicationError(format!("Write failed: {}", e))
-        })?;
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| AdminError::CommunicationError(format!("Write failed: {}", e)))?;
 
         let mut resp_bytes = Vec::new();
-        stream.read_to_end(&mut resp_bytes).map_err(|e| {
-            AdminError::CommunicationError(format!("Read failed: {}", e))
-        })?;
+        stream
+            .read_to_end(&mut resp_bytes)
+            .map_err(|e| AdminError::CommunicationError(format!("Read failed: {}", e)))?;
 
         let resp_str = String::from_utf8_lossy(&resp_bytes);
         if let Some((headers, body)) = resp_str.split_once("\r\n\r\n") {
             let status_line = headers.lines().next().unwrap_or("");
             if status_line.contains("401") {
-                return Err(AdminError::AuthenticationFailed("MikroTik 401 Unauthorized".into()));
+                return Err(AdminError::AuthenticationFailed(
+                    "MikroTik 401 Unauthorized".into(),
+                ));
             }
             if status_line.contains("500") {
                 return Err(AdminError::TransactionFailed("MikroTik 500 Error".into()));
@@ -395,11 +442,12 @@ impl MikroTikTransport for LoopbackMikroTikTransport {
             if body.trim().is_empty() || status_line.contains("204") {
                 return Ok(json!({}));
             }
-            serde_json::from_str(body).map_err(|e| {
-                AdminError::CommunicationError(format!("Invalid JSON: {}", e))
-            })
+            serde_json::from_str(body)
+                .map_err(|e| AdminError::CommunicationError(format!("Invalid JSON: {}", e)))
         } else {
-            Err(AdminError::CommunicationError("Invalid HTTP response".into()))
+            Err(AdminError::CommunicationError(
+                "Invalid HTTP response".into(),
+            ))
         }
     }
 }
@@ -414,7 +462,9 @@ fn test_mikrotik_loopback_rest_flow() {
     provider.set_credentials(RouterCredentials::new("admin", "mikrotik_pass"));
 
     // 1. Detect Identity
-    let identity = provider.detect_identity().expect("Detect MikroTik identity");
+    let identity = provider
+        .detect_identity()
+        .expect("Detect MikroTik identity");
     assert_eq!(identity.manufacturer.as_deref(), Some("MikroTik"));
     assert_eq!(identity.model_name.as_deref(), Some("hEX S"));
     assert_eq!(identity.firmware_version.as_deref(), Some("7.14.1"));
@@ -436,7 +486,9 @@ fn test_mikrotik_loopback_rest_flow() {
         target_macs: Vec::new(),
     };
 
-    let status = provider.apply_policy(&req).expect("Apply multi-target MikroTik policy");
+    let status = provider
+        .apply_policy(&req)
+        .expect("Apply multi-target MikroTik policy");
     assert!(status.policy_id.contains("multi"));
 
     let state = emulator.state();
@@ -461,7 +513,8 @@ fn test_ssh_openwrt_contract_and_pipes() {
         .with_username("admin_ssh")
         .with_connect_timeout(Duration::from_secs(4));
 
-    let transport = SshOpenWrtTransport::with_executor(ssh_config.clone(), Arc::new(mock_executor.clone()));
+    let transport =
+        SshOpenWrtTransport::with_executor(ssh_config.clone(), Arc::new(mock_executor.clone()));
     let provider = OpenWrtAdminProvider::new(gw_ip, "ssh://192.168.1.1:2222")
         .with_transport(Box::new(transport));
 
@@ -480,15 +533,21 @@ fn test_ssh_openwrt_contract_and_pipes() {
     let recorded = mock_executor.executed_commands.read();
     assert!(!recorded.is_empty());
     assert!(recorded.iter().any(|c| c.contains("id -u")));
-    assert!(mock_executor.firewall_rules.read().values().any(|r| {
-        r.to_string().contains("192.168.1.55")
-    }));
+    assert!(mock_executor
+        .firewall_rules
+        .read()
+        .values()
+        .any(|r| { r.to_string().contains("192.168.1.55") }));
 
     // Verify fail-closed security behavior on fresh connection: non-root access rejected
     let non_root_executor = MockSshExecutor::default();
-    non_root_executor.simulate_non_root.store(true, std::sync::atomic::Ordering::SeqCst);
-    let non_root_provider = OpenWrtAdminProvider::new(gw_ip, "ssh://192.168.1.1:2222")
-        .with_transport(Box::new(SshOpenWrtTransport::with_executor(ssh_config.clone(), Arc::new(non_root_executor))));
+    non_root_executor
+        .simulate_non_root
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let non_root_provider =
+        OpenWrtAdminProvider::new(gw_ip, "ssh://192.168.1.1:2222").with_transport(Box::new(
+            SshOpenWrtTransport::with_executor(ssh_config.clone(), Arc::new(non_root_executor)),
+        ));
     let err = non_root_provider.detect_identity().unwrap_err();
     assert!(
         matches!(err, AdminError::AuthenticationFailed(_)),
@@ -498,9 +557,13 @@ fn test_ssh_openwrt_contract_and_pipes() {
 
     // Verify fail-closed security behavior: host key mismatch rejected
     let spoof_executor = MockSshExecutor::default();
-    spoof_executor.simulate_host_key_mismatch.store(true, std::sync::atomic::Ordering::SeqCst);
-    let spoof_provider = OpenWrtAdminProvider::new(gw_ip, "ssh://192.168.1.1:2222")
-        .with_transport(Box::new(SshOpenWrtTransport::with_executor(ssh_config, Arc::new(spoof_executor))));
+    spoof_executor
+        .simulate_host_key_mismatch
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let spoof_provider =
+        OpenWrtAdminProvider::new(gw_ip, "ssh://192.168.1.1:2222").with_transport(Box::new(
+            SshOpenWrtTransport::with_executor(ssh_config, Arc::new(spoof_executor)),
+        ));
     let err2 = spoof_provider.detect_identity().unwrap_err();
     assert!(
         matches!(err2, AdminError::AuthenticationFailed(_)),
