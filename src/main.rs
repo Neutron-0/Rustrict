@@ -57,19 +57,10 @@ fn main() {
         iface.gateway_mac.to_string().bright_white()
     );
 
-    // 3. Enable IP forwarding
-    if let Err(e) = platform::enable_ip_forwarding() {
-        eprintln!(
-            "{} Warning: Could not enable IP forwarding: {}",
-            "[WARN]".yellow().bold(),
-            e
-        );
-    }
-
-    // 4. Start interactive REPL
+    // 3. Start interactive REPL
     let mut app = RustrictCli::new(iface);
     app.run_interactive();
 
-    // 5. Cleanup on normal exit
-    let _ = platform::disable_ip_forwarding();
+    // 4. Cleanup on normal exit
+    platform::cleanup_forwarding();
 }

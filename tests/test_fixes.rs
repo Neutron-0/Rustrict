@@ -150,7 +150,7 @@ fn test_persistent_state_both_directions_serialization() {
 
 #[test]
 fn test_scan_range_bounded_protection() {
-    let scanner = rustrict::scanner::SubnetScanner::new(
+    let scanner = rustrict::scanner::SubnetScanner::new_safe_test(
         Ipv4Addr::new(192, 168, 1, 10),
         Ipv4Addr::new(255, 255, 255, 0),
         Ipv4Addr::new(192, 168, 1, 1),

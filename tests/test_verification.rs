@@ -203,20 +203,30 @@ fn test_subnet_scanner_rfc3021_and_range_clamping() {
 
     // RFC 3021 /31 subnet (netmask 255.255.255.254) has exactly 2 hosts (10.0.0.0 and 10.0.0.1)
     let netmask_31 = Ipv4Addr::new(255, 255, 255, 254);
-    let scanner_31 = SubnetScanner::new(local_ip, netmask_31, gateway_ip);
+    let scanner_31 = SubnetScanner::new_safe_test(local_ip, netmask_31, gateway_ip);
+    let range_31 = scanner_31.calculate_subnet_ip_range();
+    assert_eq!(range_31.len(), 2);
+    assert_eq!(range_31[0], Ipv4Addr::new(10, 0, 0, 0));
+    assert_eq!(range_31[1], Ipv4Addr::new(10, 0, 0, 1));
     let hosts_31 = scanner_31.scan_subnet(true, |_, _, _| {});
     assert!(hosts_31.len() <= 2);
 
     // /32 single-host subnet (netmask 255.255.255.255)
     let netmask_32 = Ipv4Addr::new(255, 255, 255, 255);
-    let scanner_32 = SubnetScanner::new(local_ip, netmask_32, gateway_ip);
+    let scanner_32 = SubnetScanner::new_safe_test(local_ip, netmask_32, gateway_ip);
+    let range_32 = scanner_32.calculate_subnet_ip_range();
+    assert_eq!(range_32.len(), 1);
+    assert_eq!(range_32[0], Ipv4Addr::new(10, 0, 0, 1));
     let hosts_32 = scanner_32.scan_subnet(true, |_, _, _| {});
     assert!(hosts_32.len() <= 1);
 
     // Giant range scan: should clamp to max_hosts (65534) and not overflow u32
     let start_ip = Ipv4Addr::new(10, 0, 0, 0);
     let end_ip = Ipv4Addr::new(10, 255, 255, 255);
-    let scanner = SubnetScanner::new(local_ip, Ipv4Addr::new(255, 255, 0, 0), gateway_ip);
+    let scanner = SubnetScanner::new_safe_test(local_ip, Ipv4Addr::new(255, 255, 0, 0), gateway_ip);
     let empty_range = scanner.scan_range(end_ip, start_ip, true, |_, _, _| {});
     assert_eq!(empty_range.len(), 0);
+
+    let bounded = scanner.calculate_bounded_range(start_ip, end_ip);
+    assert_eq!(bounded.len(), 65534);
 }

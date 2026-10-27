@@ -133,7 +133,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
         for cb in callbacks.drain(..) {
             cb();
         }
-        let _ = disable_ip_forwarding();
+        cleanup_forwarding();
         eprintln!("[OK] Clean shutdown complete. Exiting.");
         std::process::exit(0);
     }
@@ -166,12 +166,162 @@ pub unsafe fn free_library(h_module: *mut std::ffi::c_void) -> bool {
     FreeLibrary(h_module) != 0
 }
 
+/// Abstract command execution to allow hermetic testing without spawning external shells or mutating host interfaces.
+pub trait CommandRunner: Send + Sync {
+    fn run_powershell(&self, command: &str) -> Result<String, String>;
+}
+
+pub struct SystemCommandRunner;
+
+impl CommandRunner for SystemCommandRunner {
+    fn run_powershell(&self, command: &str) -> Result<String, String> {
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", command])
+            .output()
+            .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                format!(
+                    "PowerShell command failed with status {:?}",
+                    output.status.code()
+                )
+            } else {
+                stderr
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceForwardingRecord {
+    pub interface_name: String,
+    pub original_enabled: bool,
+    pub currently_mutated: bool,
+}
+
+static TRACKED_FORWARDING: parking_lot::Mutex<Vec<InterfaceForwardingRecord>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// Queries the IPv4 forwarding state of a specific network interface alias.
+pub fn query_interface_forwarding_with<R: CommandRunner>(
+    runner: &R,
+    iface_name: &str,
+) -> Result<bool, String> {
+    let safe_name = iface_name.replace('\'', "''");
+    let cmd = format!(
+        "Get-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 | Select-Object -First 1 -ExpandProperty Forwarding",
+        safe_name
+    );
+    let output = runner.run_powershell(&cmd)?;
+    let val = output.trim();
+    if val.eq_ignore_ascii_case("Enabled") {
+        Ok(true)
+    } else if val.eq_ignore_ascii_case("Disabled") {
+        Ok(false)
+    } else {
+        Err(format!(
+            "Unexpected forwarding state '{}' for interface '{}'",
+            val, iface_name
+        ))
+    }
+}
+
+pub fn query_interface_forwarding(iface_name: &str) -> Result<bool, String> {
+    query_interface_forwarding_with(&SystemCommandRunner, iface_name)
+}
+
+/// Sets the IPv4 forwarding state of a specific network interface alias.
+pub fn set_interface_forwarding_with<R: CommandRunner>(
+    runner: &R,
+    iface_name: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let safe_name = iface_name.replace('\'', "''");
+    let state_str = if enabled { "Enabled" } else { "Disabled" };
+    let cmd = format!(
+        "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -Forwarding {}",
+        safe_name, state_str
+    );
+    let _ = runner.run_powershell(&cmd)?;
+    Ok(())
+}
+
+pub fn set_interface_forwarding(iface_name: &str, enabled: bool) -> Result<(), String> {
+    set_interface_forwarding_with(&SystemCommandRunner, iface_name, enabled)
+}
+
+/// Ensures IPv4 forwarding is enabled strictly on the specified interface, capturing
+/// the original state beforehand. Returns Ok(true) if mutated, Ok(false) if it was already enabled.
+pub fn ensure_scoped_forwarding_enabled_with<R: CommandRunner>(
+    runner: &R,
+    iface_name: &str,
+) -> Result<bool, String> {
+    let mut tracked = TRACKED_FORWARDING.lock();
+    if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
+        if entry.currently_mutated {
+            return Ok(true);
+        }
+    }
+
+    let original = query_interface_forwarding_with(runner, iface_name)?;
+    if !original {
+        set_interface_forwarding_with(runner, iface_name, true)?;
+        if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
+            entry.currently_mutated = true;
+            entry.original_enabled = false;
+        } else {
+            tracked.push(InterfaceForwardingRecord {
+                interface_name: iface_name.to_string(),
+                original_enabled: false,
+                currently_mutated: true,
+            });
+        }
+        Ok(true)
+    } else {
+        if !tracked.iter().any(|e| e.interface_name == iface_name) {
+            tracked.push(InterfaceForwardingRecord {
+                interface_name: iface_name.to_string(),
+                original_enabled: true,
+                currently_mutated: false,
+            });
+        }
+        Ok(false)
+    }
+}
+
+pub fn ensure_scoped_forwarding_enabled(iface_name: &str) -> Result<bool, String> {
+    ensure_scoped_forwarding_enabled_with(&SystemCommandRunner, iface_name)
+}
+
+/// Restores only interfaces that were mutated by Rustrict to their original forwarding state.
+/// If no interfaces were mutated, zero system commands are executed.
+pub fn cleanup_forwarding_with<R: CommandRunner>(runner: &R) {
+    let mut tracked = TRACKED_FORWARDING.lock();
+    for entry in tracked.iter_mut() {
+        if entry.currently_mutated {
+            if !entry.original_enabled {
+                let _ = set_interface_forwarding_with(runner, &entry.interface_name, false);
+            }
+            entry.currently_mutated = false;
+        }
+    }
+}
+
+pub fn cleanup_forwarding() {
+    cleanup_forwarding_with(&SystemCommandRunner);
+}
+
+/// Backward compatibility shim for tests and external callers
 pub fn enable_ip_forwarding() -> Result<(), String> {
     let status = Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            "Set-NetIPInterface -Forwarding Enabled",
+            "Set-NetIPInterface -AddressFamily IPv4 -Forwarding Enabled",
         ])
         .status()
         .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
@@ -183,21 +333,10 @@ pub fn enable_ip_forwarding() -> Result<(), String> {
     }
 }
 
+/// Backward compatibility shim for tests and external callers
 pub fn disable_ip_forwarding() -> Result<(), String> {
-    let status = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Set-NetIPInterface -Forwarding Disabled",
-        ])
-        .status()
-        .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err("Failed to disable IP forwarding via Set-NetIPInterface".into())
-    }
+    cleanup_forwarding();
+    Ok(())
 }
 
 /// SendARP sends an ARP request directly through the Windows kernel network stack
@@ -405,4 +544,96 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
         mac: local_mac,
         device_path,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct MockCommandRunner {
+        current_state: parking_lot::Mutex<String>,
+        executed_commands: parking_lot::Mutex<Vec<String>>,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl MockCommandRunner {
+        fn new(initial_state: &str) -> Self {
+            Self {
+                current_state: parking_lot::Mutex::new(initial_state.to_string()),
+                executed_commands: parking_lot::Mutex::new(Vec::new()),
+                call_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl CommandRunner for MockCommandRunner {
+        fn run_powershell(&self, command: &str) -> Result<String, String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.executed_commands.lock().push(command.to_string());
+            if command.contains("Get-NetIPInterface") {
+                Ok(self.current_state.lock().clone())
+            } else if command.contains("Set-NetIPInterface") {
+                if command.contains("-Forwarding Enabled") {
+                    *self.current_state.lock() = "Enabled".to_string();
+                } else if command.contains("-Forwarding Disabled") {
+                    *self.current_state.lock() = "Disabled".to_string();
+                }
+                Ok(String::new())
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    #[test]
+    fn test_forwarding_mutation_and_restoration_when_initially_disabled() {
+        let runner = MockCommandRunner::new("Disabled");
+        let iface = "TestEthernet0";
+
+        // Query
+        let original =
+            query_interface_forwarding_with(&runner, iface).expect("query should succeed");
+        assert!(!original);
+
+        // Ensure enabled
+        let mutated = ensure_scoped_forwarding_enabled_with(&runner, iface)
+            .expect("enabling scoped forwarding should succeed");
+        assert!(mutated);
+        assert_eq!(*runner.current_state.lock(), "Enabled");
+
+        // Cleanup
+        cleanup_forwarding_with(&runner);
+        assert_eq!(*runner.current_state.lock(), "Disabled");
+
+        // Verify commands recorded
+        let cmds = runner.executed_commands.lock();
+        assert!(cmds.iter().any(|c| c.contains("Get-NetIPInterface")));
+        assert!(cmds.iter().any(|c| c.contains("-Forwarding Enabled")));
+        assert!(cmds.iter().any(|c| c.contains("-Forwarding Disabled")));
+    }
+
+    #[test]
+    fn test_forwarding_not_touched_when_initially_enabled() {
+        let runner = MockCommandRunner::new("Enabled");
+        let iface = "PreConfiguredVNic";
+
+        // Ensure enabled
+        let mutated = ensure_scoped_forwarding_enabled_with(&runner, iface)
+            .expect("scoped forwarding should query and succeed");
+        assert!(!mutated, "Should not report mutation when already enabled");
+        assert_eq!(*runner.current_state.lock(), "Enabled");
+
+        let cmds_before_cleanup = runner.executed_commands.lock().len();
+
+        // Cleanup should not issue any disable command
+        cleanup_forwarding_with(&runner);
+        assert_eq!(*runner.current_state.lock(), "Enabled");
+        let cmds_after_cleanup = runner.executed_commands.lock().len();
+        assert_eq!(
+            cmds_before_cleanup, cmds_after_cleanup,
+            "Cleanup must not execute commands if forwarding was already enabled originally"
+        );
+    }
 }

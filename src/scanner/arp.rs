@@ -7,27 +7,95 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+/// Trait providing network probing and ARP table access for SubnetScanner
+pub trait NetworkProbe: Send + Sync {
+    fn send_arp(&self, ip: Ipv4Addr) -> Option<MacAddress>;
+    fn get_arp_cache(&self) -> Vec<(Ipv4Addr, MacAddress)>;
+    fn resolve_identity(
+        &self,
+        ip: Ipv4Addr,
+        mac: &MacAddress,
+        local_ip: Ipv4Addr,
+        gateway_ip: Ipv4Addr,
+        gateway_client: Option<&crate::gateway::GatewayClient>,
+    ) -> resolver::HostIdentity;
+}
+
+/// Default real platform probe that invokes the OS network stack
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RealNetworkProbe;
+
+impl NetworkProbe for RealNetworkProbe {
+    fn send_arp(&self, ip: Ipv4Addr) -> Option<MacAddress> {
+        platform::send_arp(ip)
+    }
+
+    fn get_arp_cache(&self) -> Vec<(Ipv4Addr, MacAddress)> {
+        platform::get_arp_cache()
+    }
+
+    fn resolve_identity(
+        &self,
+        ip: Ipv4Addr,
+        mac: &MacAddress,
+        local_ip: Ipv4Addr,
+        gateway_ip: Ipv4Addr,
+        gateway_client: Option<&crate::gateway::GatewayClient>,
+    ) -> resolver::HostIdentity {
+        resolver::resolve_identity_with_gateway(ip, mac, local_ip, gateway_ip, gateway_client)
+    }
+}
+
 pub struct SubnetScanner {
     pub local_ip: Ipv4Addr,
     pub netmask: Ipv4Addr,
     pub gateway_ip: Ipv4Addr,
     pub gateway_client: Option<Arc<crate::gateway::GatewayClient>>,
+    probe: Arc<dyn NetworkProbe>,
 }
 
 impl SubnetScanner {
+    /// Creates a production scanner with real network probe and real gateway client
     pub fn new(local_ip: Ipv4Addr, netmask: Ipv4Addr, gateway_ip: Ipv4Addr) -> Self {
         Self {
             local_ip,
             netmask,
             gateway_ip,
             gateway_client: Some(Arc::new(crate::gateway::GatewayClient::new(gateway_ip))),
+            probe: Arc::new(RealNetworkProbe),
         }
     }
 
-    pub fn scan_subnet<F>(&self, fresh: bool, on_progress: F) -> Vec<Host>
-    where
-        F: Fn(usize, usize, usize) + Sync + Send,
-    {
+    /// Creates a scanner with a custom network probe and optional gateway client for hermetic testing
+    pub fn new_with_probe(
+        local_ip: Ipv4Addr,
+        netmask: Ipv4Addr,
+        gateway_ip: Ipv4Addr,
+        gateway_client: Option<Arc<crate::gateway::GatewayClient>>,
+        probe: Arc<dyn NetworkProbe>,
+    ) -> Self {
+        Self {
+            local_ip,
+            netmask,
+            gateway_ip,
+            gateway_client,
+            probe,
+        }
+    }
+
+    /// Creates a safe testing scanner that performs zero network I/O, zero ARP packets, and zero gateway discovery
+    pub fn new_safe_test(local_ip: Ipv4Addr, netmask: Ipv4Addr, gateway_ip: Ipv4Addr) -> Self {
+        Self {
+            local_ip,
+            netmask,
+            gateway_ip,
+            gateway_client: None,
+            probe: Arc::new(NoopNetworkProbe),
+        }
+    }
+
+    /// Calculates the bounded IP address list for the configured subnet
+    pub fn calculate_subnet_ip_range(&self) -> Vec<Ipv4Addr> {
         let ip_u32 = u32::from(self.local_ip);
         let mask_u32 = u32::from(self.netmask);
 
@@ -56,21 +124,11 @@ impl SubnetScanner {
             last_ip
         };
 
-        let ip_list: Vec<Ipv4Addr> = (first_ip..=bounded_last).map(Ipv4Addr::from).collect();
-
-        self.scan_ip_list(&ip_list, fresh, on_progress)
+        (first_ip..=bounded_last).map(Ipv4Addr::from).collect()
     }
 
-    pub fn scan_range<F>(
-        &self,
-        start: Ipv4Addr,
-        end: Ipv4Addr,
-        fresh: bool,
-        on_progress: F,
-    ) -> Vec<Host>
-    where
-        F: Fn(usize, usize, usize) + Sync + Send,
-    {
+    /// Calculates the bounded IP address list for an arbitrary start and end IP range
+    pub fn calculate_bounded_range(&self, start: Ipv4Addr, end: Ipv4Addr) -> Vec<Ipv4Addr> {
         let start_u32 = u32::from(start);
         let end_u32 = u32::from(end);
 
@@ -85,7 +143,35 @@ impl SubnetScanner {
             end_u32
         };
 
-        let ip_list: Vec<Ipv4Addr> = (start_u32..=bounded_end).map(Ipv4Addr::from).collect();
+        (start_u32..=bounded_end).map(Ipv4Addr::from).collect()
+    }
+
+    pub fn scan_subnet<F>(&self, fresh: bool, on_progress: F) -> Vec<Host>
+    where
+        F: Fn(usize, usize, usize) + Sync + Send,
+    {
+        let ip_list = self.calculate_subnet_ip_range();
+        if ip_list.is_empty() {
+            return Vec::new();
+        }
+
+        self.scan_ip_list(&ip_list, fresh, on_progress)
+    }
+
+    pub fn scan_range<F>(
+        &self,
+        start: Ipv4Addr,
+        end: Ipv4Addr,
+        fresh: bool,
+        on_progress: F,
+    ) -> Vec<Host>
+    where
+        F: Fn(usize, usize, usize) + Sync + Send,
+    {
+        let ip_list = self.calculate_bounded_range(start, end);
+        if ip_list.is_empty() {
+            return Vec::new();
+        }
 
         self.scan_ip_list(&ip_list, fresh, on_progress)
     }
@@ -113,7 +199,7 @@ impl SubnetScanner {
 
         // If not in fresh mode, seed with existing kernel ARP table cache for speed
         if !fresh {
-            for (cached_ip, cached_mac) in platform::get_arp_cache() {
+            for (cached_ip, cached_mac) in self.probe.get_arp_cache() {
                 if ip_list.contains(&cached_ip) {
                     cached_ips.insert(cached_ip);
                     host_map.insert(cached_ip, cached_mac);
@@ -127,6 +213,7 @@ impl SubnetScanner {
         let disc_clone = Arc::clone(&discovered_count);
         let progress_ref = &on_progress;
         let cached_ips_ref = &cached_ips;
+        let probe = Arc::clone(&self.probe);
 
         let mut probed_results: Vec<(Ipv4Addr, MacAddress)> = Vec::new();
         // Chunk into batches of 48 to avoid router ARP storm/flood drops
@@ -134,7 +221,7 @@ impl SubnetScanner {
             let chunk_res: Vec<(Ipv4Addr, MacAddress)> = chunk
                 .par_iter()
                 .filter_map(|&ip| {
-                    let mac_opt = platform::send_arp(ip);
+                    let mac_opt = probe.send_arp(ip);
                     let current_scanned = scanned_clone.fetch_add(1, Ordering::Relaxed) + 1;
 
                     if let Some(mac) = mac_opt {
@@ -169,13 +256,13 @@ impl SubnetScanner {
         let local_ip = self.local_ip;
         let gateway_ip = self.gateway_ip;
         let gc_ref = self.gateway_client.as_deref();
+        let probe = Arc::clone(&self.probe);
 
         let mut hosts: Vec<Host> = host_pairs
             .into_par_iter()
             .enumerate()
             .map(|(id, (ip, mac))| {
-                let identity =
-                    resolver::resolve_identity_with_gateway(ip, &mac, local_ip, gateway_ip, gc_ref);
+                let identity = probe.resolve_identity(ip, &mac, local_ip, gateway_ip, gc_ref);
                 Host::with_source(
                     id,
                     ip,
@@ -194,5 +281,103 @@ impl SubnetScanner {
         }
 
         hosts
+    }
+}
+
+/// No-op network probe for hermetic unit testing that performs zero network I/O
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopNetworkProbe;
+
+impl NetworkProbe for NoopNetworkProbe {
+    fn send_arp(&self, _ip: Ipv4Addr) -> Option<MacAddress> {
+        None
+    }
+
+    fn get_arp_cache(&self) -> Vec<(Ipv4Addr, MacAddress)> {
+        Vec::new()
+    }
+
+    fn resolve_identity(
+        &self,
+        ip: Ipv4Addr,
+        _mac: &MacAddress,
+        local_ip: Ipv4Addr,
+        gateway_ip: Ipv4Addr,
+        _gateway_client: Option<&crate::gateway::GatewayClient>,
+    ) -> resolver::HostIdentity {
+        if ip == gateway_ip {
+            resolver::HostIdentity {
+                hostname: "Gateway".into(),
+                source: crate::types::NameSource::Gateway,
+                vendor: "TestVendor".into(),
+            }
+        } else if ip == local_ip {
+            resolver::HostIdentity {
+                hostname: "LocalHost".into(),
+                source: crate::types::NameSource::Local,
+                vendor: "Local Host".into(),
+            }
+        } else {
+            resolver::HostIdentity {
+                hostname: String::new(),
+                source: crate::types::NameSource::Unresolved,
+                vendor: "TestDevice".into(),
+            }
+        }
+    }
+}
+
+/// Deterministic mock probe for testing scanning and discovery flows with simulated hosts
+pub struct MockNetworkProbe {
+    pub simulated_hosts: HashMap<Ipv4Addr, MacAddress>,
+    pub arp_calls: Arc<AtomicUsize>,
+}
+
+impl MockNetworkProbe {
+    pub fn new(hosts: HashMap<Ipv4Addr, MacAddress>) -> Self {
+        Self {
+            simulated_hosts: hosts,
+            arp_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl NetworkProbe for MockNetworkProbe {
+    fn send_arp(&self, ip: Ipv4Addr) -> Option<MacAddress> {
+        self.arp_calls.fetch_add(1, Ordering::SeqCst);
+        self.simulated_hosts.get(&ip).copied()
+    }
+
+    fn get_arp_cache(&self) -> Vec<(Ipv4Addr, MacAddress)> {
+        Vec::new()
+    }
+
+    fn resolve_identity(
+        &self,
+        ip: Ipv4Addr,
+        _mac: &MacAddress,
+        local_ip: Ipv4Addr,
+        gateway_ip: Ipv4Addr,
+        _gateway_client: Option<&crate::gateway::GatewayClient>,
+    ) -> resolver::HostIdentity {
+        if ip == gateway_ip {
+            resolver::HostIdentity {
+                hostname: "Test Gateway".into(),
+                source: crate::types::NameSource::Gateway,
+                vendor: "SimulatedGateway".into(),
+            }
+        } else if ip == local_ip {
+            resolver::HostIdentity {
+                hostname: "Test Host".into(),
+                source: crate::types::NameSource::Local,
+                vendor: "SimulatedHost".into(),
+            }
+        } else {
+            resolver::HostIdentity {
+                hostname: format!("host-{}", ip),
+                source: crate::types::NameSource::Dns,
+                vendor: "SimulatedVendor".into(),
+            }
+        }
     }
 }
