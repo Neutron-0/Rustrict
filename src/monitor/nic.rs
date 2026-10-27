@@ -77,11 +77,18 @@ impl NicHealthClassification {
     }
 }
 
+/// Structured health report for a network adapter.
+///
+/// `sample_duration` represents the requested sampling interval (e.g. 2.0s).
+/// `actual_elapsed` represents the measured wall-clock duration between the completion
+/// of the first statistics snapshot and the completion of the second snapshot used for rate calculations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NicHealthReport {
     pub adapter: NicAdapterInfo,
     pub sample_duration: Duration,
     pub actual_elapsed: Duration,
+    pub throughput_valid: bool,
+    pub error_telemetry_valid: bool,
     pub telemetry_valid: bool,
     pub counter_reset_detected: bool,
     pub rx_rate_bps: Option<u64>,
@@ -126,26 +133,104 @@ impl WindowsPowershellNicProvider {
     }
 }
 
-fn run_powershell_bounded(cmd: &str, timeout: Duration) -> Result<std::process::Output, String> {
-    let cmd = cmd.to_string();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let res = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &cmd])
-            .output();
-        let _ = tx.send(res);
+/// Executes a child process with an enforced deadline.
+///
+/// On timeout, the child process is immediately terminated via `kill()` and reaped via `wait()`.
+/// Stdout and stderr pipes are concurrently drained in reader threads to prevent process deadlocks.
+pub fn run_command_bounded_with_pid<F>(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    on_spawn: F,
+) -> Result<std::process::Output, String>
+where
+    F: FnOnce(u32),
+{
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", program, e))?;
+
+    let pid = child.id();
+    on_spawn(pid);
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut stream) = stdout_pipe {
+            let _ = std::io::Read::read_to_end(&mut stream, &mut buf);
+        }
+        buf
     });
 
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(format!("Failed to execute PowerShell: {}", e)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err(format!("PowerShell command timed out after {:?}", timeout))
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut stream) = stderr_pipe {
+            let _ = std::io::Read::read_to_end(&mut stream, &mut buf);
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err("PowerShell execution worker thread disconnected unexpectedly".into())
+        buf
+    });
+
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(15);
+    let mut exit_status = None;
+
+    while start.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                sleep(poll_interval);
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!("Error polling child process {}: {}", pid, e));
+            }
         }
     }
+
+    if exit_status.is_none() {
+        // Deadline expired: terminate and reap child process to prevent orphan/zombie accumulation
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
+        return Err(format!(
+            "Command '{}' timed out after {:?}",
+            program, timeout
+        ));
+    }
+
+    let status = exit_status.unwrap();
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+pub fn run_powershell_bounded(
+    cmd: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    run_command_bounded_with_pid(
+        "powershell",
+        &["-NoProfile", "-Command", cmd],
+        timeout,
+        |_| {},
+    )
 }
 
 impl NicTelemetryProvider for WindowsPowershellNicProvider {
@@ -407,14 +492,19 @@ pub fn resolve_adapter<'a>(
     }
 }
 
+/// Evaluates health classification.
+///
+/// A `Normal` classification is strictly possible only when the required error and discard
+/// counter measurements are present/valid (i.e. `Some(0)`), and utilization thresholds are not crossed.
+/// Missing, malformed, or reset error/discard measurements produce `Degraded` and never claim `Normal`.
 pub fn evaluate_health_classification(
     adapter: &NicAdapterInfo,
     rx_util_pct: f64,
     tx_util_pct: f64,
-    rx_err: u64,
-    tx_err: u64,
-    rx_disc: u64,
-    tx_disc: u64,
+    rx_err: Option<u64>,
+    tx_err: Option<u64>,
+    rx_disc: Option<u64>,
+    tx_disc: Option<u64>,
 ) -> (NicHealthClassification, String) {
     if !adapter.status.eq_ignore_ascii_case("Up") || adapter.link_speed_bps == 0 {
         return (
@@ -426,17 +516,54 @@ pub fn evaluate_health_classification(
         );
     }
 
-    if rx_err > 0 || tx_err > 0 || rx_disc > 0 || tx_disc > 0 {
+    let active_rx_err = rx_err.unwrap_or(0);
+    let active_tx_err = tx_err.unwrap_or(0);
+    let active_rx_disc = rx_disc.unwrap_or(0);
+    let active_tx_disc = tx_disc.unwrap_or(0);
+
+    if active_rx_err > 0 || active_tx_err > 0 || active_rx_disc > 0 || active_tx_disc > 0 {
         return (
             NicHealthClassification::Degraded,
             format!(
                 "Active errors/discards observed during sampling interval (Rx err: {}, Tx err: {}, Rx disc: {}, Tx disc: {})",
-                rx_err, tx_err, rx_disc, tx_disc
+                active_rx_err, active_tx_err, active_rx_disc, active_tx_disc
             ),
         );
     }
 
     let peak_util = rx_util_pct.max(tx_util_pct);
+
+    // If any error or discard measurement is missing or reset, healthy status cannot be confirmed
+    let missing_telemetry =
+        rx_err.is_none() || tx_err.is_none() || rx_disc.is_none() || tx_disc.is_none();
+    if missing_telemetry {
+        if peak_util >= 90.0 {
+            return (
+                NicHealthClassification::Saturated,
+                format!(
+                    "Link utilization saturated at {:.1}% (threshold >= 90.0%). Note: Incomplete packet error/discard telemetry.",
+                    peak_util
+                ),
+            );
+        } else if peak_util >= 70.0 {
+            return (
+                NicHealthClassification::Elevated,
+                format!(
+                    "Link utilization elevated at {:.1}% (threshold >= 70.0%). Note: Incomplete packet error/discard telemetry.",
+                    peak_util
+                ),
+            );
+        } else {
+            return (
+                NicHealthClassification::Degraded,
+                format!(
+                    "Incomplete telemetry: driver does not report packet error/discard statistics; healthy state cannot be verified despite nominal throughput ({:.1}% peak utilization).",
+                    peak_util
+                ),
+            );
+        }
+    }
+
     if peak_util >= 90.0 {
         (
             NicHealthClassification::Saturated,
@@ -476,6 +603,20 @@ pub fn format_bps(bps: u64) -> String {
     }
 }
 
+enum CounterDeltaResult {
+    Valid(u64),
+    Decreased { before: u64, after: u64 },
+    Missing,
+}
+
+fn compute_counter_delta(c0: Option<u64>, c1: Option<u64>) -> CounterDeltaResult {
+    match (c0, c1) {
+        (Some(before), Some(after)) if after >= before => CounterDeltaResult::Valid(after - before),
+        (Some(before), Some(after)) => CounterDeltaResult::Decreased { before, after },
+        _ => CounterDeltaResult::Missing,
+    }
+}
+
 pub fn sample_nic_health<P: NicTelemetryProvider>(
     provider: &P,
     adapter_filter: Option<&str>,
@@ -495,8 +636,9 @@ pub fn sample_nic_health<P: NicTelemetryProvider>(
     let adapter = resolve_adapter(&adapters, adapter_filter)?.clone();
 
     // First sample (t0)
-    let t_start = Instant::now();
     let stats0_list = provider.query_statistics()?;
+    // Initial timestamp captured immediately after snapshot 0 is obtained
+    let t_start = Instant::now();
     let stats0_opt = stats0_list
         .into_iter()
         .find(|s| s.name.eq_ignore_ascii_case(&adapter.name));
@@ -505,6 +647,7 @@ pub fn sample_nic_health<P: NicTelemetryProvider>(
 
     // Second sample (t1)
     let stats1_list = provider.query_statistics()?;
+    // Measured duration captured immediately through completion of snapshot 1
     let actual_elapsed = t_start.elapsed();
     let stats1_opt = stats1_list
         .into_iter()
@@ -523,6 +666,8 @@ pub fn sample_nic_health<P: NicTelemetryProvider>(
                 adapter: adapter.clone(),
                 sample_duration: sample_interval,
                 actual_elapsed,
+                throughput_valid: false,
+                error_telemetry_valid: false,
                 telemetry_valid: false,
                 counter_reset_detected: false,
                 rx_rate_bps: None,
@@ -544,122 +689,150 @@ pub fn sample_nic_health<P: NicTelemetryProvider>(
         }
     };
 
-    // Check if byte counters are present
-    let (rx0, rx1, tx0, tx1) = match (
+    // 1. Process byte counters (Throughput metrics)
+    let byte_telemetry_valid = match (
         s0.received_bytes,
         s1.received_bytes,
         s0.sent_bytes,
         s1.sent_bytes,
     ) {
-        (Some(r0), Some(r1), Some(t0), Some(t1)) => (r0, r1, t0, t1),
-        _ => {
-            return Ok(NicHealthReport {
-                adapter: adapter.clone(),
-                sample_duration: sample_interval,
-                actual_elapsed,
-                telemetry_valid: false,
-                counter_reset_detected: false,
-                rx_rate_bps: None,
-                tx_rate_bps: None,
-                rx_bytes_delta: None,
-                tx_bytes_delta: None,
-                rx_errors_delta: None,
-                tx_errors_delta: None,
-                rx_discards_delta: None,
-                tx_discards_delta: None,
-                rx_utilization_pct: None,
-                tx_utilization_pct: None,
-                classification: NicHealthClassification::Unavailable,
-                classification_reason: format!(
-                    "Driver returned incomplete or non-numeric byte counters for adapter '{}'",
-                    adapter.name
-                ),
-            });
-        }
+        (Some(r0), Some(r1), Some(t0), Some(t1)) => Some((r0, r1, t0, t1)),
+        _ => None,
     };
 
-    // Monotonic counter decrease check (interface reset or counter wrap)
-    if rx1 < rx0 || tx1 < tx0 {
-        return Ok(NicHealthReport {
-            adapter: adapter.clone(),
-            sample_duration: sample_interval,
-            actual_elapsed,
-            telemetry_valid: false,
-            counter_reset_detected: true,
-            rx_rate_bps: None,
-            tx_rate_bps: None,
-            rx_bytes_delta: None,
-            tx_bytes_delta: None,
-            rx_errors_delta: None,
-            tx_errors_delta: None,
-            rx_discards_delta: None,
-            tx_discards_delta: None,
-            rx_utilization_pct: None,
-            tx_utilization_pct: None,
-            classification: NicHealthClassification::Degraded,
-            classification_reason: format!(
-                "Monotonic counter reset detected on '{}' during sample window (Rx: {} -> {}, Tx: {} -> {}); throughput metrics invalidated",
-                adapter.name, rx0, rx1, tx0, tx1
-            ),
-        });
+    let mut byte_counter_reset = false;
+    let mut throughput_valid = false;
+    let mut rx_bytes_delta = None;
+    let mut tx_bytes_delta = None;
+    let mut rx_rate_bps = None;
+    let mut tx_rate_bps = None;
+    let mut rx_utilization_pct = None;
+    let mut tx_utilization_pct = None;
+
+    if let Some((rx0, rx1, tx0, tx1)) = byte_telemetry_valid {
+        if rx1 < rx0 || tx1 < tx0 {
+            byte_counter_reset = true;
+        } else {
+            let rx_delta = rx1 - rx0;
+            let tx_delta = tx1 - tx0;
+            rx_bytes_delta = Some(rx_delta);
+            tx_bytes_delta = Some(tx_delta);
+
+            let rx_rate = ((rx_delta as f64 * 8.0) / elapsed_secs) as u64;
+            let tx_rate = ((tx_delta as f64 * 8.0) / elapsed_secs) as u64;
+            rx_rate_bps = Some(rx_rate);
+            tx_rate_bps = Some(tx_rate);
+
+            if adapter.link_speed_bps > 0 {
+                rx_utilization_pct = Some((rx_rate as f64 / adapter.link_speed_bps as f64) * 100.0);
+                tx_utilization_pct = Some((tx_rate as f64 / adapter.link_speed_bps as f64) * 100.0);
+            }
+            throughput_valid = true;
+        }
     }
 
-    let rx_bytes_delta = rx1 - rx0;
-    let tx_bytes_delta = tx1 - tx0;
+    // 2. Process error and discard counters (Health telemetry)
+    let rx_err_res = compute_counter_delta(s0.received_errors, s1.received_errors);
+    let tx_err_res = compute_counter_delta(s0.outbound_errors, s1.outbound_errors);
+    let rx_disc_res = compute_counter_delta(s0.received_discarded, s1.received_discarded);
+    let tx_disc_res = compute_counter_delta(s0.outbound_discarded, s1.outbound_discarded);
 
-    let rx_errors_delta = match (s0.received_errors, s1.received_errors) {
-        (Some(e0), Some(e1)) if e1 >= e0 => e1 - e0,
-        _ => 0,
+    let mut error_counter_reset = false;
+    let mut reset_reasons = Vec::new();
+    if let CounterDeltaResult::Decreased { before, after } = rx_err_res {
+        error_counter_reset = true;
+        reset_reasons.push(format!("Rx packet errors: {} -> {}", before, after));
+    }
+    if let CounterDeltaResult::Decreased { before, after } = tx_err_res {
+        error_counter_reset = true;
+        reset_reasons.push(format!("Tx packet errors: {} -> {}", before, after));
+    }
+    if let CounterDeltaResult::Decreased { before, after } = rx_disc_res {
+        error_counter_reset = true;
+        reset_reasons.push(format!("Rx discarded packets: {} -> {}", before, after));
+    }
+    if let CounterDeltaResult::Decreased { before, after } = tx_disc_res {
+        error_counter_reset = true;
+        reset_reasons.push(format!("Tx discarded packets: {} -> {}", before, after));
+    }
+
+    let rx_errors_delta = match rx_err_res {
+        CounterDeltaResult::Valid(d) => Some(d),
+        _ => None,
     };
-    let tx_errors_delta = match (s0.outbound_errors, s1.outbound_errors) {
-        (Some(e0), Some(e1)) if e1 >= e0 => e1 - e0,
-        _ => 0,
+    let tx_errors_delta = match tx_err_res {
+        CounterDeltaResult::Valid(d) => Some(d),
+        _ => None,
     };
-    let rx_discards_delta = match (s0.received_discarded, s1.received_discarded) {
-        (Some(d0), Some(d1)) if d1 >= d0 => d1 - d0,
-        _ => 0,
+    let rx_discards_delta = match rx_disc_res {
+        CounterDeltaResult::Valid(d) => Some(d),
+        _ => None,
     };
-    let tx_discards_delta = match (s0.outbound_discarded, s1.outbound_discarded) {
-        (Some(d0), Some(d1)) if d1 >= d0 => d1 - d0,
-        _ => 0,
+    let tx_discards_delta = match tx_disc_res {
+        CounterDeltaResult::Valid(d) => Some(d),
+        _ => None,
     };
 
-    let rx_rate_bps = ((rx_bytes_delta as f64 * 8.0) / elapsed_secs) as u64;
-    let tx_rate_bps = ((tx_bytes_delta as f64 * 8.0) / elapsed_secs) as u64;
+    let error_telemetry_valid = rx_errors_delta.is_some()
+        && tx_errors_delta.is_some()
+        && rx_discards_delta.is_some()
+        && tx_discards_delta.is_some();
 
-    let (rx_utilization_pct, tx_utilization_pct) = if adapter.link_speed_bps > 0 {
+    let counter_reset_detected = byte_counter_reset || error_counter_reset;
+
+    let (classification, classification_reason) = if counter_reset_detected {
+        let details = if byte_counter_reset && error_counter_reset {
+            format!(
+                "Byte and packet counter decrease detected ({})",
+                reset_reasons.join(", ")
+            )
+        } else if byte_counter_reset {
+            "Monotonic byte counter decrease detected; interface reset or counter wrap occurred; throughput telemetry invalidated".to_string()
+        } else {
+            format!(
+                "Packet counter decrease detected ({}); health metrics invalidated",
+                reset_reasons.join(", ")
+            )
+        };
+        (NicHealthClassification::Degraded, details)
+    } else if byte_telemetry_valid.is_none() {
         (
-            Some((rx_rate_bps as f64 / adapter.link_speed_bps as f64) * 100.0),
-            Some((tx_rate_bps as f64 / adapter.link_speed_bps as f64) * 100.0),
+            NicHealthClassification::Unavailable,
+            format!(
+                "Driver returned incomplete or non-numeric byte counters for adapter '{}'",
+                adapter.name
+            ),
         )
     } else {
-        (None, None)
+        evaluate_health_classification(
+            &adapter,
+            rx_utilization_pct.unwrap_or(0.0),
+            tx_utilization_pct.unwrap_or(0.0),
+            rx_errors_delta,
+            tx_errors_delta,
+            rx_discards_delta,
+            tx_discards_delta,
+        )
     };
 
-    let (classification, classification_reason) = evaluate_health_classification(
-        &adapter,
-        rx_utilization_pct.unwrap_or(0.0),
-        tx_utilization_pct.unwrap_or(0.0),
-        rx_errors_delta,
-        tx_errors_delta,
-        rx_discards_delta,
-        tx_discards_delta,
-    );
+    let telemetry_valid = throughput_valid && error_telemetry_valid && !counter_reset_detected;
 
     Ok(NicHealthReport {
         adapter,
         sample_duration: sample_interval,
         actual_elapsed,
-        telemetry_valid: true,
-        counter_reset_detected: false,
-        rx_rate_bps: Some(rx_rate_bps),
-        tx_rate_bps: Some(tx_rate_bps),
-        rx_bytes_delta: Some(rx_bytes_delta),
-        tx_bytes_delta: Some(tx_bytes_delta),
-        rx_errors_delta: Some(rx_errors_delta),
-        tx_errors_delta: Some(tx_errors_delta),
-        rx_discards_delta: Some(rx_discards_delta),
-        tx_discards_delta: Some(tx_discards_delta),
+        throughput_valid,
+        error_telemetry_valid,
+        telemetry_valid,
+        counter_reset_detected,
+        rx_rate_bps,
+        tx_rate_bps,
+        rx_bytes_delta,
+        tx_bytes_delta,
+        rx_errors_delta,
+        tx_errors_delta,
+        rx_discards_delta,
+        tx_discards_delta,
         rx_utilization_pct,
         tx_utilization_pct,
         classification,
@@ -685,13 +858,13 @@ pub fn print_nic_report(report: &NicHealthReport) {
         report.adapter.status, report.adapter.link_speed_str
     );
     println!(
-        "Sample Window: {:.2}s requested, {:.3}s actual wall-clock",
+        "Sample Window: {:.2}s requested interval, {:.3}s measured snapshot interval",
         report.sample_duration.as_secs_f64(),
         report.actual_elapsed.as_secs_f64(),
     );
 
     println!("\n{}", "[Measured Telemetry]".bold());
-    if report.telemetry_valid {
+    if report.throughput_valid {
         let rx_rate_str = report
             .rx_rate_bps
             .map(format_bps)
@@ -716,6 +889,31 @@ pub fn print_nic_report(report: &NicHealthReport) {
             .tx_utilization_pct
             .map(|u| format!("{:>5.1}%", u))
             .unwrap_or_else(|| "  N/A".into());
+
+        println!(
+            "  Rx Rate:    {:>12} ({:>10} bytes)  |  Rx Utilization: {}",
+            rx_rate_str, rx_bytes_str, rx_util_str
+        );
+        println!(
+            "  Tx Rate:    {:>12} ({:>10} bytes)  |  Tx Utilization: {}",
+            tx_rate_str, tx_bytes_str, tx_util_str
+        );
+    } else if report.counter_reset_detected {
+        println!(
+            "  {}",
+            "Counter reset or driver reinitialization detected during sampling."
+                .yellow()
+                .bold()
+        );
+        println!("  Measured byte rates invalidated.");
+    } else {
+        println!(
+            "  {}",
+            "Throughput telemetry unavailable or incomplete for this adapter.".dimmed()
+        );
+    }
+
+    if report.error_telemetry_valid {
         let rx_disc_str = report
             .rx_discards_delta
             .map(|d| d.to_string())
@@ -734,14 +932,6 @@ pub fn print_nic_report(report: &NicHealthReport) {
             .unwrap_or_else(|| "N/A".into());
 
         println!(
-            "  Rx Rate:    {:>12} ({:>10} bytes)  |  Rx Utilization: {}",
-            rx_rate_str, rx_bytes_str, rx_util_str
-        );
-        println!(
-            "  Tx Rate:    {:>12} ({:>10} bytes)  |  Tx Utilization: {}",
-            tx_rate_str, tx_bytes_str, tx_util_str
-        );
-        println!(
             "  Rx Discard: {:>12}  |  Rx Packet Errors: {:>6}",
             rx_disc_str, rx_err_str
         );
@@ -750,18 +940,9 @@ pub fn print_nic_report(report: &NicHealthReport) {
             tx_disc_str, tx_err_str
         );
     } else if report.counter_reset_detected {
-        println!(
-            "  {}",
-            "Counter reset or driver reinitialization detected during sampling."
-                .yellow()
-                .bold()
-        );
-        println!("  Measured byte rates invalidated.");
+        println!("  Packet error/discard counters reset or invalid during sample window.");
     } else {
-        println!(
-            "  {}",
-            "Telemetry unavailable or incomplete for this adapter.".dimmed()
-        );
+        println!("  Packet error/discard telemetry missing or unsupported by driver.");
     }
 
     let (status_label, reason_colored) = match report.classification {
@@ -881,7 +1062,7 @@ pub fn run_nic_cli<P: NicTelemetryProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -952,7 +1133,7 @@ mod tests {
     fn test_parse_statistics_csv_missing_and_nonnumeric_values() {
         let csv = r#""Name","ReceivedBytes","SentBytes","ReceivedDiscardedPackets","ReceivedPacketErrors","OutboundDiscardedPackets","OutboundPacketErrors"
 "Wi-Fi","1000","2000","0","0","0","0"
-"VirtualNet","","N/A","0","0","0","0"
+"VirtualNet","","N/A","--","0","0","malformed"
 "#;
         let stats = parse_statistics_csv(csv).unwrap();
         assert_eq!(stats.len(), 2);
@@ -963,6 +1144,8 @@ mod tests {
         assert_eq!(stats[1].name, "VirtualNet");
         assert_eq!(stats[1].received_bytes, None);
         assert_eq!(stats[1].sent_bytes, None);
+        assert_eq!(stats[1].received_discarded, None);
+        assert_eq!(stats[1].outbound_errors, None);
         assert!(!stats[1].is_complete());
     }
 
@@ -1018,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nic_sample_health_normal() {
+    fn test_nic_sample_health_normal_complete_stats() {
         let adapter = NicAdapterInfo {
             name: "Wi-Fi".into(),
             interface_index: 16,
@@ -1036,13 +1219,130 @@ mod tests {
             .expect("Sampling should succeed");
 
         assert_eq!(report.classification, NicHealthClassification::Normal);
+        assert!(report.throughput_valid);
+        assert!(report.error_telemetry_valid);
         assert!(report.telemetry_valid);
         assert!(!report.counter_reset_detected);
         assert_eq!(report.rx_bytes_delta, Some(100_000));
         assert_eq!(report.tx_bytes_delta, Some(50_000));
         assert_eq!(report.rx_errors_delta, Some(0));
         assert_eq!(report.tx_errors_delta, Some(0));
+        assert_eq!(report.rx_discards_delta, Some(0));
+        assert_eq!(report.tx_discards_delta, Some(0));
         assert!(report.actual_elapsed >= Duration::from_millis(45));
+    }
+
+    #[test]
+    fn test_nic_sample_health_missing_rx_errors_never_claims_normal() {
+        let adapter = NicAdapterInfo {
+            name: "Wi-Fi".into(),
+            interface_index: 16,
+            description: "Test Wi-Fi Adapter".into(),
+            status: "Up".into(),
+            link_speed_str: "1 Gbps".into(),
+            link_speed_bps: 1_000_000_000,
+        };
+
+        // Missing received_errors
+        let sample0 = vec![NicRawStats {
+            name: "Wi-Fi".into(),
+            received_bytes: Some(10_000_000),
+            sent_bytes: Some(2_000_000),
+            received_discarded: Some(0),
+            received_errors: None,
+            outbound_discarded: Some(0),
+            outbound_errors: Some(0),
+        }];
+        let sample1 = vec![NicRawStats {
+            name: "Wi-Fi".into(),
+            received_bytes: Some(10_100_000),
+            sent_bytes: Some(2_050_000),
+            received_discarded: Some(0),
+            received_errors: None,
+            outbound_discarded: Some(0),
+            outbound_errors: Some(0),
+        }];
+
+        let provider = MockNicProvider::new(vec![adapter], vec![sample0, sample1]);
+        let report = sample_nic_health(&provider, Some("Wi-Fi"), Duration::from_millis(10))
+            .expect("Sampling should succeed");
+
+        assert!(report.throughput_valid);
+        assert!(!report.error_telemetry_valid);
+        assert!(!report.telemetry_valid);
+        assert_eq!(report.rx_errors_delta, None);
+        // Must NOT claim Normal
+        assert_eq!(report.classification, NicHealthClassification::Degraded);
+        assert!(report
+            .classification_reason
+            .contains("Incomplete telemetry"));
+    }
+
+    #[test]
+    fn test_nic_sample_health_missing_tx_discards_never_claims_normal() {
+        let adapter = NicAdapterInfo {
+            name: "Wi-Fi".into(),
+            interface_index: 16,
+            description: "Test Wi-Fi Adapter".into(),
+            status: "Up".into(),
+            link_speed_str: "1 Gbps".into(),
+            link_speed_bps: 1_000_000_000,
+        };
+
+        // Missing outbound_discarded
+        let sample0 = vec![NicRawStats {
+            name: "Wi-Fi".into(),
+            received_bytes: Some(10_000_000),
+            sent_bytes: Some(2_000_000),
+            received_discarded: Some(0),
+            received_errors: Some(0),
+            outbound_discarded: None,
+            outbound_errors: Some(0),
+        }];
+        let sample1 = vec![NicRawStats {
+            name: "Wi-Fi".into(),
+            received_bytes: Some(10_100_000),
+            sent_bytes: Some(2_050_000),
+            received_discarded: Some(0),
+            received_errors: Some(0),
+            outbound_discarded: None,
+            outbound_errors: Some(0),
+        }];
+
+        let provider = MockNicProvider::new(vec![adapter], vec![sample0, sample1]);
+        let report = sample_nic_health(&provider, Some("Wi-Fi"), Duration::from_millis(10))
+            .expect("Sampling should succeed");
+
+        assert!(report.throughput_valid);
+        assert!(!report.error_telemetry_valid);
+        assert_eq!(report.tx_discards_delta, None);
+        assert_eq!(report.classification, NicHealthClassification::Degraded);
+    }
+
+    #[test]
+    fn test_nic_sample_health_error_counter_decrease_treated_as_reset() {
+        let adapter = NicAdapterInfo {
+            name: "Ethernet".into(),
+            interface_index: 10,
+            description: "Test Ethernet".into(),
+            status: "Up".into(),
+            link_speed_str: "1 Gbps".into(),
+            link_speed_bps: 1_000_000_000,
+        };
+
+        // Rx errors decrease from 25 to 2 (driver re-init / reset)
+        let sample0 = vec![NicRawStats::new("Ethernet", 1000, 1000, 0, 25, 0, 0)];
+        let sample1 = vec![NicRawStats::new("Ethernet", 2000, 2000, 0, 2, 0, 0)];
+
+        let provider = MockNicProvider::new(vec![adapter], vec![sample0, sample1]);
+        let report = sample_nic_health(&provider, Some("Ethernet"), Duration::from_millis(10))
+            .expect("Sampling should succeed");
+
+        assert!(report.counter_reset_detected);
+        assert!(!report.error_telemetry_valid);
+        assert_eq!(report.rx_errors_delta, None);
+        assert_eq!(report.classification, NicHealthClassification::Degraded);
+        assert!(report.classification_reason.contains("decrease detected"));
     }
 
     #[test]
@@ -1064,7 +1364,8 @@ mod tests {
             .expect("Sampling should succeed");
 
         assert_eq!(report.classification, NicHealthClassification::Degraded);
-        assert!(report.telemetry_valid);
+        assert!(report.throughput_valid);
+        assert!(report.error_telemetry_valid);
         assert_eq!(report.rx_discards_delta, Some(5));
         assert_eq!(report.rx_errors_delta, Some(2));
     }
@@ -1080,13 +1381,30 @@ mod tests {
             link_speed_bps: 100_000_000,
         };
 
-        let (sat_class, _) = evaluate_health_classification(&adapter, 92.5, 10.0, 0, 0, 0, 0);
+        let (sat_class, _) = evaluate_health_classification(
+            &adapter,
+            92.5,
+            10.0,
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+        );
         assert_eq!(sat_class, NicHealthClassification::Saturated);
 
-        let (elev_class, _) = evaluate_health_classification(&adapter, 75.0, 5.0, 0, 0, 0, 0);
+        let (elev_class, _) =
+            evaluate_health_classification(&adapter, 75.0, 5.0, Some(0), Some(0), Some(0), Some(0));
         assert_eq!(elev_class, NicHealthClassification::Elevated);
 
-        let (norm_class, _) = evaluate_health_classification(&adapter, 50.0, 12.0, 0, 0, 0, 0);
+        let (norm_class, _) = evaluate_health_classification(
+            &adapter,
+            50.0,
+            12.0,
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+        );
         assert_eq!(norm_class, NicHealthClassification::Normal);
     }
 
@@ -1101,7 +1419,7 @@ mod tests {
             link_speed_bps: 1_000_000_000,
         };
 
-        // sample0 has 5000, sample1 has 1000 (interface reset / counter wrap)
+        // Byte counter decrease
         let sample0 = vec![NicRawStats::new("Wi-Fi", 5000, 5000, 0, 0, 0, 0)];
         let sample1 = vec![NicRawStats::new("Wi-Fi", 1000, 1000, 0, 0, 0, 0)];
 
@@ -1110,11 +1428,11 @@ mod tests {
             .expect("Sampling should succeed");
 
         assert!(report.counter_reset_detected);
-        assert!(!report.telemetry_valid);
+        assert!(!report.throughput_valid);
         assert_eq!(report.rx_bytes_delta, None);
         assert_eq!(report.tx_bytes_delta, None);
         assert_eq!(report.classification, NicHealthClassification::Degraded);
-        assert!(report.classification_reason.contains("counter reset"));
+        assert!(report.classification_reason.contains("decrease detected"));
     }
 
     #[test]
@@ -1174,5 +1492,98 @@ mod tests {
             .expect("Sampling should succeed");
 
         assert_eq!(report.classification, NicHealthClassification::Unavailable);
+    }
+
+    #[test]
+    fn test_powershell_bounded_successful_command() {
+        let output = run_powershell_bounded(
+            "Write-Output 'rustrict_telemetry_ok'",
+            Duration::from_secs(5),
+        )
+        .expect("PowerShell command should succeed within 5 seconds");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("rustrict_telemetry_ok"));
+    }
+
+    #[test]
+    fn test_powershell_bounded_timeout_terminates_and_reaps_process() {
+        let spawned_pid = Arc::new(AtomicU32::new(0));
+        let spawned_pid_clone = spawned_pid.clone();
+
+        // Spawn a PowerShell command that sleeps for 60 seconds, with a 150ms timeout
+        let result = run_command_bounded_with_pid(
+            "powershell",
+            &["-NoProfile", "-Command", "Start-Sleep -Seconds 60"],
+            Duration::from_millis(150),
+            move |pid| spawned_pid_clone.store(pid, Ordering::SeqCst),
+        );
+
+        assert!(result.is_err(), "Hung command must return an error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("timed out"),
+            "Error must report timeout: {}",
+            err
+        );
+
+        let pid = spawned_pid.load(Ordering::SeqCst);
+        assert!(pid > 0, "Spawned PID must be non-zero");
+
+        // Verify that the child process has actually been terminated and reaped from Windows OS
+        sleep(Duration::from_millis(50));
+
+        let is_running = unsafe {
+            let handle = windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            );
+            if handle.is_null() {
+                false
+            } else {
+                let mut exit_code: u32 = 0;
+                let res = windows_sys::Win32::System::Threading::GetExitCodeProcess(
+                    handle,
+                    &mut exit_code,
+                );
+                let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+                res != 0 && exit_code == 259 // STILL_ACTIVE = 259
+            }
+        };
+
+        assert!(
+            !is_running,
+            "Hung PowerShell child process (PID {}) must be terminated and reaped, but was still active",
+            pid
+        );
+    }
+
+    #[test]
+    fn test_sampling_interval_timestamp_captures_inter_snapshot_duration() {
+        let adapter = NicAdapterInfo {
+            name: "Wi-Fi".into(),
+            interface_index: 16,
+            description: "Test Adapter".into(),
+            status: "Up".into(),
+            link_speed_str: "1 Gbps".into(),
+            link_speed_bps: 1_000_000_000,
+        };
+
+        let sample0 = vec![NicRawStats::new("Wi-Fi", 1_000, 2_000, 0, 0, 0, 0)];
+        let sample1 = vec![NicRawStats::new("Wi-Fi", 2_000, 3_000, 0, 0, 0, 0)];
+
+        let provider = MockNicProvider::new(vec![adapter], vec![sample0, sample1]);
+
+        let req_duration = Duration::from_millis(30);
+        let report = sample_nic_health(&provider, Some("Wi-Fi"), req_duration).unwrap();
+
+        assert_eq!(report.sample_duration, req_duration);
+        assert!(
+            report.actual_elapsed >= req_duration,
+            "actual_elapsed ({:?}) must be at least requested duration ({:?})",
+            report.actual_elapsed,
+            req_duration
+        );
     }
 }

@@ -214,35 +214,48 @@ fn test_nic_health_classification_and_telemetry() {
         link_speed_bps: 1_200_000_000,
     };
 
-    // 1. Normal classification (< 70% utilization, 0 errors)
-    let (class_norm, _) = evaluate_health_classification(&adapter_up, 15.0, 5.0, 0, 0, 0, 0);
+    // 1. Normal classification (< 70% utilization, 0 errors, full telemetry)
+    let (class_norm, _) =
+        evaluate_health_classification(&adapter_up, 15.0, 5.0, Some(0), Some(0), Some(0), Some(0));
     assert_eq!(class_norm, NicHealthClassification::Normal);
 
-    // 2. Elevated classification (70% - 90%)
-    let (class_elev, _) = evaluate_health_classification(&adapter_up, 78.5, 10.0, 0, 0, 0, 0);
+    // 2. Incomplete telemetry (missing counter) must NEVER produce Normal
+    let (class_inc, reason_inc) =
+        evaluate_health_classification(&adapter_up, 15.0, 5.0, None, Some(0), Some(0), Some(0));
+    assert_eq!(class_inc, NicHealthClassification::Degraded);
+    assert!(reason_inc.contains("Incomplete telemetry"));
+
+    // 3. Elevated classification (70% - 90%)
+    let (class_elev, _) =
+        evaluate_health_classification(&adapter_up, 78.5, 10.0, Some(0), Some(0), Some(0), Some(0));
     assert_eq!(class_elev, NicHealthClassification::Elevated);
 
-    // 3. Saturated classification (>= 90%)
-    let (class_sat, _) = evaluate_health_classification(&adapter_up, 94.2, 85.0, 0, 0, 0, 0);
+    // 4. Saturated classification (>= 90%)
+    let (class_sat, _) =
+        evaluate_health_classification(&adapter_up, 94.2, 85.0, Some(0), Some(0), Some(0), Some(0));
     assert_eq!(class_sat, NicHealthClassification::Saturated);
 
-    // 4. Degraded classification on error or discard
-    let (class_deg_err, _) = evaluate_health_classification(&adapter_up, 5.0, 5.0, 1, 0, 0, 0);
+    // 5. Degraded classification on error or discard
+    let (class_deg_err, _) =
+        evaluate_health_classification(&adapter_up, 5.0, 5.0, Some(1), Some(0), Some(0), Some(0));
     assert_eq!(class_deg_err, NicHealthClassification::Degraded);
 
-    let (class_deg_disc, _) = evaluate_health_classification(&adapter_up, 5.0, 5.0, 0, 0, 3, 0);
+    let (class_deg_disc, _) =
+        evaluate_health_classification(&adapter_up, 5.0, 5.0, Some(0), Some(0), Some(3), Some(0));
     assert_eq!(class_deg_disc, NicHealthClassification::Degraded);
 
-    // 5. Unavailable on disconnected status
+    // 6. Unavailable on disconnected status
     let mut adapter_disc = adapter_up.clone();
     adapter_disc.status = "Disconnected".into();
-    let (class_unavail, _) = evaluate_health_classification(&adapter_disc, 0.0, 0.0, 0, 0, 0, 0);
+    let (class_unavail, _) =
+        evaluate_health_classification(&adapter_disc, 0.0, 0.0, Some(0), Some(0), Some(0), Some(0));
     assert_eq!(class_unavail, NicHealthClassification::Unavailable);
 
-    // 6. Unavailable on zero link speed
+    // 7. Unavailable on zero link speed
     let mut adapter_zero = adapter_up.clone();
     adapter_zero.link_speed_bps = 0;
-    let (class_zero, _) = evaluate_health_classification(&adapter_zero, 0.0, 0.0, 0, 0, 0, 0);
+    let (class_zero, _) =
+        evaluate_health_classification(&adapter_zero, 0.0, 0.0, Some(0), Some(0), Some(0), Some(0));
     assert_eq!(class_zero, NicHealthClassification::Unavailable);
 }
 
