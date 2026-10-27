@@ -88,6 +88,10 @@ fn main() {
                 err
             );
         }
+        eprintln!(
+            "{} Operator intervention required: Run 'Get-NetIPInterface -InterfaceAlias <name>' to verify/restore interface state.",
+            "[WARN]".yellow().bold()
+        );
         std::process::exit(1);
     }
 }

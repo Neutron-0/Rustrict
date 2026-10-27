@@ -475,3 +475,133 @@ fn test_standalone_nic_dispatch_runs_hermetic_without_network() {
     let res_health = run_nic_cli(&provider, Some("Wi-Fi"), &["health"]);
     assert!(res_health.is_ok());
 }
+
+struct MockSuccessForwardingEnabler;
+impl ScopedForwardingEnabler for MockSuccessForwardingEnabler {
+    fn ensure_forwarding_enabled(&self, _iface_name: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+#[test]
+fn test_persistent_block_rejects_subnet_network_and_directed_broadcast_targets() {
+    let params = rustrict::core::RestorationNetworkParams {
+        iface_ip: Ipv4Addr::new(192, 168, 1, 10),
+        iface_mac: "00:11:22:33:44:02".parse().unwrap(),
+        iface_name: "EthernetAdaptZ",
+        gateway_ip: Ipv4Addr::new(192, 168, 1, 1),
+        gateway_mac: "00:11:22:33:44:01".parse().unwrap(),
+    };
+
+    let mut scope = ScopeManager::new();
+    let cidr = Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap();
+    scope.add_cidr_direct(cidr);
+    scope.set_strict(true);
+
+    let enabler = MockSuccessForwardingEnabler;
+    let mut activator = MockRecordingActivator {
+        activated_targets: Vec::new(),
+    };
+
+    let blocked_records = vec![
+        // Valid host
+        PersistentBlockedHost {
+            ip: Ipv4Addr::new(192, 168, 1, 55),
+            mac: "00:aa:bb:cc:dd:55".into(),
+            name: "ValidHost".into(),
+            direction: "both".into(),
+        },
+        // Subnet network identifier -> must be rejected
+        PersistentBlockedHost {
+            ip: Ipv4Addr::new(192, 168, 1, 0),
+            mac: "00:aa:bb:cc:dd:00".into(),
+            name: "NetworkIdHost".into(),
+            direction: "both".into(),
+        },
+        // Directed broadcast -> must be rejected
+        PersistentBlockedHost {
+            ip: Ipv4Addr::new(192, 168, 1, 255),
+            mac: "00:aa:bb:cc:dd:ff".into(),
+            name: "DirectedBcastHost".into(),
+            direction: "both".into(),
+        },
+    ];
+
+    let report = restore_persistent_blocks_with(
+        &blocked_records,
+        |_| Direction::Both,
+        &params,
+        &scope,
+        &enabler,
+        &mut activator,
+    );
+
+    // Invariants:
+    // 1. Only the valid host was activated
+    assert_eq!(activator.activated_targets.len(), 1);
+    assert_eq!(
+        activator.activated_targets[0].0,
+        Ipv4Addr::new(192, 168, 1, 55)
+    );
+    assert_eq!(report.activated_targets.len(), 1);
+
+    // 2. Both network and broadcast were skipped with reasons
+    assert_eq!(report.skipped_targets.len(), 2);
+    let skipped_ips: Vec<Ipv4Addr> = report.skipped_targets.iter().map(|(ip, _)| *ip).collect();
+    assert!(skipped_ips.contains(&Ipv4Addr::new(192, 168, 1, 0)));
+    assert!(skipped_ips.contains(&Ipv4Addr::new(192, 168, 1, 255)));
+
+    // 3. Stored records are completely untouched
+    assert_eq!(blocked_records.len(), 3);
+}
+
+#[test]
+fn test_persistent_block_accepts_31_point_to_point_endpoints() {
+    let params = rustrict::core::RestorationNetworkParams {
+        iface_ip: Ipv4Addr::new(172, 16, 0, 10),
+        iface_mac: "00:11:22:33:44:02".parse().unwrap(),
+        iface_name: "PointToPointAdapt",
+        gateway_ip: Ipv4Addr::new(172, 16, 0, 99),
+        gateway_mac: "00:11:22:33:44:01".parse().unwrap(),
+    };
+
+    let mut scope = ScopeManager::new();
+    // RFC 3021 /31 subnet
+    let cidr = Ipv4Cidr::new(Ipv4Addr::new(172, 16, 0, 0), 31).unwrap();
+    scope.add_cidr_direct(cidr);
+    scope.set_strict(true);
+
+    let enabler = MockSuccessForwardingEnabler;
+    let mut activator = MockRecordingActivator {
+        activated_targets: Vec::new(),
+    };
+
+    let blocked_records = vec![
+        PersistentBlockedHost {
+            ip: Ipv4Addr::new(172, 16, 0, 0),
+            mac: "00:aa:bb:cc:dd:10".into(),
+            name: "Endpoint0".into(),
+            direction: "both".into(),
+        },
+        PersistentBlockedHost {
+            ip: Ipv4Addr::new(172, 16, 0, 1),
+            mac: "00:aa:bb:cc:dd:11".into(),
+            name: "Endpoint1".into(),
+            direction: "both".into(),
+        },
+    ];
+
+    let report = restore_persistent_blocks_with(
+        &blocked_records,
+        |_| Direction::Both,
+        &params,
+        &scope,
+        &enabler,
+        &mut activator,
+    );
+
+    // Under RFC 3021, both 0 and 1 are valid host endpoints and must be activated
+    assert_eq!(activator.activated_targets.len(), 2);
+    assert_eq!(report.activated_targets.len(), 2);
+    assert_eq!(report.skipped_targets.len(), 0);
+}

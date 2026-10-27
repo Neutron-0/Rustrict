@@ -138,6 +138,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
             for (iface, err) in &report.failed_interfaces {
                 eprintln!("[ERR] Failed to restore forwarding on {}: {}", iface, err);
             }
+            eprintln!("[WARN] Operator intervention required: manual interface state verification via 'Get-NetIPInterface' recommended.");
             std::process::exit(1);
         } else {
             eprintln!("[OK] Clean shutdown complete. Exiting.");
@@ -182,8 +183,11 @@ pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
     fn run_powershell(&self, command: &str) -> Result<String, String> {
+        // Enforce terminating error handling so cmdlet failures cause non-zero exit codes
+        // and emit stderr instead of silently continuing with exit code 0.
+        let ps_script = format!("$ErrorActionPreference = 'Stop'; {}", command);
         let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", command])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
             .output()
             .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
 
@@ -191,14 +195,18 @@ impl CommandRunner for SystemCommandRunner {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(if stderr.is_empty() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let err_msg = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
                 format!(
                     "PowerShell command failed with status {:?}",
                     output.status.code()
                 )
-            } else {
-                stderr
-            })
+            };
+            Err(err_msg)
         }
     }
 }
@@ -273,35 +281,71 @@ impl ForwardingManager {
         iface_name: &str,
     ) -> Result<bool, String> {
         let mut tracked = self.tracked.lock();
-        if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
-            if entry.currently_mutated {
-                return Ok(true);
-            }
+
+        // Invariant 1: Never treat internal tracking flags as proof of OS state.
+        // Query the actual interface state before reporting that scoped forwarding is ready.
+        let current_state = self.query_interface_forwarding_with(runner, iface_name)?;
+
+        // Invariant 4: Preserve the original interface state captured at the first observation.
+        // Never overwrite that baseline merely because a later observation differs.
+        if !tracked.iter().any(|e| e.interface_name == iface_name) {
+            tracked.push(InterfaceForwardingRecord {
+                interface_name: iface_name.to_string(),
+                original_enabled: current_state,
+                currently_mutated: false,
+            });
         }
 
-        let original = self.query_interface_forwarding_with(runner, iface_name)?;
-        if !original {
-            self.set_interface_forwarding_with(runner, iface_name, true)?;
-            if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
-                entry.currently_mutated = true;
-                entry.original_enabled = false;
+        let entry = tracked
+            .iter_mut()
+            .find(|e| e.interface_name == iface_name)
+            .expect("interface forwarding record must exist in tracked list");
+
+        if current_state {
+            // Forwarding is currently verified as Enabled in the OS.
+            if entry.original_enabled {
+                // Was originally Enabled when first observed; untouched by us.
+                entry.currently_mutated = false;
+                Ok(false)
             } else {
-                tracked.push(InterfaceForwardingRecord {
-                    interface_name: iface_name.to_string(),
-                    original_enabled: false,
-                    currently_mutated: true,
-                });
+                // Was originally Disabled; our mutation is active and verified in OS.
+                entry.currently_mutated = true;
+                Ok(true)
             }
-            Ok(true)
         } else {
-            if !tracked.iter().any(|e| e.interface_name == iface_name) {
-                tracked.push(InterfaceForwardingRecord {
-                    interface_name: iface_name.to_string(),
-                    original_enabled: true,
-                    currently_mutated: false,
-                });
+            // Forwarding is currently Disabled in OS; it must be enabled.
+            // Invariant 5: Record pending mutation intent. If the setter fails ambiguously
+            // or state verification fails, the record preserves currently_mutated = true so cleanup
+            // can restore the original baseline.
+            entry.currently_mutated = true;
+
+            // Invariant 2: Set forwarding to Enabled.
+            if let Err(e) = self.set_interface_forwarding_with(runner, iface_name, true) {
+                return Err(format!(
+                    "Failed to set IPv4 forwarding to Enabled on interface '{}': {}",
+                    iface_name, e
+                ));
             }
-            Ok(false)
+
+            // Invariant 2: Query actual state and verify postcondition is Enabled.
+            match self.query_interface_forwarding_with(runner, iface_name) {
+                Ok(true) => {
+                    entry.currently_mutated = true;
+                    Ok(true)
+                }
+                Ok(false) => {
+                    Err(format!(
+                        "Forwarding verification failed: interface '{}' remained Disabled after Set-NetIPInterface",
+                        iface_name
+                    ))
+                }
+                Err(e) => {
+                    Err(format!(
+                        "Forwarding verification failed on interface '{}': unable to verify state: {}",
+                        iface_name, e
+                    ))
+                }
+            }
         }
     }
 
@@ -311,55 +355,67 @@ impl ForwardingManager {
 
         for entry in tracked.iter_mut() {
             if entry.currently_mutated {
-                if !entry.original_enabled {
-                    // Attempt to restore forwarding to Disabled
-                    match self.set_interface_forwarding_with(runner, &entry.interface_name, false) {
-                        Ok(()) => {
-                            // Verify that forwarding is actually Disabled
-                            match self
-                                .query_interface_forwarding_with(runner, &entry.interface_name)
-                            {
-                                Ok(still_enabled) => {
-                                    if !still_enabled {
-                                        // Verified successfully restored
-                                        entry.currently_mutated = false;
-                                        report
-                                            .restored_interfaces
-                                            .push(entry.interface_name.clone());
-                                    } else {
-                                        // Still enabled despite setter command returning Ok
-                                        report.failed_interfaces.push((
-                                            entry.interface_name.clone(),
-                                            "Verification failed: interface forwarding remains enabled after restore command".into(),
-                                        ));
-                                        // Preserve currently_mutated = true so subsequent cleanup can retry
-                                    }
-                                }
-                                Err(e) => {
-                                    // Query verification failed (e.g. interface renamed, disappeared, or query error)
+                let target_state = entry.original_enabled;
+                let target_str = if target_state { "Enabled" } else { "Disabled" };
+
+                // Attempt to restore interface to its captured original state
+                match self.set_interface_forwarding_with(
+                    runner,
+                    &entry.interface_name,
+                    target_state,
+                ) {
+                    Ok(()) => {
+                        // Query and verify actual OS state
+                        match self.query_interface_forwarding_with(runner, &entry.interface_name) {
+                            Ok(actual_state) => {
+                                if actual_state == target_state {
+                                    // Successfully restored and verified
+                                    entry.currently_mutated = false;
+                                    report
+                                        .restored_interfaces
+                                        .push(entry.interface_name.clone());
+                                } else {
+                                    let actual_str =
+                                        if actual_state { "enabled" } else { "disabled" };
                                     report.failed_interfaces.push((
                                         entry.interface_name.clone(),
-                                        format!("Verification query failed: {}", e),
+                                        format!(
+                                            "Verification failed: interface forwarding remains {} after restore command (expected original state: {}). Manual verification required.",
+                                            actual_str, target_str
+                                        ),
                                     ));
                                     // Preserve currently_mutated = true so subsequent cleanup can retry
+                                    entry.currently_mutated = true;
                                 }
                             }
-                        }
-                        Err(e) => {
-                            // Setter command failed
-                            report.failed_interfaces.push((
-                                entry.interface_name.clone(),
-                                format!("Set-NetIPInterface restoration failed: {}", e),
-                            ));
-                            // Preserve currently_mutated = true so subsequent cleanup can retry
+                            Err(e) => {
+                                report.failed_interfaces.push((
+                                    entry.interface_name.clone(),
+                                    format!(
+                                        "Verification query failed after restore command: {}. Expected original state: {}. Manual verification required.",
+                                        e, target_str
+                                    ),
+                                ));
+                                // Preserve currently_mutated = true so subsequent cleanup can retry
+                                entry.currently_mutated = true;
+                            }
                         }
                     }
-                } else {
-                    // Interface was already enabled originally; never mutated by us
-                    entry.currently_mutated = false;
-                    report
-                        .untouched_interfaces
-                        .push(entry.interface_name.clone());
+                    Err(e) => {
+                        let last_known = self
+                            .query_interface_forwarding_with(runner, &entry.interface_name)
+                            .ok();
+                        let last_str = last_known.map(|s| if s { "Enabled" } else { "Disabled" });
+                        report.failed_interfaces.push((
+                            entry.interface_name.clone(),
+                            format!(
+                                "Set-NetIPInterface restoration to {} failed: {}. Expected original state: {}. Last known state: {:?}. Manual verification required.",
+                                target_str, e, target_str, last_str
+                            ),
+                        ));
+                        // Preserve currently_mutated = true so subsequent cleanup can retry
+                        entry.currently_mutated = true;
+                    }
                 }
             } else {
                 report
@@ -369,6 +425,25 @@ impl ForwardingManager {
         }
 
         report
+    }
+
+    pub fn cleanup_forwarding_with_retries<R: CommandRunner>(
+        &self,
+        runner: &R,
+        max_attempts: usize,
+    ) -> ForwardingCleanupReport {
+        let attempts = max_attempts.max(1);
+        let mut last_report = ForwardingCleanupReport::default();
+        for attempt in 1..=attempts {
+            last_report = self.cleanup_forwarding_with(runner);
+            if last_report.is_success() {
+                return last_report;
+            }
+            if attempt < attempts {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        last_report
     }
 
     pub fn tracked_records(&self) -> Vec<InterfaceForwardingRecord> {
@@ -444,8 +519,15 @@ pub fn cleanup_forwarding_with<R: CommandRunner>(runner: &R) -> ForwardingCleanu
     GLOBAL_FORWARDING_MANAGER.cleanup_forwarding_with(runner)
 }
 
+pub fn cleanup_forwarding_with_retries<R: CommandRunner>(
+    runner: &R,
+    max_attempts: usize,
+) -> ForwardingCleanupReport {
+    GLOBAL_FORWARDING_MANAGER.cleanup_forwarding_with_retries(runner, max_attempts)
+}
+
 pub fn cleanup_forwarding() -> ForwardingCleanupReport {
-    cleanup_forwarding_with(&SystemCommandRunner)
+    cleanup_forwarding_with_retries(&SystemCommandRunner, 3)
 }
 
 /// Deprecated: Unscoped global IP forwarding is unsafe and disallowed.
@@ -725,22 +807,26 @@ mod tests {
 
     #[test]
     fn test_forwarding_mutation_and_restoration_when_initially_disabled() {
+        let manager = ForwardingManager::new();
         let runner = MockCommandRunner::new("Disabled");
         let iface = "TestEthernet0";
 
         // Query
-        let original =
-            query_interface_forwarding_with(&runner, iface).expect("query should succeed");
+        let original = manager
+            .query_interface_forwarding_with(&runner, iface)
+            .expect("query should succeed");
         assert!(!original);
 
         // Ensure enabled
-        let mutated = ensure_scoped_forwarding_enabled_with(&runner, iface)
+        let mutated = manager
+            .ensure_scoped_forwarding_enabled_with(&runner, iface)
             .expect("enabling scoped forwarding should succeed");
         assert!(mutated);
         assert_eq!(*runner.current_state.lock(), "Enabled");
 
         // Cleanup
-        cleanup_forwarding_with(&runner);
+        let report = manager.cleanup_forwarding_with(&runner);
+        assert!(report.is_success());
         assert_eq!(*runner.current_state.lock(), "Disabled");
 
         // Verify commands recorded
@@ -752,11 +838,13 @@ mod tests {
 
     #[test]
     fn test_forwarding_not_touched_when_initially_enabled() {
+        let manager = ForwardingManager::new();
         let runner = MockCommandRunner::new("Enabled");
         let iface = "PreConfiguredVNic";
 
         // Ensure enabled
-        let mutated = ensure_scoped_forwarding_enabled_with(&runner, iface)
+        let mutated = manager
+            .ensure_scoped_forwarding_enabled_with(&runner, iface)
             .expect("scoped forwarding should query and succeed");
         assert!(!mutated, "Should not report mutation when already enabled");
         assert_eq!(*runner.current_state.lock(), "Enabled");
@@ -764,7 +852,7 @@ mod tests {
         let cmds_before_cleanup = runner.executed_commands.lock().len();
 
         // Cleanup should not issue any disable command
-        let report = cleanup_forwarding_with(&runner);
+        let report = manager.cleanup_forwarding_with(&runner);
         assert!(report.is_success());
         assert_eq!(report.restored_interfaces.len(), 0);
         assert_eq!(*runner.current_state.lock(), "Enabled");
@@ -782,6 +870,8 @@ mod tests {
         fail_get: parking_lot::Mutex<bool>,
         disappeared_interface: parking_lot::Mutex<Option<String>>,
         disable_leaves_enabled: parking_lot::Mutex<bool>,
+        enable_leaves_disabled: parking_lot::Mutex<bool>,
+        fail_get_after_set: parking_lot::Mutex<bool>,
         executed_commands: parking_lot::Mutex<Vec<String>>,
     }
 
@@ -822,6 +912,15 @@ mod tests {
                 if *self.fail_get.lock() {
                     return Err("WMI RPC communication error during forwarding query".into());
                 }
+                if *self.fail_get_after_set.lock()
+                    && self
+                        .executed_commands
+                        .lock()
+                        .iter()
+                        .any(|c| c.contains("Set-NetIPInterface"))
+                {
+                    return Err("RPC communication error querying interface postcondition".into());
+                }
                 let states = self.states.lock();
                 let state = states
                     .get(&alias)
@@ -833,7 +932,11 @@ mod tests {
                     return Err("Access denied executing Set-NetIPInterface".into());
                 }
                 if command.contains("-Forwarding Enabled") {
-                    self.states.lock().insert(alias, "Enabled".into());
+                    if *self.enable_leaves_disabled.lock() {
+                        self.states.lock().insert(alias, "Disabled".into());
+                    } else {
+                        self.states.lock().insert(alias, "Enabled".into());
+                    }
                 } else if command.contains("-Forwarding Disabled") {
                     if *self.disable_leaves_enabled.lock() {
                         self.states.lock().insert(alias, "Enabled".into());
@@ -1028,5 +1131,150 @@ mod tests {
                 "Must not issue disable commands to originally enabled interface NicB"
             );
         }
+    }
+
+    #[test]
+    fn test_ensure_forwarding_setter_success_but_remains_disabled_fails() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("StubbornNic", "Disabled");
+        *runner.enable_leaves_disabled.lock() = true;
+
+        let res = manager.ensure_scoped_forwarding_enabled_with(&runner, "StubbornNic");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("remained Disabled"));
+
+        // Crucial invariant: entry is tracked as currently_mutated = true so cleanup can restore
+        let tracked = manager.tracked_records();
+        assert_eq!(tracked.len(), 1);
+        assert!(tracked[0].currently_mutated);
+    }
+
+    #[test]
+    fn test_ensure_forwarding_query_fails_after_setter() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("FailQueryNic", "Disabled");
+        *runner.fail_get_after_set.lock() = true;
+
+        let res = manager.ensure_scoped_forwarding_enabled_with(&runner, "FailQueryNic");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("unable to verify state"));
+
+        let tracked = manager.tracked_records();
+        assert_eq!(tracked.len(), 1);
+        assert!(tracked[0].currently_mutated);
+    }
+
+    #[test]
+    fn test_ensure_forwarding_previously_mutated_then_externally_disabled_queries_and_reenables() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("FlappingNic", "Disabled");
+
+        // 1. Initial enable: Disabled -> Enabled
+        let mut1 = manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "FlappingNic")
+            .unwrap();
+        assert!(mut1);
+
+        // 2. Externally changed to Disabled
+        runner
+            .states
+            .lock()
+            .insert("FlappingNic".into(), "Disabled".into());
+
+        // Configure setter failure: ensure it does NOT claim success from internal flag
+        *runner.fail_set.lock() = true;
+        let fail_res = manager.ensure_scoped_forwarding_enabled_with(&runner, "FlappingNic");
+        assert!(fail_res.is_err());
+        assert!(fail_res
+            .unwrap_err()
+            .contains("Failed to set IPv4 forwarding"));
+
+        // 3. Clear setter failure: re-enable succeeds and is verified in OS
+        *runner.fail_set.lock() = false;
+        let mut2 = manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "FlappingNic")
+            .unwrap();
+        assert!(mut2);
+
+        // Crucial invariant: original baseline is still Disabled
+        let tracked = manager.tracked_records();
+        assert!(!tracked[0].original_enabled);
+        assert!(tracked[0].currently_mutated);
+
+        // Cleanup restores Disabled
+        let report = manager.cleanup_forwarding_with(&runner);
+        assert!(report.is_success());
+        assert_eq!(runner.states.lock().get("FlappingNic").unwrap(), "Disabled");
+    }
+
+    #[test]
+    fn test_original_state_enabled_later_changed_cleanup_restores_enabled() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("InitiallyEnabledNic", "Enabled");
+
+        // 1. Initial observation: Enabled -> original_enabled: true
+        let mut1 = manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "InitiallyEnabledNic")
+            .unwrap();
+        assert!(!mut1, "Should report false when initially enabled");
+
+        // 2. Later, interface is externally or accidentally disabled
+        runner
+            .states
+            .lock()
+            .insert("InitiallyEnabledNic".into(), "Disabled".into());
+
+        // 3. ensure_scoped_forwarding_enabled detects Disabled, enables it, and verifies
+        let mut2 = manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "InitiallyEnabledNic")
+            .unwrap();
+        assert!(mut2);
+
+        // Invariant: original_enabled must STILL be true!
+        let tracked = manager.tracked_records();
+        assert_eq!(tracked.len(), 1);
+        assert!(
+            tracked[0].original_enabled,
+            "Original enabled baseline must be preserved"
+        );
+        assert!(tracked[0].currently_mutated);
+
+        // 4. Cleanup MUST restore Enabled (not Disabled!)
+        let report = manager.cleanup_forwarding_with(&runner);
+        assert!(report.is_success());
+        assert_eq!(
+            report.restored_interfaces,
+            vec!["InitiallyEnabledNic".to_string()]
+        );
+        assert_eq!(
+            runner.states.lock().get("InitiallyEnabledNic").unwrap(),
+            "Enabled",
+            "Cleanup must restore original Enabled state"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_forwarding_with_retries_transient_failure_succeeds() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("RetryNic", "Disabled");
+
+        manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "RetryNic")
+            .unwrap();
+
+        // Fail first cleanup attempt
+        *runner.fail_set.lock() = true;
+        let fail_report = manager.cleanup_forwarding_with(&runner);
+        assert!(!fail_report.is_success());
+        assert_eq!(fail_report.failed_interfaces.len(), 1);
+
+        // Recover on second attempt
+        *runner.fail_set.lock() = false;
+        let retry_report = manager.cleanup_forwarding_with_retries(&runner, 2);
+        assert!(retry_report.is_success());
+        assert_eq!(
+            retry_report.restored_interfaces,
+            vec!["RetryNic".to_string()]
+        );
     }
 }

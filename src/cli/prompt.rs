@@ -228,7 +228,13 @@ impl RustrictCli {
         let sniffer = crate::resolver::passive::PassiveIdentitySniffer::new_inactive();
         let persistent_state = crate::state::PersistentState::default();
         let mut scope = ScopeManager::default();
-        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, 24) {
+        let prefix = u32::from(iface.netmask).count_ones() as u8;
+        let prefix = if prefix > 0 && prefix <= 32 {
+            prefix
+        } else {
+            24
+        };
+        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
             scope.add_cidr_direct(local_cidr);
         }
         let router_registry = Arc::new(RouterRegistry::new(iface.gateway));
@@ -814,7 +820,15 @@ impl RustrictCli {
                 }
                 // Ensure persistent block is continuously enforced only if forwarding is verified
                 if existing.persistent_block && forwarding_ok {
-                    if let HostStatus::Blocked(dir) = existing.status {
+                    let dir = match existing.status {
+                        HostStatus::Blocked(dir) => Some(dir),
+                        HostStatus::PersistedInactive(dir) => {
+                            existing.status = HostStatus::Blocked(dir);
+                            Some(dir)
+                        }
+                        _ => None,
+                    };
+                    if let Some(dir) = dir {
                         let _ = self.spoofer.add(existing.clone());
                         self.limiter.block(existing.ip, dir);
                     }

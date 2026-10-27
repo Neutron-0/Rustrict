@@ -23,25 +23,10 @@ pub fn validate_restored_target(
     params: &RestorationNetworkParams,
     scope: &ScopeManager,
 ) -> Result<MacAddress, String> {
-    // 1. Address syntax & unicast validity
-    if ip.is_unspecified() {
-        return Err("Unspecified IP 0.0.0.0 is not a valid target".into());
-    }
-    if ip.is_loopback() {
-        return Err(format!("Loopback IP {} is invalid for LAN enforcement", ip));
-    }
-    if ip.is_broadcast() {
-        return Err(format!(
-            "Broadcast IP {} cannot be an enforcement target",
-            ip
-        ));
-    }
-    if ip.is_multicast() {
-        return Err(format!(
-            "Multicast IP {} cannot be an enforcement target",
-            ip
-        ));
-    }
+    // 1. MAC address syntax parsing
+    let mac: MacAddress = mac_str
+        .parse()
+        .map_err(|e| format!("Malformed MAC address '{}': {}", mac_str, e))?;
 
     // 2. Self and Gateway exclusion checks
     if *ip == params.iface_ip {
@@ -54,24 +39,6 @@ pub fn validate_restored_target(
         return Err(format!(
             "Default gateway IP {} cannot be an enforcement target",
             ip
-        ));
-    }
-
-    // 3. MAC address syntax & unicast validity
-    let mac: MacAddress = mac_str
-        .parse()
-        .map_err(|e| format!("Malformed MAC address '{}': {}", mac_str, e))?;
-
-    if mac.is_zero() {
-        return Err("Zero MAC 00:00:00:00:00:00 is not routable".into());
-    }
-    if mac.is_broadcast() {
-        return Err("Broadcast MAC FF:FF:FF:FF:FF:FF cannot be an enforcement target".into());
-    }
-    if mac.0[0] & 1 != 0 {
-        return Err(format!(
-            "Multicast MAC {} cannot be an enforcement target",
-            mac
         ));
     }
     if mac == params.iface_mac {
@@ -87,7 +54,9 @@ pub fn validate_restored_target(
         ));
     }
 
-    // 4. Scope manager boundaries and explicit exclusions
+    // 3. Delegate to shared target validation rule (checks unspecified, loopback,
+    // broadcast, multicast, zero/broadcast/multicast MAC, explicit exclusions,
+    // subnet network and directed broadcast addresses, and strict mode boundaries).
     scope
         .validate_target(ip, Some(&mac))
         .map_err(|e| format!("Scope violation: {}", e))?;
