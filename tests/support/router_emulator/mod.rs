@@ -110,6 +110,9 @@ impl RouterEmulator {
             while !s_flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _peer)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                         let reqs = s_reqs.clone();
                         let state = s_state.clone();
                         let fail = s_fail.clone();
@@ -455,13 +458,6 @@ impl RouterEmulator {
 
         let _ = stream.flush();
         let _ = stream.shutdown(std::net::Shutdown::Write);
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-        let mut drain = [0u8; 512];
-        while let Ok(n) = stream.read(&mut drain) {
-            if n == 0 {
-                break;
-            }
-        }
     }
 
     fn is_mutation(path: &str, method: &str, soap_action: &str, body_raw: &str) -> bool {
