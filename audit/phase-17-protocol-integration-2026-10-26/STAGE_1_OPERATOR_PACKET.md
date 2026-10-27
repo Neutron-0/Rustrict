@@ -1,12 +1,12 @@
 # Rustrict Phase 17 — Stage 1 Operator Runbook & Lab Safety Packet
 
-**Document Version:** 1.6.0
-**Date:** 2026-10-27 (Phase 19.1–19.3 Router-Lab Isolation Baseline)
-**Audience:** Physical Router Test Operators, Network Test Engineers, Safety Verifiers
+**Document Version:** 1.7.0  
+**Date:** 2026-10-27 (Phase 19.4 Zero-Probe Router-Lab Baseline)  
+**Audience:** Physical Router Test Operators, Network Test Engineers, Safety Verifiers  
 **Target Codebase Revision:**
+- **Phase 19.4 Zero-Probe Router-Lab Implementation Commit:** `e3fc5e07b18ab108160d2407022f754b26198864` (341 tests across 30 test binaries, 100% passing)
 - **Phase 19.1–19.3 Implementation Commit:** `326516b4894e091635aac6600daa99180c5e67c2`
-- **Phase 18.5–19.0 Verified Code Baseline:** `10dd09706d2796ebc62b34354719485a4edb92eb`
-- **Phase 18.5–19.0 Verified Docs Baseline:** `b39578b77ee0aee90d56eeebec5048ce4c653ff9`
+- **Phase 19.1–19.3 Documentation Commit:** `b173f0bc1ad1959cb3e6c55ea0b46ce1e75348f8`
 
 ---
 
@@ -19,6 +19,7 @@ Stage 1 is the **first physical connection test** between the Rustrict managemen
 >
 > Operators MUST invoke Rustrict using `--router-lab` mode (`rustrict --router-lab`).
 > In this mode:
+> - **Zero-Probe Startup**: Router-lab startup uses a dedicated read-only interface discovery path. It performs **NO** automatic gateway ARP requests (`SendARP`), **NO** ICMP echo probes (`ping`), and **NO** active subnet discovery probes before the operator explicitly connects to an intended test router. If the gateway MAC is absent from local passive OS cache, it remains explicitly unresolved (`00:00:00:00:00:00`). Zero unsolicited network packets are emitted towards the gateway during startup.
 > - Administrator privileges are NOT required (operates safely as standard user).
 > - Raw Layer 2 injection sender (`pcap_open_live`) and promiscuous sniffer threads are NOT initialized.
 > - Kernel packet filtering (`WinDivert`) is NOT opened.
@@ -38,7 +39,8 @@ Stage 1 is the **first physical connection test** between the Rustrict managemen
 6. **Persistent Enforcement Precondition & Fail-Closed Safety**:
    - Before launching Stage 1, verify that `%ProgramData%\Rustrict\rustrict_state.json` contains no unmanaged, stale, or conflicting persisted blocks.
    - In router-lab mode, any saved persistent blocks are loaded strictly as inactive inventory without driver activation or forwarding manipulation.
-7. **Zero Policy Mutation Verbs in Stage 1**: Cancellation gates and confirmation flows are verified in automated loopback/mock unit tests (`test_router_lab_isolation.rs` and `test_unified_admin.rs`). Operators MUST NOT invoke `router pause` on physical hardware during Stage 1.
+7. **Zero Policy Mutation Verbs in Stage 1**: Cancellation gates and confirmation flows are verified in automated synthetic/loopback unit tests (`test_router_lab_isolation.rs` and `test_unified_admin.rs`). Operators MUST NOT invoke `router pause` on physical hardware during Stage 1.
+8. **Explicit Provider Endpoint Required**: Router-lab mode never auto-connects to the local default gateway. Outbound network requests occur strictly after the operator issues an explicit `router connect <provider> <endpoint>` command.
 
 ---
 
@@ -313,7 +315,7 @@ Provider ID Selected:     [ ] openwrt-http  [ ] openwrt-ssh  [ ] mikrotik-rest
    [ ] Out-of-band management console open and verified functional
 
 3. Read-Only Execution Checklist:
-   [ ] Launched with --router-lab (verified zero raw frame driver & forwarding mutations)
+   [ ] Launched with --router-lab (verified zero startup gateway probes, zero raw frame driver & forwarding mutations)
    [ ] Wireshark PCAP capture initiated (Capture filename: __________________)
    [ ] 'router providers' output confirmed (mock provider blocked in router-lab mode)
    [ ] 'router connect' authenticated successfully with real router provider

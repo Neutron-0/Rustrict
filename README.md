@@ -866,11 +866,14 @@ cd rustrict
 # Build optimized release binary
 cargo build --release
 
-# Run the automated test suite (331 tests across 29 binaries)
+# Run the automated test suite (341 tests across 30 binaries)
 cargo test
 
-# Launch (Administrator terminal required)
+# Launch in Standard Mode (Administrator terminal required)
 .\target\release\rustrict.exe
+
+# Launch in Read-Only Router-Lab Mode (Standard user supported; zero startup gateway probes)
+.\target\release\rustrict.exe --router-lab
 ```
 
 The compiled binary is located at `target\release\rustrict.exe`. WinDivert drivers are automatically copied to the release directory by the build script.
@@ -974,11 +977,11 @@ rustrict/
 
 ## Test Suite
 
-Rustrict includes **331 automated tests** across 28 test binaries covering all critical subsystems:
+Rustrict includes **341 automated tests** across 29 test binaries covering all critical subsystems:
 
 | Test File | Tests | Coverage |
 | :--- | :---: | :--- |
-| `src/lib.rs` (unittests) | 43 | Bounded process execution and child process reaping, concurrent pipe draining, secret buffer zeroization, fail-closed persistent block restoration, observable forwarding cleanup with verification, baseline preservation, terminating error cmdlet handling, and robust NIC health telemetry (zero false-normal, monotonic decrease reset detection, missing counter invalidation, ambiguous matching) |
+| `src/lib.rs` (unittests) | 46 | Bounded process execution and child process reaping, concurrent pipe draining, secret buffer zeroization, fail-closed persistent block restoration, observable forwarding cleanup with verification, baseline preservation, terminating error cmdlet handling, and robust NIC health telemetry (zero false-normal, monotonic decrease reset detection, missing counter invalidation, ambiguous matching) |
 | `test_assessment.rs` | 5 | CIDR normalization, ScopeManager strict authorization and exclusions, port string parsing, FaultProfile jitter/drop simulation, SARIF v2.1.0/JSON/Markdown report generation |
 | `test_avm_admin.rs` | 20 | AVM FRITZ!Box TR-064 SOAP admin, Digest auth, HostFilter WAN pause/resume, multi-target policies, and TLS certificate error rejection |
 | `test_cli_confirmation.rs` | 10 | Operator mutation confirmation workflows, auto-confirm `--yes` flag, cancellation, and evidence validation |
@@ -1006,7 +1009,8 @@ Rustrict includes **331 automated tests** across 28 test binaries covering all c
 | `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
 | `test_batched_readiness.rs` | 6 | Centralized target admission contract (mandatory controller/gateway exclusions, concrete boundary enforcement), untrusted saved scope sanitization, fail-closed without packet injection driver, multi-target atomic rollback, and read-only router-lab mode |
 | `test_router_lab_isolation.rs` | 16 | Strict router-lab allowlist enforcement, default-deny rejection of destructive/mutating commands, privilege decoupling (standard user support), clean EOF shutdown, fake/mock provider safety, and source counter proof of 0 side effects |
-| **Total** | **331** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
+| `test_router_lab_zero_probe.rs` | 10 | Zero-probe router-lab startup, passive local OS route/IP/adapter resolution, unresolved gateway MAC handling, zero SendARP/ICMP pings, enforcement-driver loading bypass, and clean shutdown |
+| **Total** | **341** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
 
 Run the full suite:
 ```powershell
