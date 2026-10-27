@@ -28,6 +28,34 @@ pub fn enable_ansi_support() {
     }
 }
 
+pub static SEND_ARP_PROBE_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static ICMP_PING_PROBE_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static DRIVER_CHECK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn send_arp_probe_count() -> u64 {
+    SEND_ARP_PROBE_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn icmp_ping_probe_count() -> u64 {
+    ICMP_PING_PROBE_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn driver_check_count() -> u64 {
+    DRIVER_CHECK_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn reset_probe_counts() {
+    SEND_ARP_PROBE_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    ICMP_PING_PROBE_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    DRIVER_CHECK_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn reset_driver_check_count() {
+    DRIVER_CHECK_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub fn is_privileged() -> bool {
     unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
 }
@@ -41,7 +69,21 @@ pub struct EnvironmentStatus {
     pub windivert_details: String,
 }
 
+pub fn check_router_lab_environment() -> EnvironmentStatus {
+    let is_admin = is_privileged();
+    EnvironmentStatus {
+        is_admin,
+        npcap_available: false,
+        windivert_available: false,
+        npcap_details: "Driver checks skipped in router-lab mode (no packet injection used)"
+            .to_string(),
+        windivert_details: "Driver checks skipped in router-lab mode (no packet filtering used)"
+            .to_string(),
+    }
+}
+
 pub fn check_environment() -> EnvironmentStatus {
+    DRIVER_CHECK_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let is_admin = is_privileged();
 
     // Check Npcap (wpcap.dll)
@@ -571,6 +613,7 @@ pub fn disable_ip_forwarding() -> Result<ForwardingCleanupReport, String> {
 
 /// SendARP sends an ARP request directly through the Windows kernel network stack
 pub fn send_arp(ip: Ipv4Addr) -> Option<MacAddress> {
+    SEND_ARP_PROBE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let ip_octets = ip.octets();
     let dest_ip = u32::from_ne_bytes(ip_octets);
     let mut mac_bytes = [0u8; 6];
@@ -716,6 +759,7 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
         }
     }
     if gateway_mac == MacAddress::ZERO {
+        ICMP_PING_PROBE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Attempt an active ICMP echo to force Windows ARP resolution
         let _ = Command::new("ping")
             .args(["-n", "1", "-w", "500", &gateway_ip.to_string()])
@@ -774,6 +818,197 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
         mac: local_mac,
         device_path,
     })
+}
+
+/// Passive ARP cache query provider trait to allow mock-testing and hermetic discovery.
+pub trait ArpCacheLookup: Send + Sync {
+    fn lookup_cached_mac(&self, ip: Ipv4Addr) -> Option<MacAddress>;
+}
+
+/// Production implementation reading passive Windows kernel ARP table.
+pub struct SystemArpCache;
+
+impl ArpCacheLookup for SystemArpCache {
+    fn lookup_cached_mac(&self, ip: Ipv4Addr) -> Option<MacAddress> {
+        for (cached_ip, cached_mac) in get_arp_cache() {
+            if cached_ip == ip && !cached_mac.is_zero() && !cached_mac.is_broadcast() {
+                return Some(cached_mac);
+            }
+        }
+        None
+    }
+}
+
+/// Discovers the active default IPv4 interface using only passive local OS queries.
+///
+/// Guaranteed ZERO active network probes:
+/// - Does NOT call SendARP.
+/// - Does NOT call ping (ICMP echo).
+/// - Does NOT send any network frames.
+/// - If the default gateway MAC is absent from local passive ARP cache, it remains
+///   `MacAddress::ZERO` (explicitly unresolved).
+pub fn get_default_interface_read_only_with<R: CommandRunner, C: ArpCacheLookup>(
+    runner: &R,
+    arp_cache: &C,
+) -> Result<NetworkInterface, String> {
+    // 1. Query route sorted by RouteMetric and InterfaceMetric to pick lowest metric active route
+    let route_cmd = r#"Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object -Property RouteMetric, InterfaceMetric | Select-Object -First 1 -Property InterfaceAlias, NextHop, InterfaceMetric | ForEach-Object { "$($_.InterfaceAlias)|$($_.NextHop)" }"#;
+    let output = runner
+        .run_powershell(route_cmd)
+        .map_err(|e| format!("Failed to query route: {}", e))?;
+
+    let line = output.trim();
+    if line.is_empty() || !line.contains('|') {
+        return Err("No default route (gateway) found on this machine.".into());
+    }
+
+    let parts: Vec<&str> = line.split('|').collect();
+    let iface_name = parts[0].trim().to_string();
+    if iface_name.is_empty() {
+        return Err("No default route (gateway) found on this machine.".into());
+    }
+    let gateway_ip: Ipv4Addr = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| format!("Invalid gateway IP: {}", parts[1]))?;
+
+    let safe_iface_name = iface_name.replace('\'', "''");
+
+    // 2. Query IP address and netmask for this interface
+    let ip_cmd = format!(
+        r#"Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4 | Select-Object -First 1 | ForEach-Object {{"$($_.IPAddress)|$($_.PrefixLength)"}}"#,
+        safe_iface_name
+    );
+    let ip_output = runner
+        .run_powershell(&ip_cmd)
+        .map_err(|e| format!("Failed to query IP address: {}", e))?;
+
+    let ip_line = ip_output.trim();
+    let ip_parts: Vec<&str> = ip_line.split('|').collect();
+    if ip_parts.len() < 2 || ip_parts[0].trim().is_empty() {
+        return Err(format!(
+            "Could not query IP address for interface {}",
+            iface_name
+        ));
+    }
+
+    let local_ip: Ipv4Addr = ip_parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| format!("Invalid local IP: {}", ip_parts[0]))?;
+
+    let prefix_len: u8 = ip_parts[1].trim().parse().map_err(|_| {
+        format!(
+            "Invalid prefix length for interface {}: {}",
+            iface_name, ip_parts[1]
+        )
+    })?;
+    if prefix_len > 32 {
+        return Err(format!(
+            "Invalid prefix length for interface {}: {}",
+            iface_name, prefix_len
+        ));
+    }
+
+    let mask_u32 = if prefix_len == 0 {
+        0
+    } else {
+        !((1u32 << (32 - prefix_len)) - 1)
+    };
+    let netmask = Ipv4Addr::from(mask_u32);
+
+    // 3. Query MAC address and GUID of local adapter
+    let adapter_cmd = format!(
+        r#"Get-NetAdapter -Name '{}' | Select-Object -First 1 | ForEach-Object {{ "$($_.MacAddress)|$($_.InterfaceGuid)" }}"#,
+        safe_iface_name
+    );
+    let adapter_output = runner
+        .run_powershell(&adapter_cmd)
+        .map_err(|e| format!("Failed to query adapter info: {}", e))?;
+
+    let adapter_parts: Vec<&str> = adapter_output.trim().split('|').collect();
+    let mac_str = adapter_parts.first().unwrap_or(&"").replace('-', ":");
+    let local_mac = mac_str.parse::<MacAddress>().unwrap_or(MacAddress::ZERO);
+
+    if local_mac == MacAddress::ZERO {
+        return Err(format!(
+            "Failed to query local MAC address for interface '{}'.",
+            iface_name
+        ));
+    }
+
+    let guid_str = adapter_parts.get(1).unwrap_or(&"").trim();
+    let device_path = if !guid_str.is_empty() {
+        format!(r"\Device\NPF_{}", guid_str)
+    } else {
+        iface_name.clone()
+    };
+
+    // 4. Resolve Gateway MAC STRICTLY PASSIVELY:
+    // Query passive local ARP cache ONLY. Do NOT call send_arp, ping, or any active probe.
+    // If not found, gateway_mac remains MacAddress::ZERO (explicitly unresolved).
+    let gateway_mac = arp_cache
+        .lookup_cached_mac(gateway_ip)
+        .unwrap_or(MacAddress::ZERO);
+
+    Ok(NetworkInterface {
+        name: iface_name.clone(),
+        description: iface_name,
+        ip: local_ip,
+        netmask,
+        gateway: gateway_ip,
+        gateway_mac,
+        mac: local_mac,
+        device_path,
+    })
+}
+
+/// Standard production entrypoint for zero-probe default interface resolution in router-lab mode.
+pub fn get_default_interface_read_only() -> Result<NetworkInterface, String> {
+    get_default_interface_read_only_with(&SystemCommandRunner, &SystemArpCache)
+}
+
+/// Trait abstraction for pluggable interface resolution.
+pub trait InterfaceResolver: Send + Sync {
+    fn resolve_interface(&self) -> Result<NetworkInterface, String>;
+}
+
+/// Read-only interface resolver holding injected runner and ARP cache dependencies.
+pub struct ReadOnlyInterfaceResolver<'a, R: CommandRunner, C: ArpCacheLookup> {
+    runner: &'a R,
+    arp_cache: &'a C,
+}
+
+impl<'a, R: CommandRunner, C: ArpCacheLookup> ReadOnlyInterfaceResolver<'a, R, C> {
+    pub fn new(runner: &'a R, arp_cache: &'a C) -> Self {
+        Self { runner, arp_cache }
+    }
+}
+
+impl<'a, R: CommandRunner, C: ArpCacheLookup> InterfaceResolver
+    for ReadOnlyInterfaceResolver<'a, R, C>
+{
+    fn resolve_interface(&self) -> Result<NetworkInterface, String> {
+        get_default_interface_read_only_with(self.runner, self.arp_cache)
+    }
+}
+
+/// Production system read-only interface resolver.
+pub struct SystemReadOnlyInterfaceResolver;
+
+impl InterfaceResolver for SystemReadOnlyInterfaceResolver {
+    fn resolve_interface(&self) -> Result<NetworkInterface, String> {
+        get_default_interface_read_only()
+    }
+}
+
+/// Standard active interface resolver used for normal operation mode.
+pub struct ActiveInterfaceResolver;
+
+impl InterfaceResolver for ActiveInterfaceResolver {
+    fn resolve_interface(&self) -> Result<NetworkInterface, String> {
+        get_default_interface()
+    }
 }
 
 #[cfg(test)]

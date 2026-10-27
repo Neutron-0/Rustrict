@@ -25,7 +25,11 @@ fn main() {
     let is_router_lab = args.iter().any(|a| a == "--router-lab");
 
     // 1. Run Pre-flight Environment Diagnostics
-    let env_status = platform::check_environment();
+    let env_status = if is_router_lab {
+        platform::check_router_lab_environment()
+    } else {
+        platform::check_environment()
+    };
     if !is_router_lab && !env_status.is_admin {
         eprintln!(
             "{} Please run as Administrator (open PowerShell or Command Prompt as Administrator).",
@@ -46,7 +50,7 @@ fn main() {
             );
         }
         println!(
-            "     Local packet injection (Npcap/WinDivert) and OS forwarding mutations are disabled.\n"
+            "     Local packet injection (Npcap/WinDivert), active probes, and OS forwarding mutations are disabled.\n"
         );
     } else {
         if !env_status.npcap_available {
@@ -66,37 +70,71 @@ fn main() {
     }
 
     // 2. Discover default network interface and gateway
-    let iface = match platform::get_default_interface() {
-        Ok(iface) => iface,
-        Err(e) => {
-            eprintln!(
-                "{} Failed to resolve network interface: {}",
-                "[ERR]".bright_red().bold(),
-                e
-            );
-            std::process::exit(1);
-        }
-    };
-
-    println!(
-        "{} Resolved default interface: {}",
-        "OK".bright_green().bold(),
-        iface.name.bright_cyan().bold()
-    );
-    println!(
-        "     IP: {}  |  Netmask: {}  |  Gateway: {} ({})\n",
-        iface.ip.to_string().bright_white(),
-        iface.netmask.to_string().bright_white(),
-        iface.gateway.to_string().bright_white(),
-        iface.gateway_mac.to_string().bright_white()
-    );
-
-    // 3. Start interactive REPL
     let mut app = if is_router_lab {
-        RustrictCli::new_router_lab(iface)
+        let resolver = platform::SystemReadOnlyInterfaceResolver;
+        match RustrictCli::bootstrap_router_lab(&resolver) {
+            Ok(cli) => {
+                let iface = cli.iface();
+                println!(
+                    "{} Resolved default interface (read-only): {}",
+                    "OK".bright_green().bold(),
+                    iface.name.bright_cyan().bold()
+                );
+                let gateway_mac_str = if iface.gateway_mac.is_zero() {
+                    "unresolved (read-only mode; zero network probes)"
+                        .yellow()
+                        .to_string()
+                } else {
+                    format!("{} (cached)", iface.gateway_mac)
+                };
+                println!(
+                    "     IP: {}  |  Netmask: {}  |  Gateway: {} ({})\n",
+                    iface.ip.to_string().bright_white(),
+                    iface.netmask.to_string().bright_white(),
+                    iface.gateway.to_string().bright_white(),
+                    gateway_mac_str
+                );
+                cli
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} Failed to resolve network interface in read-only router-lab mode: {}",
+                    "[ERR]".bright_red().bold(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        }
     } else {
+        let iface = match platform::get_default_interface() {
+            Ok(iface) => iface,
+            Err(e) => {
+                eprintln!(
+                    "{} Failed to resolve network interface: {}",
+                    "[ERR]".bright_red().bold(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        };
+
+        println!(
+            "{} Resolved default interface: {}",
+            "OK".bright_green().bold(),
+            iface.name.bright_cyan().bold()
+        );
+        println!(
+            "     IP: {}  |  Netmask: {}  |  Gateway: {} ({})\n",
+            iface.ip.to_string().bright_white(),
+            iface.netmask.to_string().bright_white(),
+            iface.gateway.to_string().bright_white(),
+            iface.gateway_mac.to_string().bright_white()
+        );
+
         RustrictCli::new(iface)
     };
+
+    // 3. Start interactive REPL
     app.run_interactive();
 
     // 4. Cleanup on normal exit

@@ -301,6 +301,15 @@ impl RustrictCli {
         }
     }
 
+    /// Bootstraps a router lab CLI instance using an injected InterfaceResolver.
+    /// This guarantees that interface resolution performs zero active network probes (no SendARP, no ICMP pings).
+    pub fn bootstrap_router_lab<I: crate::platform::InterfaceResolver>(
+        resolver: &I,
+    ) -> Result<Self, String> {
+        let iface = resolver.resolve_interface()?;
+        Ok(Self::new_router_lab(iface))
+    }
+
     pub fn new_for_testing() -> Self {
         let iface = NetworkInterface {
             name: "test_iface".into(),
@@ -401,6 +410,10 @@ impl RustrictCli {
 
     pub fn iface(&self) -> &NetworkInterface {
         &self.iface
+    }
+
+    pub fn is_router_lab(&self) -> bool {
+        self.is_router_lab
     }
 
     pub fn scope(&self) -> &ScopeManager {
