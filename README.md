@@ -866,7 +866,7 @@ cd rustrict
 # Build optimized release binary
 cargo build --release
 
-# Run the automated test suite (282 tests across 27 binaries)
+# Run the automated test suite (295 tests across 27 binaries)
 cargo test
 
 # Launch (Administrator terminal required)
@@ -974,11 +974,11 @@ rustrict/
 
 ## Test Suite
 
-Rustrict includes **282 automated tests** across 27 test binaries covering all critical subsystems:
+Rustrict includes **295 automated tests** across 27 test binaries covering all critical subsystems:
 
 | Test File | Tests | Coverage |
 | :--- | :---: | :--- |
-| `src/lib.rs` (unittests) | 23 | Bounded process execution and child process reaping, concurrent pipe draining, secret buffer zeroization, safe forwarding lifecycle, and robust NIC health telemetry (zero false-normal, monotonic decrease reset detection, missing counter invalidation, ambiguous matching) |
+| `src/lib.rs` (unittests) | 34 | Bounded process execution and child process reaping, concurrent pipe draining, secret buffer zeroization, fail-closed persistent block restoration, observable forwarding cleanup with verification, and robust NIC health telemetry (zero false-normal, monotonic decrease reset detection, missing counter invalidation, ambiguous matching) |
 | `test_assessment.rs` | 5 | CIDR normalization, ScopeManager strict authorization and exclusions, port string parsing, FaultProfile jitter/drop simulation, SARIF v2.1.0/JSON/Markdown report generation |
 | `test_avm_admin.rs` | 20 | AVM FRITZ!Box TR-064 SOAP admin, Digest auth, HostFilter WAN pause/resume, multi-target policies, and TLS certificate error rejection |
 | `test_cli_confirmation.rs` | 10 | Operator mutation confirmation workflows, auto-confirm `--yes` flag, cancellation, and evidence validation |
@@ -995,7 +995,7 @@ Rustrict includes **282 automated tests** across 27 test binaries covering all c
 | `test_provider_contracts.rs` | 6 | Provider contract compliance, normalized capabilities, read-only guarantees, and structured diagnostic export |
 | `test_reliability.rs` | 9 | DPAPI credential protection, memory hygiene, multi-instance file lock synchronization, and corrupted state recovery |
 | `test_router_admin.rs` | 12 | Router administration baseline, mock provider auth, timeout simulation, scope exclusion enforcement, and clean disconnect |
-| `test_safe_networking.rs` | 8 | Hermetic scanner test seams (0 ARP probes), safe scoped IP forwarding lifecycle, LinkSpeed parsing, NIC health metrics, fail-closed forwarding aborts, and standalone hermetic CLI dispatch |
+| `test_safe_networking.rs` | 10 | Hermetic scanner test seams (0 ARP probes), safe scoped IP forwarding lifecycle, structured forwarding cleanup reporting and retryability, fail-closed persistent restoration on forwarding failure, LinkSpeed parsing, NIC health metrics, fail-closed forwarding aborts, and standalone hermetic CLI dispatch |
 | `test_smb.rs` | 2 | SMB2 NTLMSSP Type 2 challenge AV_PAIR parsing (MsvAvDnsComputerName / MsvAvNbComputerName) and odd-trailing-byte robustness |
 | `test_ssh_admin.rs` | 17 | OpenWrt SSH provider, key auth, command injection prevention, non-root user rejection, and autonomous watchdog lifecycle |
 | `test_target_resolution.rs` | 12 | Target resolution by ID, by IP, mixed lists, `all` keyword, deduplication, unknown ID/IP errors, ambiguous records, non-destructive upsert, fresh rescan pruning with blocked device preservation, PersistentState roundtrip |
@@ -1004,7 +1004,7 @@ Rustrict includes **282 automated tests** across 27 test binaries covering all c
 | `test_unified_admin.rs` | 10 | Unified RouterRegistry provider dispatch, no silent fallback to ARP spoofing, lockout prevention, and preflight validation |
 | `test_verification.rs` | 5 | Blackhole MAC properties (unicast, locally administered), TokenBucket rate shaping/refill, ScopeManager strict mode, RFC 3021 /31 and /32 subnet clamping |
 | `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
-| **Total** | **282** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
+| **Total** | **295** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
 
 Run the full suite:
 ```powershell

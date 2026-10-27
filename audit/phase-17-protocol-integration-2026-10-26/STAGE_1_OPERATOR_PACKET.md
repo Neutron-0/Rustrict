@@ -1,9 +1,9 @@
 # Rustrict Phase 17 — Stage 1 Operator Runbook & Lab Safety Packet
 
-**Document Version:** 1.2.0
-**Date:** 2026-10-27 (Phase 17.1 Restored & Reconciled Baseline)
+**Document Version:** 1.3.0
+**Date:** 2026-10-27 (Phase 18.3 Reconciled Baseline)
 **Audience:** Physical Router Test Operators, Network Test Engineers, Safety Verifiers
-**Target Codebase Revision:** Phase 17.1 (`ac1c4e9`)
+**Target Codebase Revision:** Phase 18.3 (`bd06f1c` / `HEAD`)
 
 ---
 
@@ -28,6 +28,10 @@ Stage 1 is the **first physical connection test** between the Rustrict managemen
    - An active unconfirmed record is persisted locally to prevent duplicate conflicting actions.
    - Follow-up mutations overlapping with any active unconfirmed (`Unknown`) or `PartialFailure` scope are **strictly blocked** by the execution engine until manually verified or reconciled out-of-band by the operator.
 6. **No Mock Mode Equivalence**: Mock mode (`router connect mock`) is strictly an in-memory development harness and must never be recorded as live router hardware validation.
+7. **Persistent Enforcement Precondition & Fail-Closed Safety (Phase 18.3)**:
+   - Before launching Stage 1, verify that `%ProgramData%\Rustrict\rustrict_state.json` contains no unmanaged, stale, or conflicting persisted blocks from previous testing.
+   - Rustrict enforces fail-closed restoration at startup: if scoped forwarding or packet injection dependencies fail, persisted blocks are marked `Persisted [Inactive]` in memory and are **never** added to the spoofer or limiter. Saved records on disk are strictly preserved without deletion or overwrite.
+   - On shutdown or Ctrl+C, Windows IP forwarding cleanup is rigorously queried and verified; failures are reported to the operator with exit code 1. Zero orphaned forwarding states or active worker threads are permitted prior to Stage 1.
 
 ---
 
@@ -47,12 +51,28 @@ Stage 1 is the **first physical connection test** between the Rustrict managemen
               IP: 192.168.1.50 / 24, MAC: 00:11:22:33:44:50
 ```
 
-### Windows Single-Instance Verification
+### Windows Single-Instance & Clean State Verification
 Before launching Rustrict, ensure that no prior instances or competing network tools are holding handles:
 ```powershell
 Get-Process rustrict -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, Path
 ```
 If any existing `rustrict` processes are running, terminate them cleanly before starting. Rustrict acquires a cross-process lock (`rustrict-policy-store.json.lock`) to serialize persistent state operations, but running a single interactive shell is required for deterministic diagnostics.
+
+Verify the local persistent state file:
+```powershell
+# Inspect state directory
+$StateFile = "$env:ProgramData\Rustrict\rustrict_state.json"
+if (Test-Path $StateFile) {
+    Get-Content $StateFile | ConvertFrom-Json
+}
+```
+*Prerequisite Requirement*:
+1. Confirm that no active or conflicting persistent blocks (`blocked_hosts`) from prior testing remain in `rustrict_state.json`. If present, inspect them or archive the file so the router test starts from a clean baseline.
+2. Confirm zero background spoofer or limiter worker threads exist prior to Stage 1.
+3. Verify that Windows IP routing / packet forwarding is in its default baseline state:
+```powershell
+Get-NetIPInterface | Select-Object ifIndex, InterfaceAlias, Forwarding
+```
 
 ### Pre-Connection Router Snapshots (Required Baseline)
 Before connecting Rustrict, capture raw router state via native out-of-band management tools:
@@ -185,8 +205,15 @@ rustrict> router refresh
 - Queries live router firewall rules to verify active policies against local store.
 - **Provider Limitation**: Providers that do not expose a queryable full-ruleset API cannot return third-party rules. Rustrict reconciles known tracked rules and marks untracked states accordingly.
 
-### Step 4: Validate Mutation Preflight & Confirmation Gates
-Verify that preflight inspection can be run dry without transmitting packets to the router:
+### Step 4: Validate Mutation Preflight & Confirmation Cancellation Gate (Strictly Read-Only)
+
+> [!CAUTION]
+> **Operator Confirmation Is Strictly Prohibited in Stage 1**:
+> Step 4 tests that the interactive confirmation gate safely intercepts mutation requests before any network payload is constructed or dispatched.
+> The operator **MUST reject the prompt with 'N' (or Enter)**. Answering 'yes' in Stage 1 is a severe protocol violation.
+> Zero mutating packets may be emitted onto the physical network.
+
+1. Verify that preflight inspection can be run dry without transmitting packets to the router:
 ```text
 rustrict> router preview pause 192.168.1.50
 ```
@@ -194,7 +221,7 @@ rustrict> router preview pause 192.168.1.50
 - Preflight report details provider, target scope, duration, persistence, recovery mechanism, and risk assessment.
 - Wireshark trace confirms **zero** network packets transmitted to the router during preview.
 
-Test interactive cancellation safety:
+2. Test interactive cancellation safety gate:
 ```text
 rustrict> router pause 192.168.1.50
 [PREFLIGHT] Preflight Inspection for Router Firewall Mutation:
@@ -208,6 +235,7 @@ rustrict> router pause 192.168.1.50
 - Prompt rejected by operator (`N` or Enter).
 - CLI reports cancellation and zero router mutations performed.
 - Wireshark confirms **zero** mutating packets on the wire.
+- Confirm cancellation gate returned cleanly before proceeding to evidence export.
 
 ### Step 5: Export and Offline Validate Diagnostic Evidence Bundle
 Export the read-only operational bundle:

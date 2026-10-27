@@ -61,6 +61,13 @@ The following risks remain active and cannot be resolved solely through syntheti
 - Credentials in memory use zeroizing memory wrappers (`ProtectedCredentials`), and temporary curl argument files use RAII auto-deletion (`AutoCleanFile`).
 - However, on modern flash storage (SSDs) and Windows virtual memory paging files, physical sector overwrites cannot be guaranteed at the hardware level due to wear-leveling algorithms.
 
+### 2.9 Persistent Enforcement Startup Preconditions and Forwarding Inconsistencies (Phase 18.3 Addressed)
+- Prior to Phase 18.3, restoring persisted blocked hosts at startup could silently fail to enable IP forwarding, leaving targets in an active blackhole state without transit capability.
+- In Phase 18.3, fail-closed restoration guarantees that targets are validated against IP/MAC/self/gateway rules and preconditions (forwarding enabled, packet injection ready) before any spoofer or limiter worker is invoked.
+- If forwarding fails, targets are held in-memory as `Persisted [Inactive]` and saved records on disk are strictly preserved without deletion or overwrite.
+- Cleanup of IP forwarding on process exit and Ctrl+C is now queried and verified, returning a structured report and exiting 1 on failure to avoid silent interface corruption.
+- *Remaining Operational Risk*: If an external tool, group policy, or driver forcibly overrides Windows interface forwarding during active runtime, Rustrict cannot prevent external operating system alterations until the next diagnostic query or state reconciliation.
+
 ---
 
 ## 3. Mandatory Pre-Conditions for Physical Router Testing (Stage 1)
