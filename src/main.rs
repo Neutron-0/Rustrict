@@ -26,7 +26,7 @@ fn main() {
 
     // 1. Run Pre-flight Environment Diagnostics
     let env_status = platform::check_environment();
-    if !env_status.is_admin {
+    if !is_router_lab && !env_status.is_admin {
         eprintln!(
             "{} Please run as Administrator (open PowerShell or Command Prompt as Administrator).",
             "[ERR]".bright_red().bold()
@@ -39,6 +39,12 @@ fn main() {
             "{} Operating in READ-ONLY Router-Lab mode (--router-lab active).",
             "[MODE]".bright_cyan().bold()
         );
+        if !env_status.is_admin {
+            println!(
+                "{} Running with standard-user privileges (Administrator not required in router-lab mode).",
+                "[INFO]".cyan().bold()
+            );
+        }
         println!(
             "     Local packet injection (Npcap/WinDivert) and OS forwarding mutations are disabled.\n"
         );
@@ -94,20 +100,22 @@ fn main() {
     app.run_interactive();
 
     // 4. Cleanup on normal exit
-    let report = platform::cleanup_forwarding();
-    if !report.is_success() {
-        for (iface_name, err) in &report.failed_interfaces {
+    if !is_router_lab {
+        let report = platform::cleanup_forwarding();
+        if !report.is_success() {
+            for (iface_name, err) in &report.failed_interfaces {
+                eprintln!(
+                    "{} Failed to restore forwarding on interface '{}': {}",
+                    "[ERR]".bright_red().bold(),
+                    iface_name,
+                    err
+                );
+            }
             eprintln!(
-                "{} Failed to restore forwarding on interface '{}': {}",
-                "[ERR]".bright_red().bold(),
-                iface_name,
-                err
+                "{} Operator intervention required: Run 'Get-NetIPInterface -InterfaceAlias <name>' to verify/restore interface state.",
+                "[WARN]".yellow().bold()
             );
+            std::process::exit(1);
         }
-        eprintln!(
-            "{} Operator intervention required: Run 'Get-NetIPInterface -InterfaceAlias <name>' to verify/restore interface state.",
-            "[WARN]".yellow().bold()
-        );
-        std::process::exit(1);
     }
 }

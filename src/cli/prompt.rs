@@ -403,6 +403,14 @@ impl RustrictCli {
         &self.iface
     }
 
+    pub fn scope(&self) -> &ScopeManager {
+        &self.scope
+    }
+
+    pub fn spoofer(&self) -> &ArpSpoofer {
+        &self.spoofer
+    }
+
     pub fn set_spoofer(&mut self, spoofer: ArpSpoofer) {
         self.spoofer = spoofer;
     }
@@ -441,54 +449,170 @@ impl RustrictCli {
         self.sniffer.stop();
     }
 
+    /// Evaluates a command against the strict default-deny router-lab policy.
+    /// Returns Ok(()) if allowed, or Err(reason) if denied.
+    pub fn is_command_allowed_in_router_lab(&self, args: &[&str]) -> Result<(), String> {
+        if !self.is_router_lab {
+            return Ok(());
+        }
+
+        if args.is_empty() {
+            return Ok(());
+        }
+
+        let cmd = args[0].to_lowercase();
+        match cmd.as_str() {
+            "help" | "?" | "clear" | "cls" | "quit" | "exit" => Ok(()),
+            "hosts" => Ok(()),
+            "nic" | "adapter" => Ok(()),
+            "router" => {
+                if args.len() < 2 || args[1].eq_ignore_ascii_case("help") {
+                    return Ok(());
+                }
+                let sub = args[1].to_lowercase();
+                match sub.as_str() {
+                    "providers"
+                    | "capabilities"
+                    | "caps"
+                    | "status"
+                    | "diagnostics"
+                    | "diag"
+                    | "devices"
+                    | "clients"
+                    | "inventory"
+                    | "policies"
+                    | "policy"
+                    | "history"
+                    | "records"
+                    | "export-evidence"
+                    | "validate-evidence"
+                    | "validate"
+                    | "disconnect" => Ok(()),
+                    "export" => Ok(()),
+                    "preview" => Ok(()),
+                    "connect" => {
+                        // In router-lab mode, connecting to real providers is permitted,
+                        // but mock router provider is strictly rejected to prevent
+                        // recording simulated results as physical validation.
+                        if args.len() > 2 && args[2..].iter().any(|a| a.eq_ignore_ascii_case("mock")) {
+                            Err("Mock router provider is prohibited in router-lab mode. Connect to a real supported provider for hardware validation.".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    "pause" => Err("Command 'router pause' is blocked in router-lab mode: policy enforcement mutations are strictly prohibited.".to_string()),
+                    "resume" => Err("Command 'router resume' is blocked in router-lab mode: policy revocation mutations are strictly prohibited.".to_string()),
+                    "adjust" => Err("Command 'router adjust' is blocked in router-lab mode: policy adjustment mutations are strictly prohibited.".to_string()),
+                    "refresh" | "reconcile" => Err("Command 'router refresh' is blocked in router-lab mode: policy store reconciliation is prohibited.".to_string()),
+                    other => Err(format!(
+                        "Subcommand 'router {}' is not allowed in router-lab mode (default-deny policy).",
+                        other
+                    )),
+                }
+            }
+            "scan" => Err("Command 'scan' is blocked in router-lab mode: active network scanning is strictly prohibited.".to_string()),
+            "ports" => Err("Command 'ports' is blocked in router-lab mode: port scanning is strictly prohibited.".to_string()),
+            "audit" => Err("Command 'audit' is blocked in router-lab mode: active network auditing is strictly prohibited.".to_string()),
+            "add" => Err("Command 'add' is blocked in router-lab mode: manual target addition is prohibited.".to_string()),
+            "scope" => Err("Command 'scope' is blocked in router-lab mode: scope mutations are prohibited.".to_string()),
+            "free" => Err("Command 'free' is blocked in router-lab mode: local target modification is prohibited.".to_string()),
+            "block" => Err("Command 'block' is blocked in router-lab mode: local network enforcement is disabled.".to_string()),
+            "limit" => Err("Command 'limit' is blocked in router-lab mode: local traffic limiting is disabled.".to_string()),
+            "simulate" => Err("Command 'simulate' is blocked in router-lab mode: network simulation is disabled.".to_string()),
+            "export" => Err("Top-level 'export' is disabled in router-lab mode. Use 'router export-evidence' for read-only router evidence export.".to_string()),
+            other => Err(format!(
+                "Command '{}' is not allowed in router-lab mode (default-deny policy). Type 'help' for allowed read-only commands.",
+                other
+            )),
+        }
+    }
+
+    /// Dispatches a single command string.
+    /// Returns false if session should terminate (exit/quit), true to continue.
+    pub fn dispatch_command(&mut self, input: &str) -> bool {
+        let args: Vec<&str> = input.split_whitespace().collect();
+        if args.is_empty() {
+            return true;
+        }
+
+        if self.is_router_lab {
+            if let Err(err_msg) = self.is_command_allowed_in_router_lab(&args) {
+                println!("{} {}", "[ERR]".red().bold(), err_msg);
+                return true;
+            }
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "scan" => self.handle_scan(&args[1..]),
+            "hosts" => self.handle_hosts(),
+            "scope" => self.handle_scope(&args[1..]),
+            "ports" => self.handle_ports(&args[1..]),
+            "audit" => self.handle_audit(&args[1..]),
+            "simulate" => self.handle_simulate(&args[1..]),
+            "export" => self.handle_export(&args[1..]),
+            "limit" => self.handle_limit(&args[1..]),
+            "block" => self.handle_block(&args[1..]),
+            "free" => self.handle_free(&args[1..]),
+            "add" => self.handle_add(&args[1..]),
+            "router" => self.handle_router(&args[1..]),
+            "nic" | "adapter" => self.handle_nic(&args[1..]),
+            "clear" | "cls" => {
+                print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+                let _ = io::stdout().flush();
+            }
+            "help" | "?" => self.print_help(),
+            "quit" | "exit" => {
+                self.shutdown();
+                println!("Exiting rustrict. Active session stopped.");
+                return false;
+            }
+            cmd => println!("{}: command not found. Type 'help' for commands.", cmd),
+        }
+        true
+    }
+
     pub fn run_interactive(&mut self) {
         let stdin = io::stdin();
 
         loop {
             print!("{} ", "rustrict >".bright_red().bold());
-            io::stdout().flush().unwrap();
+            let _ = io::stdout().flush();
 
             let mut line = String::new();
-            if stdin.read_line(&mut line).is_err() || line.trim().is_empty() {
-                continue;
+            match stdin.read_line(&mut line) {
+                Ok(0) => {
+                    // EOF reached (e.g. pipe closed or Ctrl+Z/Ctrl+D)
+                    println!("\nEOF received. Shutting down cleanly...");
+                    self.shutdown();
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Error reading input: {}. Shutting down cleanly...", e);
+                    self.shutdown();
+                    break;
+                }
             }
 
             let input = line.trim();
-            let args: Vec<&str> = input.split_whitespace().collect();
-            if args.is_empty() {
+            if input.is_empty() {
                 continue;
             }
 
-            match args[0].to_lowercase().as_str() {
-                "scan" => self.handle_scan(&args[1..]),
-                "hosts" => self.handle_hosts(),
-                "scope" => self.handle_scope(&args[1..]),
-                "ports" => self.handle_ports(&args[1..]),
-                "audit" => self.handle_audit(&args[1..]),
-                "simulate" => self.handle_simulate(&args[1..]),
-                "export" => self.handle_export(&args[1..]),
-                "limit" => self.handle_limit(&args[1..]),
-                "block" => self.handle_block(&args[1..]),
-                "free" => self.handle_free(&args[1..]),
-                "add" => self.handle_add(&args[1..]),
-                "router" => self.handle_router(&args[1..]),
-                "nic" | "adapter" => self.handle_nic(&args[1..]),
-                "clear" | "cls" => {
-                    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
-                    let _ = io::stdout().flush();
-                }
-                "help" | "?" => self.print_help(),
-                "quit" | "exit" => {
-                    self.shutdown();
-                    println!("Exiting rustrict. Active session stopped.");
-                    break;
-                }
-                cmd => println!("{}: command not found. Type 'help' for commands.", cmd),
+            if !self.dispatch_command(input) {
+                break;
             }
         }
     }
 
-    fn handle_scan(&mut self, args: &[&str]) {
+    pub fn handle_scan(&mut self, args: &[&str]) {
+        if self.is_router_lab {
+            println!(
+                "{} Active network scanning is disabled in router-lab mode.",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
         let is_fresh = args.contains(&"--fresh");
         if is_fresh {
             println!(
@@ -613,7 +737,11 @@ impl RustrictCli {
         }
 
         if self.hosts.is_empty() {
-            println!("No hosts discovered yet. Run 'scan' first.");
+            if self.is_router_lab {
+                println!("No hosts in inventory (active scanning disabled in router-lab mode).");
+            } else {
+                println!("No hosts discovered yet. Run 'scan' first.");
+            }
             return;
         }
 
@@ -888,6 +1016,14 @@ impl RustrictCli {
     }
 
     pub fn handle_free(&mut self, args: &[&str]) {
+        if self.is_router_lab {
+            println!(
+                "{} Local target modification is disabled in router-lab mode.",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
         if args.is_empty() {
             println!("Usage: free <id|ip|all>");
             return;
@@ -913,7 +1049,15 @@ impl RustrictCli {
         }
     }
 
-    fn handle_add(&mut self, args: &[&str]) {
+    pub fn handle_add(&mut self, args: &[&str]) {
+        if self.is_router_lab {
+            println!(
+                "{} Manual target addition is disabled in router-lab mode.",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
         if args.is_empty() {
             println!("Usage: add <ip> [--mac <mac>]");
             return;
@@ -1101,7 +1245,19 @@ impl RustrictCli {
         }
     }
 
-    fn handle_scope(&mut self, args: &[&str]) {
+    pub fn handle_scope(&mut self, args: &[&str]) {
+        if self.is_router_lab {
+            if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+                render_scope_table(&self.scope);
+            } else {
+                println!(
+                    "{} Scope mutations are disabled in router-lab mode.",
+                    "[ERR]".red().bold()
+                );
+            }
+            return;
+        }
+
         if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
             render_scope_table(&self.scope);
             return;
@@ -1193,7 +1349,15 @@ impl RustrictCli {
         }
     }
 
-    fn handle_ports(&mut self, args: &[&str]) {
+    pub fn handle_ports(&mut self, args: &[&str]) {
+        if self.is_router_lab {
+            println!(
+                "{} Port scanning is disabled in router-lab mode.",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
         if args.is_empty() {
             println!("Usage: ports <id|ip|all> [ports-range] (e.g. ports 1 80,443,8000-8080)");
             return;
@@ -1251,7 +1415,15 @@ impl RustrictCli {
         }
     }
 
-    fn handle_audit(&mut self, args: &[&str]) {
+    pub fn handle_audit(&mut self, args: &[&str]) {
+        if self.is_router_lab {
+            println!(
+                "{} Active network auditing is disabled in router-lab mode.",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
         if args.is_empty() {
             println!("Usage: audit <id|ip|all>");
             return;
@@ -1490,7 +1662,15 @@ impl RustrictCli {
         }
     }
 
-    fn handle_export(&self, args: &[&str]) {
+    pub fn handle_export(&self, args: &[&str]) {
+        if self.is_router_lab {
+            println!(
+                "{} Top-level export is disabled in router-lab mode. Use 'router export-evidence' instead.",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
         let fmt = args
             .first()
             .map(|s| s.to_lowercase())
@@ -1546,6 +1726,34 @@ impl RustrictCli {
     }
 
     fn print_help(&self) {
+        if self.is_router_lab {
+            println!(
+                "{}",
+                "rustrict Router-Lab Commands (READ-ONLY Mode):"
+                    .bright_yellow()
+                    .bold()
+            );
+            println!("  hosts                                           Displays inactive host inventory (local enforcement disabled)");
+            println!("  nic [status|health|stats|list] [name|index]     Physical network adapter health telemetry and diagnostics (read-only)");
+            println!("  router providers                                List all supported router administration providers");
+            println!("  router connect <ssh|mikrotik|avm|unifi|http>    Connect to physical router provider using authenticated transport");
+            println!("  router status                                   Display current router identity and connection status");
+            println!("  router capabilities                             Inspect discovered router capabilities and evidence classification");
+            println!("  router devices                                  List connected client devices discovered on router (read-only)");
+            println!("  router diagnostics                              Run comprehensive read-only router diagnostic checks");
+            println!("  router preview <all|id|ip> [options]            Dry-run preflight inspection of policy (read-only, no mutation)");
+            println!("  router inventory                                Display router inventory");
+            println!("  router policies                                 Display active and historical router policies");
+            println!("  router policy <policy_id>                       Display detailed inspection of a specific policy");
+            println!("  router history                                  Display persistent audit records of policy executions");
+            println!("  router export-evidence [path] [--overwrite]     Export full sanitized read-only evidence bundle (JSON)");
+            println!("  router validate-evidence <path>                 Validate exported evidence bundle offline");
+            println!("  router disconnect                               Cleanly disconnect active provider (no fallback to ARP)");
+            println!("  clear / cls                                     Clears screen");
+            println!("  quit / exit                                     Exits rustrict cleanly\n");
+            return;
+        }
+
         println!("{}", "rustrict Commands:".bright_yellow().bold());
         println!("  scan [--range <start-end>] [--fresh] [--ports]  Scans network (use --ports for service enumeration)");
         println!("  hosts                                           Displays discovered hosts and live online/offline state");
@@ -1579,6 +1787,33 @@ impl RustrictCli {
 
     pub fn handle_router(&mut self, args: &[&str]) {
         if args.is_empty() || args[0].eq_ignore_ascii_case("help") {
+            if self.is_router_lab {
+                println!(
+                    "{}",
+                    "Router Administrative Commands (READ-ONLY Router-Lab Mode):"
+                        .bright_yellow()
+                        .bold()
+                );
+                println!("  router providers                                List all supported router administration providers");
+                println!("  router capabilities                             Inspect discovered router capabilities and evidence classification");
+                println!("  router status                                   Display current router identity and connection status");
+                println!("  router diagnostics / router diag                Run comprehensive read-only diagnostic checks without mutating rules");
+                println!("  router devices / router clients                 List connected client devices discovered on router (read-only)");
+                println!("  router export-evidence [path] [--overwrite]     Export full sanitized read-only evidence bundle (JSON)");
+                println!("  router validate-evidence <path>                 Validate exported evidence bundle offline");
+                println!("  router inventory                                Normalized provider inventory with live vs cached router identity");
+                println!("  router policies [policy_id]                     Display unified router policies or inspect specific policy");
+                println!("  router policy <policy_id>                       Display detailed inspection and event timeline of a policy");
+                println!("  router history / router records                 Display persistent audit records of policy executions on Windows");
+                println!("  router preview <all|id|ip> [options]            Dry-run preview of an administrative policy without executing it");
+                println!("  router connect <provider> [endpoint] [options]  Connect to a physical router provider explicitly");
+                println!("  router disconnect                               Cleanly disconnect active provider (no fallback to ARP poisoning)");
+                println!();
+                println!("{}", "  Prohibited in router-lab mode:".bright_red().bold());
+                println!("    router pause, router resume, router adjust, router refresh, router connect mock\n");
+                return;
+            }
+
             println!(
                 "{}",
                 "Router Administrative Commands:".bright_yellow().bold()
@@ -2005,6 +2240,14 @@ impl RustrictCli {
                 render_router_history_table(&records);
             }
             "refresh" | "reconcile" => {
+                if self.is_router_lab {
+                    println!(
+                        "{} Router policy reconciliation ('router refresh') is prohibited in router-lab mode.",
+                        "[ERR]".red().bold()
+                    );
+                    return;
+                }
+
                 if !self.router_registry.is_connected() {
                     println!(
                         "{} No router provider currently connected. Querying live router rules requires an active provider connection.",
@@ -2155,6 +2398,14 @@ impl RustrictCli {
                 }
             }
             "pause" => {
+                if self.is_router_lab {
+                    println!(
+                        "{} Router policy enforcement ('router pause') is prohibited in router-lab mode.",
+                        "[ERR]".red().bold()
+                    );
+                    return;
+                }
+
                 if args.len() < 2 {
                     println!("Usage: router pause <all|id|ip> [--duration <secs>] [--persistent] [--yes]");
                     return;
@@ -2381,6 +2632,14 @@ impl RustrictCli {
                 }
             }
             "resume" => {
+                if self.is_router_lab {
+                    println!(
+                        "{} Router policy revocation ('router resume') is prohibited in router-lab mode.",
+                        "[ERR]".red().bold()
+                    );
+                    return;
+                }
+
                 if args.len() < 2 {
                     println!("Usage: router resume <all|id|ip> [--yes]");
                     return;
@@ -2534,6 +2793,14 @@ impl RustrictCli {
                 }
             }
             "adjust" => {
+                if self.is_router_lab {
+                    println!(
+                        "{} Router policy adjustment ('router adjust') is prohibited in router-lab mode.",
+                        "[ERR]".red().bold()
+                    );
+                    return;
+                }
+
                 if args.len() < 2 {
                     println!("Usage: router adjust <all|id|ip> --duration <secs> [--yes]");
                     return;
@@ -2725,6 +2992,14 @@ impl RustrictCli {
             }
             "connect" => {
                 if args.len() > 1 && args[1].eq_ignore_ascii_case("mock") {
+                    if self.is_router_lab {
+                        println!(
+                            "{} Mock router provider is prohibited in router-lab mode. Connect to a real supported provider for hardware validation.",
+                            "[ERR]".red().bold()
+                        );
+                        return;
+                    }
+
                     let provider = Arc::new(MockRouterAdminProvider::new(self.iface.gateway));
                     match self
                         .router_registry

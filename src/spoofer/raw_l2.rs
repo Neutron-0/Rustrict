@@ -1,5 +1,16 @@
 use crate::types::MacAddress;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub static RAW_FRAME_SEND_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn raw_frame_send_count() -> u64 {
+    RAW_FRAME_SEND_COUNT.load(Ordering::SeqCst)
+}
+
+pub fn reset_raw_frame_send_count() {
+    RAW_FRAME_SEND_COUNT.store(0, Ordering::SeqCst);
+}
 
 type PcapOpenLiveFn = unsafe extern "C" fn(
     device: *const i8,
@@ -236,6 +247,7 @@ impl RawL2Sender {
     }
 
     pub fn send_frame(&self, frame: &[u8]) -> Result<(), String> {
+        RAW_FRAME_SEND_COUNT.fetch_add(1, Ordering::SeqCst);
         let res = unsafe { (self.send_fn)(self.handle, frame.as_ptr(), frame.len() as i32) };
         if res != 0 {
             return Err("Failed to send raw packet".into());

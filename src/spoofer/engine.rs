@@ -1,10 +1,20 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+pub static SPOOFER_TARGET_ADD_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn target_add_count() -> u64 {
+    SPOOFER_TARGET_ADD_COUNT.load(Ordering::SeqCst)
+}
+
+pub fn reset_target_add_count() {
+    SPOOFER_TARGET_ADD_COUNT.store(0, Ordering::SeqCst);
+}
 
 use crate::spoofer::raw_l2::{craft_arp_reply, RawL2Sender};
 use crate::types::{Host, HostStatus, MacAddress};
@@ -84,6 +94,10 @@ impl ArpSpoofer {
         self.sender.read().is_some()
     }
 
+    pub fn target_count(&self) -> usize {
+        self.targets.read().len()
+    }
+
     pub fn add(&self, host: Host) -> Result<(), String> {
         if self.sender.read().is_none() {
             return Err(
@@ -111,6 +125,7 @@ impl ArpSpoofer {
             ));
         }
         self.targets.write().insert(host.ip, host);
+        SPOOFER_TARGET_ADD_COUNT.fetch_add(1, Ordering::SeqCst);
         self.start_worker();
         Ok(())
     }

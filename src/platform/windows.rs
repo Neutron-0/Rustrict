@@ -218,6 +218,17 @@ pub struct InterfaceForwardingRecord {
     pub currently_mutated: bool,
 }
 
+pub static FORWARDING_MUTATION_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn forwarding_mutation_count() -> u64 {
+    FORWARDING_MUTATION_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn reset_forwarding_mutation_count() {
+    FORWARDING_MUTATION_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub struct ForwardingManager {
     tracked: parking_lot::Mutex<Vec<InterfaceForwardingRecord>>,
 }
@@ -265,6 +276,7 @@ impl ForwardingManager {
         iface_name: &str,
         enabled: bool,
     ) -> Result<(), String> {
+        FORWARDING_MUTATION_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let safe_name = iface_name.replace('\'', "''");
         let state_str = if enabled { "Enabled" } else { "Disabled" };
         let cmd = format!(

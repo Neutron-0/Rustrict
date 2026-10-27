@@ -1,10 +1,20 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+pub static LIMITER_ACTIVATION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn limiter_activation_count() -> u64 {
+    LIMITER_ACTIVATION_COUNT.load(Ordering::SeqCst)
+}
+
+pub fn reset_limiter_activation_count() {
+    LIMITER_ACTIVATION_COUNT.store(0, Ordering::SeqCst);
+}
 
 use crate::limiter::fault::FaultProfile;
 use crate::limiter::token_bucket::SharedTokenBucket;
@@ -72,6 +82,7 @@ impl TrafficLimiter {
         };
 
         self.rules.write().insert(ip, rule);
+        LIMITER_ACTIVATION_COUNT.fetch_add(1, Ordering::SeqCst);
         self.start_worker();
     }
 
@@ -85,6 +96,7 @@ impl TrafficLimiter {
         };
 
         self.rules.write().insert(ip, rule);
+        LIMITER_ACTIVATION_COUNT.fetch_add(1, Ordering::SeqCst);
         self.start_worker();
     }
 
@@ -95,6 +107,7 @@ impl TrafficLimiter {
 
     pub fn set_fault(&self, ip: Ipv4Addr, profile: FaultProfile) {
         self.fault_profiles.write().insert(ip, profile);
+        LIMITER_ACTIVATION_COUNT.fetch_add(1, Ordering::SeqCst);
         self.start_worker();
     }
 
