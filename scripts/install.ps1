@@ -46,6 +46,32 @@ function Get-ArchiveSha256([string]$FilePath) {
     }
 }
 
+function Download-FileRobust([string]$Url, [string]$OutPath, [hashtable]$Headers) {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        $headerArgs = @()
+        if ($Headers) {
+            foreach ($k in $Headers.Keys) {
+                $headerArgs += "-H"
+                $headerArgs += "$k`: $($Headers[$k])"
+            }
+        }
+        & curl.exe -fSL --retry 2 --connect-timeout 30 -o $OutPath @headerArgs $Url 2>$null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
+            return
+        }
+    }
+
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        Invoke-WebRequest -Uri $Url -OutFile $OutPath -Headers $Headers -UseBasicParsing -TimeoutSec 180
+    } finally {
+        $ProgressPreference = $prevProgress
+    }
+}
+
 $Repo = "Neutron-0/Rustrict"
 $CleanVersion = $Version.TrimStart('v')
 $Target = "x86_64-pc-windows-msvc"
@@ -115,15 +141,14 @@ try {
 
         Write-Host "Downloading $ArchiveName..."
         try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-            Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath -Headers $webHeaders -UseBasicParsing
+            Download-FileRobust -Url $archiveUrl -OutPath $zipPath -Headers $webHeaders
         } catch {
             throw "Error: Failed to download release archive from '$archiveUrl'. Verify that release v$CleanVersion exists at https://github.com/$Repo/releases. Detail: $_"
         }
 
         Write-Host "Downloading checksum manifest (SHA256SUMS.txt)..."
         try {
-            Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -Headers $webHeaders -UseBasicParsing
+            Download-FileRobust -Url $sumsUrl -OutPath $sumsPath -Headers $webHeaders
         } catch {
             throw "Error: Failed to download SHA256SUMS.txt from '$sumsUrl'. Cannot verify archive integrity. Aborting installation."
         }
