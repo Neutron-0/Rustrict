@@ -109,38 +109,76 @@ impl RustrictCli {
                 "[INFO]".cyan().bold(),
                 persistent_state.blocked_hosts.len()
             );
-            for (idx, b) in persistent_state.blocked_hosts.iter().enumerate() {
-                let mac = b.mac.parse::<MacAddress>().unwrap_or(MacAddress::ZERO);
-                if mac.is_zero() {
-                    continue;
-                }
-                if let Err(e) = scope.validate_target(&b.ip, Some(&mac)) {
-                    println!(
-                        "{} Skipping restored blocked device {} ({}) due to scope violation: {}",
-                        "[WARN]".yellow().bold(),
-                        b.ip,
-                        b.mac,
-                        e
-                    );
-                    continue;
-                }
-                let dir = persistent_state.get_direction(&b.ip);
-                let mut host = Host::with_source(
-                    idx,
-                    b.ip,
-                    mac,
-                    b.name.clone(),
-                    crate::types::NameSource::Manual,
-                    "Saved Block".to_string(),
-                );
-                host.status = HostStatus::Blocked(dir);
-                host.persistent_block = true;
-                host.online = false; // Will be verified online during scan
-                let _ = crate::platform::ensure_scoped_forwarding_enabled(&iface.name);
-                spoofer.add(host.clone());
-                limiter.block(host.ip, dir);
-                hosts.push(host);
+
+            struct LiveEnforcementSink<'a> {
+                spoofer: &'a ArpSpoofer,
+                limiter: &'a TrafficLimiter,
             }
+
+            impl<'a> crate::core::PersistentBlockActivator for LiveEnforcementSink<'a> {
+                fn is_injection_ready(&self) -> bool {
+                    self.spoofer.has_sender()
+                }
+
+                fn activate(&mut self, host: &Host, dir: Direction) -> Result<(), String> {
+                    self.spoofer.add(host.clone())?;
+                    self.limiter.block(host.ip, dir);
+                    Ok(())
+                }
+            }
+
+            let mut sink = LiveEnforcementSink {
+                spoofer: &spoofer,
+                limiter: &limiter,
+            };
+
+            let net_params = crate::core::RestorationNetworkParams {
+                iface_ip: iface.ip,
+                iface_mac: iface.mac,
+                iface_name: &iface.name,
+                gateway_ip: iface.gateway,
+                gateway_mac: iface.gateway_mac,
+            };
+
+            let report = crate::core::restore_persistent_blocks_with(
+                &persistent_state.blocked_hosts,
+                |ip| persistent_state.get_direction(ip),
+                &net_params,
+                &scope,
+                &crate::core::SystemForwardingEnabler,
+                &mut sink,
+            );
+
+            if !report.activated_targets.is_empty() {
+                println!(
+                    "{} Restored and activated {} persistent block(s)",
+                    "OK".green().bold(),
+                    report.activated_targets.len()
+                );
+            }
+
+            if !report.inactive_targets.is_empty() {
+                println!(
+                    "{} Restored {} persistent blocked device(s) as INACTIVE (enforcement not activated): {}",
+                    "[WARN]".yellow().bold(),
+                    report.inactive_targets.len(),
+                    report
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("Preconditions not met")
+                );
+            }
+
+            for (skipped_ip, reason) in &report.skipped_targets {
+                println!(
+                    "{} Skipping restored persistent record {}: {}",
+                    "[WARN]".yellow().bold(),
+                    skipped_ip,
+                    reason
+                );
+            }
+
+            hosts = report.restored_hosts;
         }
 
         let spoofer_clone = spoofer.clone();
@@ -524,7 +562,7 @@ impl RustrictCli {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Limited(rate, dir);
             }
-            self.spoofer.add(host.clone());
+            let _ = self.spoofer.add(host.clone());
             self.limiter.limit(host.ip, dir, rate);
             println!(
                 "{} Limited {} to {} ({})",
@@ -600,7 +638,7 @@ impl RustrictCli {
                 h.persistent_block = true;
                 self.persistent_state.add_blocked(h, dir);
             }
-            self.spoofer.add(host.clone());
+            let _ = self.spoofer.add(host.clone());
             self.limiter.block(host.ip, dir);
             println!(
                 "{} Blocked {} ({}) [Persistent]",
@@ -730,16 +768,32 @@ impl RustrictCli {
         }
 
         let has_persistent_blocks = self.hosts.iter().any(|h| h.persistent_block);
-        if has_persistent_blocks {
-            if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
-                eprintln!(
-                    "{} Failed to enable scoped IP forwarding for persistent blocks on {}: {}",
-                    "[ERR]".bright_red().bold(),
-                    self.iface.name,
-                    e
-                );
+        let forwarding_ok = if has_persistent_blocks {
+            match crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
+                Ok(_) => true,
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to enable scoped IP forwarding for persistent blocks on {}: {}. Deactivating enforcement.",
+                        "[ERR]".bright_red().bold(),
+                        self.iface.name,
+                        e
+                    );
+                    // Deactivate in-memory spoofer & limiter to prevent traffic blackholing without forwarding
+                    for h in self.hosts.iter_mut() {
+                        if h.persistent_block {
+                            if let HostStatus::Blocked(dir) = h.status {
+                                self.spoofer.remove(&h.ip);
+                                self.limiter.unlimit(&h.ip);
+                                h.status = HostStatus::PersistedInactive(dir);
+                            }
+                        }
+                    }
+                    false
+                }
             }
-        }
+        } else {
+            true
+        };
 
         // Upsert newly discovered/confirmed hosts
         for new_h in new_hosts {
@@ -758,10 +812,10 @@ impl RustrictCli {
                 if existing.vendor.is_empty() || existing.vendor == "Generic Network Device" {
                     existing.vendor = new_h.vendor;
                 }
-                // Ensure persistent block is continuously enforced
-                if existing.persistent_block {
+                // Ensure persistent block is continuously enforced only if forwarding is verified
+                if existing.persistent_block && forwarding_ok {
                     if let HostStatus::Blocked(dir) = existing.status {
-                        self.spoofer.add(existing.clone());
+                        let _ = self.spoofer.add(existing.clone());
                         self.limiter.block(existing.ip, dir);
                     }
                 }
@@ -1105,7 +1159,7 @@ impl RustrictCli {
 
         // 3. Mutate spoofer and limiter
         for host in target_hosts {
-            self.spoofer.add(host.clone());
+            let _ = self.spoofer.add(host.clone());
             self.limiter.set_fault(host.ip, profile.clone());
             println!(
                 "{} Simulated network resilience profile on {}: drop={}% delay={}ms jitter={}ms",

@@ -15,6 +15,10 @@ impl MacAddress {
         self.0 == [0; 6]
     }
 
+    pub fn is_broadcast(&self) -> bool {
+        self.0 == [0xff; 6]
+    }
+
     pub fn oui_prefix(&self) -> [u8; 3] {
         [self.0[0], self.0[1], self.0[2]]
     }
@@ -93,6 +97,7 @@ pub enum HostStatus {
     Free,
     Limited(BitRate, Direction),
     Blocked(Direction),
+    PersistedInactive(Direction),
 }
 
 impl HostStatus {
@@ -101,6 +106,7 @@ impl HostStatus {
             HostStatus::Free => "Free".to_string(),
             HostStatus::Limited(rate, dir) => format!("Limited ({}, {})", rate, dir.pretty()),
             HostStatus::Blocked(dir) => format!("Blocked ({})", dir.pretty()),
+            HostStatus::PersistedInactive(dir) => format!("Persisted (Inactive, {})", dir.pretty()),
         }
     }
 }
@@ -122,7 +128,7 @@ pub enum NameSource {
     Unresolved, // No authoritative hostname resolved
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
     pub id: usize,
     pub ip: Ipv4Addr,

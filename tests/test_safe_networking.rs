@@ -1,3 +1,7 @@
+use rustrict::core::{
+    restore_persistent_blocks_with, Ipv4Cidr, PersistentBlockActivator, ScopeManager,
+    ScopedForwardingEnabler,
+};
 use rustrict::monitor::nic::{
     evaluate_health_classification, parse_adapters_csv, parse_statistics_csv, run_nic_cli,
     sample_nic_health, NicAdapterInfo, NicHealthClassification, NicRawStats, NicTelemetryProvider,
@@ -5,6 +9,8 @@ use rustrict::monitor::nic::{
 #[allow(deprecated)]
 use rustrict::platform::{enable_ip_forwarding, CommandRunner, ForwardingManager};
 use rustrict::scanner::{MockNetworkProbe, SubnetScanner};
+use rustrict::state::PersistentBlockedHost;
+use rustrict::types::{Direction, Host, HostStatus};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -166,6 +172,115 @@ fn test_unscoped_forwarding_is_disallowed() {
     let res = enable_ip_forwarding();
     assert!(res.is_err());
     assert!(res.unwrap_err().contains("disallowed for safety"));
+}
+
+struct MockFailingForwardingEnabler;
+impl ScopedForwardingEnabler for MockFailingForwardingEnabler {
+    fn ensure_forwarding_enabled(&self, _iface_name: &str) -> Result<bool, String> {
+        Err("PowerShell execution policy prevented Set-NetIPInterface".into())
+    }
+}
+
+struct MockRecordingActivator {
+    activated_targets: Vec<(Ipv4Addr, Direction)>,
+}
+
+impl PersistentBlockActivator for MockRecordingActivator {
+    fn is_injection_ready(&self) -> bool {
+        true
+    }
+
+    fn activate(&mut self, host: &Host, dir: Direction) -> Result<(), String> {
+        self.activated_targets.push((host.ip, dir));
+        Ok(())
+    }
+}
+
+#[test]
+fn test_persistent_block_fail_closed_on_forwarding_failure() {
+    let params = rustrict::core::RestorationNetworkParams {
+        iface_ip: Ipv4Addr::new(192, 168, 1, 10),
+        iface_mac: "00:11:22:33:44:02".parse().unwrap(),
+        iface_name: "EthernetAdaptZ",
+        gateway_ip: Ipv4Addr::new(192, 168, 1, 1),
+        gateway_mac: "00:11:22:33:44:01".parse().unwrap(),
+    };
+
+    let mut scope = ScopeManager::new();
+    let cidr = Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap();
+    scope.add_cidr_direct(cidr);
+    scope.set_strict(true);
+
+    let enabler = MockFailingForwardingEnabler;
+    let mut activator = MockRecordingActivator {
+        activated_targets: Vec::new(),
+    };
+
+    let blocked_records = vec![
+        PersistentBlockedHost {
+            ip: Ipv4Addr::new(192, 168, 1, 45),
+            mac: "00:aa:bb:cc:dd:45".into(),
+            name: "PersistentTarget1".into(),
+            direction: "both".into(),
+        },
+        PersistentBlockedHost {
+            ip: Ipv4Addr::new(192, 168, 1, 46),
+            mac: "00:aa:bb:cc:dd:46".into(),
+            name: "PersistentTarget2".into(),
+            direction: "incoming".into(),
+        },
+    ];
+
+    let report = restore_persistent_blocks_with(
+        &blocked_records,
+        |_| Direction::Both,
+        &params,
+        &scope,
+        &enabler,
+        &mut activator,
+    );
+
+    // Fail-closed invariants:
+    // 1. Zero targets activated in spoofer/limiter
+    assert_eq!(activator.activated_targets.len(), 0);
+    assert_eq!(report.activated_targets.len(), 0);
+
+    // 2. Both targets restored in inventory with PersistedInactive status
+    assert_eq!(report.inactive_targets.len(), 2);
+    assert_eq!(report.restored_hosts.len(), 2);
+    assert_eq!(
+        report.restored_hosts[0].status,
+        HostStatus::PersistedInactive(Direction::Both)
+    );
+    assert_eq!(
+        report.restored_hosts[1].status,
+        HostStatus::PersistedInactive(Direction::Both)
+    );
+    assert!(report.restored_hosts[0].persistent_block);
+    assert!(report.restored_hosts[1].persistent_block);
+
+    // 3. Failure reason clearly reported
+    assert!(report.failure_reason.is_some());
+    assert!(report
+        .failure_reason
+        .unwrap()
+        .contains("execution policy prevented"));
+}
+
+#[test]
+fn test_cleanup_forwarding_report_structured_visibility() {
+    let manager = ForwardingManager::new();
+    let runner = TestMockRunner::new("Disabled");
+
+    // Mutate state
+    manager
+        .ensure_scoped_forwarding_enabled_with(&runner, "Eth0")
+        .unwrap();
+
+    let report = manager.cleanup_forwarding_with(&runner);
+    assert!(report.is_success());
+    assert_eq!(report.restored_interfaces, vec!["Eth0".to_string()]);
+    assert_eq!(report.failed_interfaces.len(), 0);
 }
 
 #[derive(Clone)]

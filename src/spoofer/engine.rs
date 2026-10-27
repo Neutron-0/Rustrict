@@ -64,9 +64,39 @@ impl ArpSpoofer {
         }
     }
 
-    pub fn add(&self, host: Host) {
+    pub fn has_sender(&self) -> bool {
+        self.sender.read().is_some()
+    }
+
+    pub fn add(&self, host: Host) -> Result<(), String> {
+        if self.sender.read().is_none() {
+            return Err(
+                "Cannot add target: raw Layer 2 packet injection sender is not initialized (Npcap unavailable)"
+                    .into(),
+            );
+        }
+        if host.ip == self.gateway_ip {
+            return Err("Gateway IP cannot be added as a spoofer target".into());
+        }
+        if host.ip.is_unspecified()
+            || host.ip.is_loopback()
+            || host.ip.is_broadcast()
+            || host.ip.is_multicast()
+        {
+            return Err(format!("Invalid non-unicast target IP: {}", host.ip));
+        }
+        if host.mac == self.gateway_mac {
+            return Err("Gateway MAC cannot be added as a spoofer target".into());
+        }
+        if host.mac.is_zero() || host.mac.is_broadcast() || (host.mac.0[0] & 1 != 0) {
+            return Err(format!(
+                "Invalid non-unicast target MAC address: {}",
+                host.mac
+            ));
+        }
         self.targets.write().insert(host.ip, host);
         self.start_worker();
+        Ok(())
     }
 
     pub fn remove(&self, ip: &Ipv4Addr) {

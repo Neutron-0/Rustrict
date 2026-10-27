@@ -133,9 +133,16 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
         for cb in callbacks.drain(..) {
             cb();
         }
-        cleanup_forwarding();
-        eprintln!("[OK] Clean shutdown complete. Exiting.");
-        std::process::exit(0);
+        let report = cleanup_forwarding();
+        if !report.is_success() {
+            for (iface, err) in &report.failed_interfaces {
+                eprintln!("[ERR] Failed to restore forwarding on {}: {}", iface, err);
+            }
+            std::process::exit(1);
+        } else {
+            eprintln!("[OK] Clean shutdown complete. Exiting.");
+            std::process::exit(0);
+        }
     }
     0
 }
@@ -298,17 +305,70 @@ impl ForwardingManager {
         }
     }
 
-    pub fn cleanup_forwarding_with<R: CommandRunner>(&self, runner: &R) {
+    pub fn cleanup_forwarding_with<R: CommandRunner>(&self, runner: &R) -> ForwardingCleanupReport {
         let mut tracked = self.tracked.lock();
+        let mut report = ForwardingCleanupReport::default();
+
         for entry in tracked.iter_mut() {
             if entry.currently_mutated {
                 if !entry.original_enabled {
-                    let _ =
-                        self.set_interface_forwarding_with(runner, &entry.interface_name, false);
+                    // Attempt to restore forwarding to Disabled
+                    match self.set_interface_forwarding_with(runner, &entry.interface_name, false) {
+                        Ok(()) => {
+                            // Verify that forwarding is actually Disabled
+                            match self
+                                .query_interface_forwarding_with(runner, &entry.interface_name)
+                            {
+                                Ok(still_enabled) => {
+                                    if !still_enabled {
+                                        // Verified successfully restored
+                                        entry.currently_mutated = false;
+                                        report
+                                            .restored_interfaces
+                                            .push(entry.interface_name.clone());
+                                    } else {
+                                        // Still enabled despite setter command returning Ok
+                                        report.failed_interfaces.push((
+                                            entry.interface_name.clone(),
+                                            "Verification failed: interface forwarding remains enabled after restore command".into(),
+                                        ));
+                                        // Preserve currently_mutated = true so subsequent cleanup can retry
+                                    }
+                                }
+                                Err(e) => {
+                                    // Query verification failed (e.g. interface renamed, disappeared, or query error)
+                                    report.failed_interfaces.push((
+                                        entry.interface_name.clone(),
+                                        format!("Verification query failed: {}", e),
+                                    ));
+                                    // Preserve currently_mutated = true so subsequent cleanup can retry
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Setter command failed
+                            report.failed_interfaces.push((
+                                entry.interface_name.clone(),
+                                format!("Set-NetIPInterface restoration failed: {}", e),
+                            ));
+                            // Preserve currently_mutated = true so subsequent cleanup can retry
+                        }
+                    }
+                } else {
+                    // Interface was already enabled originally; never mutated by us
+                    entry.currently_mutated = false;
+                    report
+                        .untouched_interfaces
+                        .push(entry.interface_name.clone());
                 }
-                entry.currently_mutated = false;
+            } else {
+                report
+                    .untouched_interfaces
+                    .push(entry.interface_name.clone());
             }
         }
+
+        report
     }
 
     pub fn tracked_records(&self) -> Vec<InterfaceForwardingRecord> {
@@ -317,6 +377,23 @@ impl ForwardingManager {
 
     pub fn clear(&self) {
         self.tracked.lock().clear();
+    }
+}
+
+/// Structured summary of interface IPv4 forwarding restoration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ForwardingCleanupReport {
+    /// Interfaces that were successfully restored to their original Disabled state and verified.
+    pub restored_interfaces: Vec<String>,
+    /// Interfaces that were originally untouched / already enabled.
+    pub untouched_interfaces: Vec<String>,
+    /// Interfaces that failed restoration or verification, along with the error reason.
+    pub failed_interfaces: Vec<(String, String)>,
+}
+
+impl ForwardingCleanupReport {
+    pub fn is_success(&self) -> bool {
+        self.failed_interfaces.is_empty()
     }
 }
 
@@ -362,12 +439,13 @@ pub fn ensure_scoped_forwarding_enabled(iface_name: &str) -> Result<bool, String
 
 /// Restores only interfaces that were mutated by Rustrict to their original forwarding state.
 /// If no interfaces were mutated, zero system commands are executed.
-pub fn cleanup_forwarding_with<R: CommandRunner>(runner: &R) {
-    GLOBAL_FORWARDING_MANAGER.cleanup_forwarding_with(runner);
+/// Returns a structured report detailing restored, untouched, and failed interfaces.
+pub fn cleanup_forwarding_with<R: CommandRunner>(runner: &R) -> ForwardingCleanupReport {
+    GLOBAL_FORWARDING_MANAGER.cleanup_forwarding_with(runner)
 }
 
-pub fn cleanup_forwarding() {
-    cleanup_forwarding_with(&SystemCommandRunner);
+pub fn cleanup_forwarding() -> ForwardingCleanupReport {
+    cleanup_forwarding_with(&SystemCommandRunner)
 }
 
 /// Deprecated: Unscoped global IP forwarding is unsafe and disallowed.
@@ -380,9 +458,21 @@ pub fn enable_ip_forwarding() -> Result<(), String> {
 }
 
 /// Backward compatibility shim for tests and external callers.
-pub fn disable_ip_forwarding() -> Result<(), String> {
-    cleanup_forwarding();
-    Ok(())
+pub fn disable_ip_forwarding() -> Result<ForwardingCleanupReport, String> {
+    let report = cleanup_forwarding();
+    if report.is_success() {
+        Ok(report)
+    } else {
+        let errs: Vec<String> = report
+            .failed_interfaces
+            .iter()
+            .map(|(iface, e)| format!("{}: {}", iface, e))
+            .collect();
+        Err(format!(
+            "Forwarding cleanup failed on interfaces: {}",
+            errs.join("; ")
+        ))
+    }
 }
 
 /// SendARP sends an ARP request directly through the Windows kernel network stack
@@ -674,12 +764,269 @@ mod tests {
         let cmds_before_cleanup = runner.executed_commands.lock().len();
 
         // Cleanup should not issue any disable command
-        cleanup_forwarding_with(&runner);
+        let report = cleanup_forwarding_with(&runner);
+        assert!(report.is_success());
+        assert_eq!(report.restored_interfaces.len(), 0);
         assert_eq!(*runner.current_state.lock(), "Enabled");
         let cmds_after_cleanup = runner.executed_commands.lock().len();
         assert_eq!(
             cmds_before_cleanup, cmds_after_cleanup,
             "Cleanup must not execute commands if forwarding was already enabled originally"
         );
+    }
+
+    #[derive(Default)]
+    struct AdvancedMockRunner {
+        states: parking_lot::Mutex<std::collections::HashMap<String, String>>,
+        fail_set: parking_lot::Mutex<bool>,
+        fail_get: parking_lot::Mutex<bool>,
+        disappeared_interface: parking_lot::Mutex<Option<String>>,
+        disable_leaves_enabled: parking_lot::Mutex<bool>,
+        executed_commands: parking_lot::Mutex<Vec<String>>,
+    }
+
+    impl AdvancedMockRunner {
+        fn with_interface(iface: &str, state: &str) -> Self {
+            let mut states = std::collections::HashMap::new();
+            states.insert(iface.to_string(), state.to_string());
+            Self {
+                states: parking_lot::Mutex::new(states),
+                ..Default::default()
+            }
+        }
+    }
+
+    impl CommandRunner for AdvancedMockRunner {
+        fn run_powershell(&self, command: &str) -> Result<String, String> {
+            self.executed_commands.lock().push(command.to_string());
+
+            // Extract alias from command if present
+            let alias = if let Some(start) = command.find("-InterfaceAlias '") {
+                let rest = &command[start + 17..];
+                if let Some(end) = rest.find('\'') {
+                    rest[..end].to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            } else {
+                "unknown".to_string()
+            };
+
+            if let Some(ref diss) = *self.disappeared_interface.lock() {
+                if diss == &alias {
+                    return Err(format!("Interface '{}' not found in system table", alias));
+                }
+            }
+
+            if command.contains("Get-NetIPInterface") {
+                if *self.fail_get.lock() {
+                    return Err("WMI RPC communication error during forwarding query".into());
+                }
+                let states = self.states.lock();
+                let state = states
+                    .get(&alias)
+                    .cloned()
+                    .unwrap_or_else(|| "Disabled".into());
+                Ok(state)
+            } else if command.contains("Set-NetIPInterface") {
+                if *self.fail_set.lock() {
+                    return Err("Access denied executing Set-NetIPInterface".into());
+                }
+                if command.contains("-Forwarding Enabled") {
+                    self.states.lock().insert(alias, "Enabled".into());
+                } else if command.contains("-Forwarding Disabled") {
+                    if *self.disable_leaves_enabled.lock() {
+                        self.states.lock().insert(alias, "Enabled".into());
+                    } else {
+                        self.states.lock().insert(alias, "Disabled".into());
+                    }
+                }
+                Ok(String::new())
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    #[test]
+    fn test_cleanup_forwarding_setter_failure_preserves_mutation_state_for_retry() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("FailSetterNic", "Disabled");
+
+        // Enable forwarding (mutates)
+        let mutated = manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "FailSetterNic")
+            .unwrap();
+        assert!(mutated);
+
+        // Configure setter to fail on cleanup
+        *runner.fail_set.lock() = true;
+
+        let report = manager.cleanup_forwarding_with(&runner);
+        assert!(
+            !report.is_success(),
+            "Cleanup must report failure when setter fails"
+        );
+        assert_eq!(report.failed_interfaces.len(), 1);
+        assert_eq!(report.failed_interfaces[0].0, "FailSetterNic");
+        assert!(report.failed_interfaces[0].1.contains("Access denied"));
+
+        // Crucial guarantee: currently_mutated remains true in tracked records
+        let tracked = manager.tracked_records();
+        assert_eq!(tracked.len(), 1);
+        assert!(
+            tracked[0].currently_mutated,
+            "Interface must remain marked as currently_mutated after failure"
+        );
+
+        // Now simulate retry where setter succeeds
+        *runner.fail_set.lock() = false;
+        let retry_report = manager.cleanup_forwarding_with(&runner);
+        assert!(retry_report.is_success(), "Retry cleanup must succeed");
+        assert_eq!(
+            retry_report.restored_interfaces,
+            vec!["FailSetterNic".to_string()]
+        );
+
+        let tracked_after = manager.tracked_records();
+        assert!(
+            !tracked_after[0].currently_mutated,
+            "Interface must be marked as not mutated after successful retry"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_forwarding_query_verification_failure_preserves_mutation_state() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("VerifyFailNic", "Disabled");
+
+        manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "VerifyFailNic")
+            .unwrap();
+
+        // Setter returns Ok, but interface remains Enabled (verification detects discrepancy)
+        *runner.disable_leaves_enabled.lock() = true;
+
+        let report = manager.cleanup_forwarding_with(&runner);
+        assert!(!report.is_success());
+        assert_eq!(report.failed_interfaces.len(), 1);
+        assert!(report.failed_interfaces[0]
+            .1
+            .contains("remains enabled after restore command"));
+
+        let tracked = manager.tracked_records();
+        assert!(
+            tracked[0].currently_mutated,
+            "State must remain mutated if verification reveals enabled state"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_forwarding_interface_disappeared_reports_failure() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("DisappearingNic", "Disabled");
+
+        manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "DisappearingNic")
+            .unwrap();
+
+        // Interface disappears from Windows before cleanup
+        *runner.disappeared_interface.lock() = Some("DisappearingNic".into());
+
+        let report = manager.cleanup_forwarding_with(&runner);
+        assert!(!report.is_success());
+        assert_eq!(report.failed_interfaces.len(), 1);
+        assert!(report.failed_interfaces[0]
+            .1
+            .contains("not found in system table"));
+
+        let tracked = manager.tracked_records();
+        assert!(
+            tracked[0].currently_mutated,
+            "Disappeared interface must remain pending in manager"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_forwarding_repeated_cleanup_is_idempotent() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::with_interface("IdempotentNic", "Disabled");
+
+        manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "IdempotentNic")
+            .unwrap();
+
+        let report1 = manager.cleanup_forwarding_with(&runner);
+        assert!(report1.is_success());
+        assert_eq!(
+            report1.restored_interfaces,
+            vec!["IdempotentNic".to_string()]
+        );
+
+        let commands_count_after_first = runner.executed_commands.lock().len();
+
+        // Repeated cleanup must issue zero additional commands and report clean status
+        let report2 = manager.cleanup_forwarding_with(&runner);
+        assert!(report2.is_success());
+        assert_eq!(report2.restored_interfaces.len(), 0);
+        assert_eq!(
+            report2.untouched_interfaces,
+            vec!["IdempotentNic".to_string()]
+        );
+
+        let commands_count_after_second = runner.executed_commands.lock().len();
+        assert_eq!(
+            commands_count_after_first, commands_count_after_second,
+            "Repeated cleanup must not execute commands"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_forwarding_multiple_interfaces_mixed_initial_states() {
+        let manager = ForwardingManager::new();
+        let runner = AdvancedMockRunner::default();
+        runner
+            .states
+            .lock()
+            .insert("NicA".into(), "Disabled".into());
+        runner.states.lock().insert("NicB".into(), "Enabled".into());
+        runner
+            .states
+            .lock()
+            .insert("NicC".into(), "Disabled".into());
+
+        // Ensure scoped forwarding on NicA (mutated: Disabled -> Enabled)
+        assert!(manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "NicA")
+            .unwrap());
+        // Ensure scoped forwarding on NicB (untouched: originally Enabled)
+        assert!(!manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "NicB")
+            .unwrap());
+        // Ensure scoped forwarding on NicC (mutated: Disabled -> Enabled)
+        assert!(manager
+            .ensure_scoped_forwarding_enabled_with(&runner, "NicC")
+            .unwrap());
+
+        let cmd_count_before_cleanup = runner.executed_commands.lock().len();
+
+        let report = manager.cleanup_forwarding_with(&runner);
+        assert!(
+            report.is_success(),
+            "Cleanup of multiple interfaces must succeed"
+        );
+        assert_eq!(report.restored_interfaces.len(), 2);
+        assert!(report.restored_interfaces.contains(&"NicA".to_string()));
+        assert!(report.restored_interfaces.contains(&"NicC".to_string()));
+        assert_eq!(report.untouched_interfaces, vec!["NicB".to_string()]);
+
+        // Verify that NicB was never sent a disable command
+        let cmds_during_cleanup = &runner.executed_commands.lock()[cmd_count_before_cleanup..];
+        for cmd in cmds_during_cleanup {
+            assert!(
+                !cmd.contains("NicB"),
+                "Must not issue disable commands to originally enabled interface NicB"
+            );
+        }
     }
 }

@@ -78,5 +78,16 @@ fn main() {
     app.run_interactive();
 
     // 4. Cleanup on normal exit
-    platform::cleanup_forwarding();
+    let report = platform::cleanup_forwarding();
+    if !report.is_success() {
+        for (iface_name, err) in &report.failed_interfaces {
+            eprintln!(
+                "{} Failed to restore forwarding on interface '{}': {}",
+                "[ERR]".bright_red().bold(),
+                iface_name,
+                err
+            );
+        }
+        std::process::exit(1);
+    }
 }

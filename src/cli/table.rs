@@ -38,6 +38,9 @@ pub fn render_hosts_table(hosts: &[Host]) {
                     Cell::new(format!("Blocked ({})", dir.pretty())).fg(Color::Red)
                 }
             }
+            HostStatus::PersistedInactive(dir) => {
+                Cell::new(format!("Persisted [Inactive] ({})", dir.pretty())).fg(Color::Yellow)
+            }
         };
 
         let hostname_str = if host.name.is_empty() {
