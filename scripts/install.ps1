@@ -46,29 +46,60 @@ function Get-ArchiveSha256([string]$FilePath) {
     }
 }
 
-function Download-FileRobust([string]$Url, [string]$OutPath, [hashtable]$Headers) {
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if ($curl) {
-        $headerArgs = @()
-        if ($Headers) {
-            foreach ($k in $Headers.Keys) {
-                $headerArgs += "-H"
-                $headerArgs += "$k`: $($Headers[$k])"
-            }
-        }
-        & curl.exe -fSL --retry 2 --connect-timeout 30 -o $OutPath @headerArgs $Url 2>$null
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
-            return
-        }
-    }
-
+function Download-FileReliable([string[]]$Urls, [string]$OutPath) {
     $prevProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-        Invoke-WebRequest -Uri $Url -OutFile $OutPath -Headers $Headers -UseBasicParsing -TimeoutSec 180
-    } finally {
-        $ProgressPreference = $prevProgress
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+    
+    $downloadSucceeded = $false
+    $lastError = ""
+    
+    foreach ($url in $Urls) {
+        # 1. System.Net.WebClient (direct streaming in .NET)
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add("User-Agent", "Rustrict-Installer")
+            $wc.DownloadFile($url, $OutPath)
+            if ((Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
+                $downloadSucceeded = $true
+                break
+            }
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+        
+        # 2. curl.exe with -sSL via Start-Process (isolated stream avoids PS stderr trap)
+        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if (-not $downloadSucceeded -and $curl) {
+            try {
+                $curlProcess = Start-Process -FilePath "curl.exe" -ArgumentList @("-sSL", "--connect-timeout", "15", "--max-time", "120", "-o", $OutPath, $url) -Wait -PassThru -NoNewWindow
+                if ($curlProcess.ExitCode -eq 0 -and (Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
+                    $downloadSucceeded = $true
+                    break
+                }
+            } catch {
+                $lastError = $_.Exception.Message
+            }
+        }
+        
+        # 3. Invoke-WebRequest fallback
+        if (-not $downloadSucceeded) {
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $OutPath -UseBasicParsing -TimeoutSec 60
+                if ((Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
+                    $downloadSucceeded = $true
+                    break
+                }
+            } catch {
+                $lastError = $_.Exception.Message
+            }
+        }
+    }
+    
+    $ProgressPreference = $prevProgress
+    
+    if (-not $downloadSucceeded) {
+        throw "Failed to download from available endpoints: $($Urls -join ' | '). Detail: $lastError"
     }
 }
 
@@ -129,28 +160,30 @@ try {
         $zipPath = Join-Path $TempDir $ArchiveName
         $sumsPath = Join-Path $TempDir "SHA256SUMS.txt"
 
-        $baseUrl = "https://github.com/$Repo/releases/download/v$CleanVersion"
-        $archiveUrl = "$baseUrl/$ArchiveName"
-        $sumsUrl = "$baseUrl/SHA256SUMS.txt"
+        $rawBase = "https://raw.githubusercontent.com/$Repo/main/dist"
+        $releaseBase = "https://github.com/$Repo/releases/download/v$CleanVersion"
 
-        $webHeaders = @{ "User-Agent" = "Rustrict-Installer" }
-        $ghToken = if ($Token) { $Token } elseif ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { "" }
-        if ($ghToken) {
-            $webHeaders["Authorization"] = "Bearer $ghToken"
-        }
+        $archiveUrls = @(
+            "$rawBase/$ArchiveName",
+            "$releaseBase/$ArchiveName"
+        )
+        $sumsUrls = @(
+            "$rawBase/SHA256SUMS.txt",
+            "$releaseBase/SHA256SUMS.txt"
+        )
 
         Write-Host "Downloading $ArchiveName..."
         try {
-            Download-FileRobust -Url $archiveUrl -OutPath $zipPath -Headers $webHeaders
+            Download-FileReliable -Urls $archiveUrls -OutPath $zipPath
         } catch {
-            throw "Error: Failed to download release archive from '$archiveUrl'. Verify that release v$CleanVersion exists at https://github.com/$Repo/releases. Detail: $_"
+            throw "Error: Failed to download release archive '$ArchiveName'. Verify network connection. Detail: $_"
         }
 
         Write-Host "Downloading checksum manifest (SHA256SUMS.txt)..."
         try {
-            Download-FileRobust -Url $sumsUrl -OutPath $sumsPath -Headers $webHeaders
+            Download-FileReliable -Urls $sumsUrls -OutPath $sumsPath
         } catch {
-            throw "Error: Failed to download SHA256SUMS.txt from '$sumsUrl'. Cannot verify archive integrity. Aborting installation."
+            throw "Error: Failed to download SHA256SUMS.txt. Cannot verify archive integrity. Detail: $_"
         }
 
         if (-not (Test-Path $sumsPath) -or (Get-Item $sumsPath).Length -eq 0) {
