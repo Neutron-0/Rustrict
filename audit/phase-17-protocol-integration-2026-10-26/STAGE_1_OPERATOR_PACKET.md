@@ -1,12 +1,12 @@
 # Rustrict Phase 17 — Stage 1 Operator Runbook & Lab Safety Packet
 
-**Document Version:** 1.5.0
-**Date:** 2026-10-27 (Phase 19.0 Reconciled Release Baseline)
+**Document Version:** 1.6.0
+**Date:** 2026-10-27 (Phase 19.1–19.3 Router-Lab Isolation Baseline)
 **Audience:** Physical Router Test Operators, Network Test Engineers, Safety Verifiers
 **Target Codebase Revision:**
-- **Implementation Code Revision:** Phase 18.5–19.0 (`10dd09706d2796ebc62b34354719485a4edb92eb`)
-- **Phase 18.4 Code Baseline:** `9106be33ceb4486e6fe2a272ea2773c71f0177ba`
-- **Phase 18.4 Documentation HEAD:** `ce3b57087f46fe7d7149052a05634e5e8bb744a6`
+- **Phase 19.1–19.3 Implementation Commit:** `326516b4894e091635aac6600daa99180c5e67c2`
+- **Phase 18.5–19.0 Verified Code Baseline:** `10dd09706d2796ebc62b34354719485a4edb92eb`
+- **Phase 18.5–19.0 Verified Docs Baseline:** `b39578b77ee0aee90d56eeebec5048ce4c653ff9`
 
 ---
 
@@ -15,31 +15,30 @@
 Stage 1 is the **first physical connection test** between the Rustrict management engine and physical router hardware in an electrically and logically isolated test network.
 
 > [!IMPORTANT]
-> **Zero Unplanned Mutations**: Stage 1 verifies discovery, authentication, read-only status inspection, and diagnostic evidence export. **No policy enforcement (`pause`, `adjust`) may be committed during read-only Stage 1.**
+> **Strict Read-Only Router-Lab Mode**: Stage 1 verifies discovery, authentication, read-only status inspection, and diagnostic evidence export. **No policy enforcement (`pause`, `adjust`, `resume`, `refresh`) may be committed during read-only Stage 1.**
 >
-> This document authorizes **READ-ONLY LAB DIAGNOSTICS ONLY**. Operators MUST invoke Rustrict using `--router-lab` mode (`rustrict --router-lab`) to guarantee zero Layer 2 packet injection sender initialization and zero OS forwarding mutations. It does NOT authorize Stage 2 active policy enforcement or live production deployment.
+> Operators MUST invoke Rustrict using `--router-lab` mode (`rustrict --router-lab`).
+> In this mode:
+> - Administrator privileges are NOT required (operates safely as standard user).
+> - Raw Layer 2 injection sender (`pcap_open_live`) and promiscuous sniffer threads are NOT initialized.
+> - Kernel packet filtering (`WinDivert`) is NOT opened.
+> - Windows IP forwarding state is NEVER inspected or mutated.
+> - Destructive local commands (`block`, `limit`, `simulate`, `scan`, `ports`, `audit`, `add`, `scope`, `free`) and router mutations (`pause`, `adjust`, `resume`, `refresh`, `connect mock`) are strictly blocked by default-deny policy.
+>
+> This document authorizes **READ-ONLY LAB DIAGNOSTICS ONLY**. It does NOT authorize Stage 2 active policy enforcement or live production deployment.
 
 ### Hard Constraints:
-1. **Zero Unplanned Mutations**: All active policy enforcement commands (`router pause`, `router adjust`, `router resume`) are strictly excluded from Stage 1 execution.
+1. **Zero Unplanned Mutations**: All active policy enforcement commands (`router pause`, `router adjust`, `router resume`, `router refresh`) are strictly blocked by the router-lab admission layer.
 2. **Strict Loopback & Isolated Subnet**: The physical lab test must execute on a dedicated, non-routable physical switch or isolated VLAN with zero access to corporate, production, or internet transit networks.
 3. **Fail-Closed Verification**: The operator must verify that Rustrict never falls back to ARP poisoning, Layer 2 redirection, or mock provider mode when a router connection is closed or errors.
-4. **Operation-Aware Transport Retry Policy (Phase 17.1)**:
-   - **Mutations & Unknown Operations**: Strictly zero automatic retries (`max_attempts == 1`). If a connection is terminated or times out after mutation dispatch, Rustrict does NOT blindly repeat the request, preventing duplicate rules or repeated state toggles.
-   - **Read-Only Inquiries**: At most 2 attempts (`max_attempts == 2`) isolated across independent process executions to prevent stale buffered standard I/O corruption.
-5. **Uncertain Outcome Handling (`PolicyLifecycleState::Unknown`)**:
-   - If a mutation request is transmitted to the router and the connection is subsequently dropped, truncated, or times out, Rustrict classifies the policy lifecycle as `PolicyLifecycleState::Unknown` rather than assuming failure or success.
-   - An active unconfirmed record is persisted locally to prevent duplicate conflicting actions.
-   - Follow-up mutations overlapping with any active unconfirmed (`Unknown`) or `PartialFailure` scope are **strictly blocked** by the execution engine until manually verified or reconciled out-of-band by the operator.
-6. **No Mock Mode Equivalence**: Mock mode (`router connect mock`) is strictly an in-memory development harness and must never be recorded as live router hardware validation.
-7. **Persistent Enforcement Precondition & Fail-Closed Safety (Phase 18.3 & 18.4)**:
-   - Before launching Stage 1, verify that `%ProgramData%\Rustrict\rustrict_state.json` contains no unmanaged, stale, or conflicting persisted blocks from previous testing.
-   - Rustrict enforces fail-closed restoration at startup: if scoped forwarding or packet injection dependencies fail, persisted blocks are marked `Persisted [Inactive]` in memory and are **never** added to the spoofer or limiter. Saved records on disk are strictly preserved without deletion or overwrite.
-   - Target address validation strictly rejects subnet network identifiers and directed-broadcast addresses across all configured CIDRs (preserving valid RFC 3021 /31 and /32 host addresses).
-   - Scoped IP forwarding queries actual OS state before reporting readiness (ignoring stale internal flags); sets and verifies `Enabled` postconditions; preserves original baselines; and on shutdown executes bounded retries, reporting structured failures and exiting code 1 on verification failure.
-8. **Startup Driver & Thread Initialization Semantics (Source-Verified)**:
-   - `ArpSpoofer::new()`: Attempts to open the raw Layer 2 injection sender (`pcap_open_live`) during construction. It does **not** start its background worker thread, does **not** add any targets, and transmits **zero** frames until targets are explicitly added and active.
-   - `PassiveIdentitySniffer::new()`: Spawns a background thread opening Npcap in promiscuous capture mode to listen on UDP port 67/68 for DHCP Option 12 hostnames. It is strictly a passive receiver and transmits **zero** packets.
-   - `TrafficLimiter::new()`: Instantiates with empty rule maps and inactive driver handles; it does **not** open the kernel `WinDivert` driver until active limits or blocks are applied.
+4. **Operation-Aware Transport Retry Policy**:
+   - **Mutations & Unknown Operations**: Strictly zero automatic retries (`max_attempts == 1`). If a connection is terminated or times out after mutation dispatch, Rustrict does NOT blindly repeat the request.
+   - **Read-Only Inquiries**: At most 2 attempts (`max_attempts == 2`) isolated across independent process executions.
+5. **No Mock Mode Equivalence**: Mock mode (`router connect mock`) is strictly prohibited in `--router-lab` mode and must never be recorded as live router hardware validation.
+6. **Persistent Enforcement Precondition & Fail-Closed Safety**:
+   - Before launching Stage 1, verify that `%ProgramData%\Rustrict\rustrict_state.json` contains no unmanaged, stale, or conflicting persisted blocks.
+   - In router-lab mode, any saved persistent blocks are loaded strictly as inactive inventory without driver activation or forwarding manipulation.
+7. **Zero Policy Mutation Verbs in Stage 1**: Cancellation gates and confirmation flows are verified in automated loopback/mock unit tests (`test_router_lab_isolation.rs` and `test_unified_admin.rs`). Operators MUST NOT invoke `router pause` on physical hardware during Stage 1.
 
 ---
 
@@ -137,9 +136,9 @@ Before connecting Rustrict, capture raw router state via native out-of-band mana
 
 ## 4. Source-Traced CLI Execution Runbook
 
-Launch the Rustrict executable natively from Windows PowerShell:
+Launch the Rustrict executable natively in router-lab mode from Windows PowerShell (Administrator privileges NOT required):
 ```powershell
-.\target\release\rustrict.exe
+.\target\release\rustrict.exe --router-lab
 ```
 
 ### Step 1: Query Available Providers and Check Safety Status
@@ -147,7 +146,7 @@ Launch the Rustrict executable natively from Windows PowerShell:
 rustrict> router providers
 ```
 *Expected Output*:
-- Displays registered providers: `openwrt-http`, `openwrt-ssh`, `mikrotik-rest`, `avm-tr064`, `unifi-rest`, `mock`.
+- Displays supported real providers: `openwrt-http`, `openwrt-ssh`, `mikrotik-rest`, `avm-tr064`, `unifi-rest`. (Mock provider is blocked in router-lab mode).
 - Safety status displays: Disconnected, zero mutations active.
 
 ```text
@@ -206,44 +205,20 @@ rustrict> router diagnostics
   - If the router firmware does not expose client tables, the CLI reports discovery limitations cleanly without failing.
 - `router diagnostics`: Executes comprehensive read-only checks, verifying credential security, socket reachability, and zero configuration mutations.
 
+### Step 4: Validate Preflight Inspection (Dry-Run, Zero Network Transmission)
+
+> [!IMPORTANT]
+> **Zero Policy Mutation Commands in Stage 1**:
+> In `--router-lab` mode, policy mutating commands (`router pause`, `router adjust`, `router resume`, `router refresh`) are strictly blocked by default-deny admission before any network dispatch.
+> Operators MUST NOT attempt to invoke `router pause` on physical hardware during Stage 1. Confirmation and cancellation gates are fully verified in the automated synthetic/loopback suite (`test_router_lab_isolation.rs`).
+
+Verify that preflight inspection can be run dry without transmitting packets to the router:
 ```text
-rustrict> router refresh
-```
-*Actual Effects & Verification*:
-- Queries live router firewall rules to verify active policies against local store.
-- **Provider Limitation**: Providers that do not expose a queryable full-ruleset API cannot return third-party rules. Rustrict reconciles known tracked rules and marks untracked states accordingly.
-
-### Step 4: Validate Mutation Preflight & Confirmation Cancellation Gate (Strictly Read-Only)
-
-> [!CAUTION]
-> **Operator Confirmation Is Strictly Prohibited in Stage 1**:
-> Step 4 tests that the interactive confirmation gate safely intercepts mutation requests before any network payload is constructed or dispatched.
-> The operator **MUST reject the prompt with 'N' (or Enter)**. Answering 'yes' in Stage 1 is a severe protocol violation.
-> Zero mutating packets may be emitted onto the physical network.
-
-1. Verify that preflight inspection can be run dry without transmitting packets to the router:
-```text
-rustrict> router preview pause 192.168.1.50
+rustrict> router preview 192.168.1.50
 ```
 *Verification*:
 - Preflight report details provider, target scope, duration, persistence, recovery mechanism, and risk assessment.
 - Wireshark trace confirms **zero** network packets transmitted to the router during preview.
-
-2. Test interactive cancellation safety gate:
-```text
-rustrict> router pause 192.168.1.50
-[PREFLIGHT] Preflight Inspection for Router Firewall Mutation:
-  • Provider:       OpenWrt HTTP (ubus JSON-RPC)
-  • Scope:          192.168.1.50 (Target Count: 1)
-  ...
-[CONFIRMATION REQUIRED] Confirm policy enforcement on physical router? [yes/N]: N
-[INFO] Policy enforcement cancelled by administrator. Zero router mutations performed.
-```
-*Verification*:
-- Prompt rejected by operator (`N` or Enter).
-- CLI reports cancellation and zero router mutations performed.
-- Wireshark confirms **zero** mutating packets on the wire.
-- Confirm cancellation gate returned cleanly before proceeding to evidence export.
 
 ### Step 5: Export and Offline Validate Diagnostic Evidence Bundle
 Export the read-only operational bundle:
@@ -338,15 +313,16 @@ Provider ID Selected:     [ ] openwrt-http  [ ] openwrt-ssh  [ ] mikrotik-rest
    [ ] Out-of-band management console open and verified functional
 
 3. Read-Only Execution Checklist:
+   [ ] Launched with --router-lab (verified zero raw frame driver & forwarding mutations)
    [ ] Wireshark PCAP capture initiated (Capture filename: __________________)
-   [ ] 'router providers' output confirmed
-   [ ] 'router connect' authenticated successfully
+   [ ] 'router providers' output confirmed (mock provider blocked in router-lab mode)
+   [ ] 'router connect' authenticated successfully with real router provider
    [ ] 'router status' displayed correct identity and uptime
    [ ] 'router capabilities' displayed valid classification
    [ ] 'router devices' queried connected clients without error
    [ ] 'router diagnostics' executed with zero mutations
-   [ ] 'router preview pause <ip>' executed dry without packets transmitted
-   [ ] 'router pause <ip>' cancellation tested (prompt answered 'N')
+   [ ] 'router preview <ip>' executed dry without packets transmitted
+   [ ] Confirmed policy-mutating commands (pause, adjust, resume, refresh) remained uncalled
    [ ] Wireshark verified zero mutating requests transmitted on wire
 
 4. Diagnostic Evidence Export & Validation:
