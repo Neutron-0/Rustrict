@@ -1,11 +1,9 @@
 use rustrict::monitor::nic::{
-    evaluate_health_classification, parse_adapters_csv, parse_statistics_csv, sample_nic_health,
-    NicAdapterInfo, NicHealthClassification, NicRawStats, NicTelemetryProvider,
+    evaluate_health_classification, parse_adapters_csv, parse_statistics_csv, run_nic_cli,
+    sample_nic_health, NicAdapterInfo, NicHealthClassification, NicRawStats, NicTelemetryProvider,
 };
-use rustrict::platform::{
-    cleanup_forwarding_with, ensure_scoped_forwarding_enabled_with,
-    query_interface_forwarding_with, CommandRunner,
-};
+#[allow(deprecated)]
+use rustrict::platform::{enable_ip_forwarding, CommandRunner, ForwardingManager};
 use rustrict::scanner::{MockNetworkProbe, SubnetScanner};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -121,38 +119,53 @@ impl CommandRunner for TestMockRunner {
 
 #[test]
 fn test_scoped_forwarding_lifecycle_guarantees() {
+    let manager = ForwardingManager::new();
     let runner_disabled = TestMockRunner::new("Disabled");
     let iface = "EthernetAdaptX";
 
     // Step 1: Initial query returns false
-    let initial = query_interface_forwarding_with(&runner_disabled, iface).unwrap();
+    let initial = manager
+        .query_interface_forwarding_with(&runner_disabled, iface)
+        .unwrap();
     assert!(!initial);
 
     // Step 2: Ensure enabled -> mutates state
-    let mutated = ensure_scoped_forwarding_enabled_with(&runner_disabled, iface).unwrap();
+    let mutated = manager
+        .ensure_scoped_forwarding_enabled_with(&runner_disabled, iface)
+        .unwrap();
     assert!(mutated);
     assert_eq!(*runner_disabled.state.lock(), "Enabled");
 
     // Step 3: Cleanup -> restores to Disabled
-    cleanup_forwarding_with(&runner_disabled);
+    manager.cleanup_forwarding_with(&runner_disabled);
     assert_eq!(*runner_disabled.state.lock(), "Disabled");
 
     // Case B: Interface originally Enabled
     let runner_enabled = TestMockRunner::new("Enabled");
     let iface_b = "PreconfiguredHyperV";
 
-    let mutated_b = ensure_scoped_forwarding_enabled_with(&runner_enabled, iface_b).unwrap();
+    let mutated_b = manager
+        .ensure_scoped_forwarding_enabled_with(&runner_enabled, iface_b)
+        .unwrap();
     assert!(!mutated_b, "Must not mutate interface if already enabled");
     assert_eq!(*runner_enabled.state.lock(), "Enabled");
 
     let cmds_before = runner_enabled.commands.lock().len();
-    cleanup_forwarding_with(&runner_enabled);
+    manager.cleanup_forwarding_with(&runner_enabled);
     let cmds_after = runner_enabled.commands.lock().len();
     assert_eq!(
         cmds_before, cmds_after,
         "Cleanup must issue 0 commands when interface was already enabled"
     );
     assert_eq!(*runner_enabled.state.lock(), "Enabled");
+}
+
+#[test]
+fn test_unscoped_forwarding_is_disallowed() {
+    #[allow(deprecated)]
+    let res = enable_ip_forwarding();
+    assert!(res.is_err());
+    assert!(res.unwrap_err().contains("disallowed for safety"));
 }
 
 #[derive(Clone)]
@@ -245,47 +258,34 @@ fn test_nic_sample_sampling_window_and_wraparound() {
     };
 
     // Simulated 50ms sampling interval with normal counter deltas
-    let s0 = vec![NicRawStats {
-        name: "Ethernet".into(),
-        received_bytes: 50_000,
-        sent_bytes: 20_000,
-        ..Default::default()
-    }];
-    let s1 = vec![NicRawStats {
-        name: "Ethernet".into(),
-        received_bytes: 100_000,
-        sent_bytes: 40_000,
-        ..Default::default()
-    }];
+    let s0 = vec![NicRawStats::new("Ethernet", 50_000, 20_000, 0, 0, 0, 0)];
+    let s1 = vec![NicRawStats::new("Ethernet", 100_000, 40_000, 0, 0, 0, 0)];
 
     let provider = TestTelemetryProvider::new(vec![adapter.clone()], vec![s0, s1]);
     let report = sample_nic_health(&provider, Some("Ethernet"), Duration::from_millis(50)).unwrap();
 
-    assert_eq!(report.rx_bytes_delta, 50_000);
-    assert_eq!(report.tx_bytes_delta, 20_000);
+    assert!(report.telemetry_valid);
+    assert!(!report.counter_reset_detected);
+    assert_eq!(report.rx_bytes_delta, Some(50_000));
+    assert_eq!(report.tx_bytes_delta, Some(20_000));
     assert_eq!(report.classification, NicHealthClassification::Normal);
 
     // Simulated wraparound / counter reset
-    let s_wrap0 = vec![NicRawStats {
-        name: "Ethernet".into(),
-        received_bytes: 100_000,
-        sent_bytes: 100_000,
-        ..Default::default()
-    }];
-    let s_wrap1 = vec![NicRawStats {
-        name: "Ethernet".into(),
-        received_bytes: 1_000, // Counter reset to 1000
-        sent_bytes: 500,       // Counter reset to 500
-        ..Default::default()
-    }];
+    let s_wrap0 = vec![NicRawStats::new("Ethernet", 100_000, 100_000, 0, 0, 0, 0)];
+    let s_wrap1 = vec![NicRawStats::new("Ethernet", 1_000, 500, 0, 0, 0, 0)];
 
     let wrap_provider = TestTelemetryProvider::new(vec![adapter], vec![s_wrap0, s_wrap1]);
     let wrap_report =
         sample_nic_health(&wrap_provider, Some("Ethernet"), Duration::from_millis(10)).unwrap();
 
-    assert_eq!(wrap_report.rx_bytes_delta, 0);
-    assert_eq!(wrap_report.tx_bytes_delta, 0);
-    assert_eq!(wrap_report.classification, NicHealthClassification::Normal);
+    assert!(wrap_report.counter_reset_detected);
+    assert!(!wrap_report.telemetry_valid);
+    assert_eq!(wrap_report.rx_bytes_delta, None);
+    assert_eq!(wrap_report.tx_bytes_delta, None);
+    assert_eq!(
+        wrap_report.classification,
+        NicHealthClassification::Degraded
+    );
 }
 
 #[test]
@@ -315,7 +315,35 @@ fn test_adapters_and_stats_csv_parsing() {
     let stats = parse_statistics_csv(stats_csv).unwrap();
     assert_eq!(stats.len(), 2);
     assert_eq!(stats[0].name, "Wi-Fi");
-    assert_eq!(stats[0].received_bytes, 24289016);
-    assert_eq!(stats[0].sent_bytes, 117956511);
-    assert_eq!(stats[0].received_discarded, 0);
+    assert_eq!(stats[0].received_bytes, Some(24289016));
+    assert_eq!(stats[0].sent_bytes, Some(117956511));
+    assert_eq!(stats[0].received_discarded, Some(0));
+}
+
+#[test]
+fn test_standalone_nic_dispatch_runs_hermetic_without_network() {
+    let adapter = NicAdapterInfo {
+        name: "Wi-Fi".into(),
+        interface_index: 16,
+        description: "Test Wi-Fi Adapter".into(),
+        status: "Up".into(),
+        link_speed_str: "1 Gbps".into(),
+        link_speed_bps: 1_000_000_000,
+    };
+    let s0 = vec![NicRawStats::new("Wi-Fi", 1_000, 2_000, 0, 0, 0, 0)];
+    let s1 = vec![NicRawStats::new("Wi-Fi", 3_000, 4_000, 0, 0, 0, 0)];
+
+    let provider = TestTelemetryProvider::new(vec![adapter], vec![s0, s1]);
+
+    // Test list
+    let res_list = run_nic_cli(&provider, None, &["list"]);
+    assert!(res_list.is_ok());
+
+    // Test help
+    let res_help = run_nic_cli(&provider, None, &["help"]);
+    assert!(res_help.is_ok());
+
+    // Test health sampling
+    let res_health = run_nic_cli(&provider, Some("Wi-Fi"), &["health"]);
+    assert!(res_health.is_ok());
 }

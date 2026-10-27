@@ -203,31 +203,131 @@ pub struct InterfaceForwardingRecord {
     pub currently_mutated: bool,
 }
 
-static TRACKED_FORWARDING: parking_lot::Mutex<Vec<InterfaceForwardingRecord>> =
-    parking_lot::Mutex::new(Vec::new());
+pub struct ForwardingManager {
+    tracked: parking_lot::Mutex<Vec<InterfaceForwardingRecord>>,
+}
+
+impl Default for ForwardingManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ForwardingManager {
+    pub const fn new() -> Self {
+        Self {
+            tracked: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn query_interface_forwarding_with<R: CommandRunner>(
+        &self,
+        runner: &R,
+        iface_name: &str,
+    ) -> Result<bool, String> {
+        let safe_name = iface_name.replace('\'', "''");
+        let cmd = format!(
+            "Get-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 | Select-Object -First 1 -ExpandProperty Forwarding",
+            safe_name
+        );
+        let output = runner.run_powershell(&cmd)?;
+        let val = output.trim();
+        if val.eq_ignore_ascii_case("Enabled") {
+            Ok(true)
+        } else if val.eq_ignore_ascii_case("Disabled") {
+            Ok(false)
+        } else {
+            Err(format!(
+                "Unexpected forwarding state '{}' for interface '{}'",
+                val, iface_name
+            ))
+        }
+    }
+
+    pub fn set_interface_forwarding_with<R: CommandRunner>(
+        &self,
+        runner: &R,
+        iface_name: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let safe_name = iface_name.replace('\'', "''");
+        let state_str = if enabled { "Enabled" } else { "Disabled" };
+        let cmd = format!(
+            "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -Forwarding {}",
+            safe_name, state_str
+        );
+        let _ = runner.run_powershell(&cmd)?;
+        Ok(())
+    }
+
+    pub fn ensure_scoped_forwarding_enabled_with<R: CommandRunner>(
+        &self,
+        runner: &R,
+        iface_name: &str,
+    ) -> Result<bool, String> {
+        let mut tracked = self.tracked.lock();
+        if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
+            if entry.currently_mutated {
+                return Ok(true);
+            }
+        }
+
+        let original = self.query_interface_forwarding_with(runner, iface_name)?;
+        if !original {
+            self.set_interface_forwarding_with(runner, iface_name, true)?;
+            if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
+                entry.currently_mutated = true;
+                entry.original_enabled = false;
+            } else {
+                tracked.push(InterfaceForwardingRecord {
+                    interface_name: iface_name.to_string(),
+                    original_enabled: false,
+                    currently_mutated: true,
+                });
+            }
+            Ok(true)
+        } else {
+            if !tracked.iter().any(|e| e.interface_name == iface_name) {
+                tracked.push(InterfaceForwardingRecord {
+                    interface_name: iface_name.to_string(),
+                    original_enabled: true,
+                    currently_mutated: false,
+                });
+            }
+            Ok(false)
+        }
+    }
+
+    pub fn cleanup_forwarding_with<R: CommandRunner>(&self, runner: &R) {
+        let mut tracked = self.tracked.lock();
+        for entry in tracked.iter_mut() {
+            if entry.currently_mutated {
+                if !entry.original_enabled {
+                    let _ =
+                        self.set_interface_forwarding_with(runner, &entry.interface_name, false);
+                }
+                entry.currently_mutated = false;
+            }
+        }
+    }
+
+    pub fn tracked_records(&self) -> Vec<InterfaceForwardingRecord> {
+        self.tracked.lock().clone()
+    }
+
+    pub fn clear(&self) {
+        self.tracked.lock().clear();
+    }
+}
+
+static GLOBAL_FORWARDING_MANAGER: ForwardingManager = ForwardingManager::new();
 
 /// Queries the IPv4 forwarding state of a specific network interface alias.
 pub fn query_interface_forwarding_with<R: CommandRunner>(
     runner: &R,
     iface_name: &str,
 ) -> Result<bool, String> {
-    let safe_name = iface_name.replace('\'', "''");
-    let cmd = format!(
-        "Get-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 | Select-Object -First 1 -ExpandProperty Forwarding",
-        safe_name
-    );
-    let output = runner.run_powershell(&cmd)?;
-    let val = output.trim();
-    if val.eq_ignore_ascii_case("Enabled") {
-        Ok(true)
-    } else if val.eq_ignore_ascii_case("Disabled") {
-        Ok(false)
-    } else {
-        Err(format!(
-            "Unexpected forwarding state '{}' for interface '{}'",
-            val, iface_name
-        ))
-    }
+    GLOBAL_FORWARDING_MANAGER.query_interface_forwarding_with(runner, iface_name)
 }
 
 pub fn query_interface_forwarding(iface_name: &str) -> Result<bool, String> {
@@ -240,14 +340,7 @@ pub fn set_interface_forwarding_with<R: CommandRunner>(
     iface_name: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let safe_name = iface_name.replace('\'', "''");
-    let state_str = if enabled { "Enabled" } else { "Disabled" };
-    let cmd = format!(
-        "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -Forwarding {}",
-        safe_name, state_str
-    );
-    let _ = runner.run_powershell(&cmd)?;
-    Ok(())
+    GLOBAL_FORWARDING_MANAGER.set_interface_forwarding_with(runner, iface_name, enabled)
 }
 
 pub fn set_interface_forwarding(iface_name: &str, enabled: bool) -> Result<(), String> {
@@ -260,37 +353,7 @@ pub fn ensure_scoped_forwarding_enabled_with<R: CommandRunner>(
     runner: &R,
     iface_name: &str,
 ) -> Result<bool, String> {
-    let mut tracked = TRACKED_FORWARDING.lock();
-    if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
-        if entry.currently_mutated {
-            return Ok(true);
-        }
-    }
-
-    let original = query_interface_forwarding_with(runner, iface_name)?;
-    if !original {
-        set_interface_forwarding_with(runner, iface_name, true)?;
-        if let Some(entry) = tracked.iter_mut().find(|e| e.interface_name == iface_name) {
-            entry.currently_mutated = true;
-            entry.original_enabled = false;
-        } else {
-            tracked.push(InterfaceForwardingRecord {
-                interface_name: iface_name.to_string(),
-                original_enabled: false,
-                currently_mutated: true,
-            });
-        }
-        Ok(true)
-    } else {
-        if !tracked.iter().any(|e| e.interface_name == iface_name) {
-            tracked.push(InterfaceForwardingRecord {
-                interface_name: iface_name.to_string(),
-                original_enabled: true,
-                currently_mutated: false,
-            });
-        }
-        Ok(false)
-    }
+    GLOBAL_FORWARDING_MANAGER.ensure_scoped_forwarding_enabled_with(runner, iface_name)
 }
 
 pub fn ensure_scoped_forwarding_enabled(iface_name: &str) -> Result<bool, String> {
@@ -300,40 +363,23 @@ pub fn ensure_scoped_forwarding_enabled(iface_name: &str) -> Result<bool, String
 /// Restores only interfaces that were mutated by Rustrict to their original forwarding state.
 /// If no interfaces were mutated, zero system commands are executed.
 pub fn cleanup_forwarding_with<R: CommandRunner>(runner: &R) {
-    let mut tracked = TRACKED_FORWARDING.lock();
-    for entry in tracked.iter_mut() {
-        if entry.currently_mutated {
-            if !entry.original_enabled {
-                let _ = set_interface_forwarding_with(runner, &entry.interface_name, false);
-            }
-            entry.currently_mutated = false;
-        }
-    }
+    GLOBAL_FORWARDING_MANAGER.cleanup_forwarding_with(runner);
 }
 
 pub fn cleanup_forwarding() {
     cleanup_forwarding_with(&SystemCommandRunner);
 }
 
-/// Backward compatibility shim for tests and external callers
+/// Deprecated: Unscoped global IP forwarding is unsafe and disallowed.
+/// Scoped forwarding per interface must be used instead.
+#[deprecated(
+    note = "Unscoped global IP forwarding is disallowed for safety. Use ensure_scoped_forwarding_enabled(iface_name) instead."
+)]
 pub fn enable_ip_forwarding() -> Result<(), String> {
-    let status = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Set-NetIPInterface -AddressFamily IPv4 -Forwarding Enabled",
-        ])
-        .status()
-        .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err("Failed to enable IP forwarding via Set-NetIPInterface".into())
-    }
+    Err("Unscoped global IP forwarding is disallowed for safety. Use ensure_scoped_forwarding_enabled(&interface_name) to scope forwarding changes strictly to the active interface.".into())
 }
 
-/// Backward compatibility shim for tests and external callers
+/// Backward compatibility shim for tests and external callers.
 pub fn disable_ip_forwarding() -> Result<(), String> {
     cleanup_forwarding();
     Ok(())
