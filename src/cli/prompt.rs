@@ -136,6 +136,7 @@ impl RustrictCli {
                 host.status = HostStatus::Blocked(dir);
                 host.persistent_block = true;
                 host.online = false; // Will be verified online during scan
+                let _ = crate::platform::ensure_scoped_forwarding_enabled(&iface.name);
                 spoofer.add(host.clone());
                 limiter.block(host.ip, dir);
                 hosts.push(host);
@@ -299,6 +300,7 @@ impl RustrictCli {
                 "free" => self.handle_free(&args[1..]),
                 "add" => self.handle_add(&args[1..]),
                 "router" => self.handle_router(&args[1..]),
+                "nic" | "adapter" => self.handle_nic(&args[1..]),
                 "clear" | "cls" => {
                     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
                     let _ = io::stdout().flush();
@@ -452,6 +454,15 @@ impl RustrictCli {
         render_hosts_table(&self.hosts);
     }
 
+    fn ensure_forwarding_active(&self) {
+        if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
+            eprintln!(
+                "[WARN] Failed to enable scoped IP forwarding on {}: {}",
+                self.iface.name, e
+            );
+        }
+    }
+
     fn handle_limit(&mut self, args: &[&str]) {
         if args.len() < 2 {
             println!("Usage: limit <id|ip|all> <rate> [--upload] [--download]");
@@ -480,6 +491,8 @@ impl RustrictCli {
                 return;
             }
         };
+
+        self.ensure_forwarding_active();
 
         for id in ids {
             if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
@@ -526,6 +539,8 @@ impl RustrictCli {
                 return;
             }
         };
+
+        self.ensure_forwarding_active();
 
         for id in ids {
             if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
@@ -669,6 +684,11 @@ impl RustrictCli {
                 .iter()
                 .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac));
             h.online = is_alive;
+        }
+
+        let has_persistent_blocks = self.hosts.iter().any(|h| h.persistent_block);
+        if has_persistent_blocks {
+            self.ensure_forwarding_active();
         }
 
         // Upsert newly discovered/confirmed hosts
@@ -997,6 +1017,8 @@ impl RustrictCli {
 
         let profile = FaultProfile::new(drop_pct, delay_ms, jitter_ms);
 
+        self.ensure_forwarding_active();
+
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
@@ -1092,8 +1114,113 @@ impl RustrictCli {
         println!("  free <id|ip|all>                                Removes limits and unblocks host [Clears persistent rule]");
         println!("  add <ip> [--mac <mac>]                          Manually adds a host to table");
         println!("  router [capabilities|status|policies|preview|pause|resume|adjust|connect] [...] Router administration via authenticated firewall");
+        println!("  nic [status|health|stats|list] [name|index]     Physical network adapter health telemetry and diagnostics");
         println!("  clear                                           Clears screen");
         println!("  quit / exit                                     Exits rustrict and restores network\n");
+    }
+
+    pub fn handle_nic(&self, args: &[&str]) {
+        use crate::monitor::nic::{
+            print_nic_report, sample_nic_health, NicTelemetryProvider, WindowsPowershellNicProvider,
+        };
+
+        if args
+            .first()
+            .map(|s| s.eq_ignore_ascii_case("help"))
+            .unwrap_or(false)
+        {
+            println!(
+                "{}",
+                "Physical Network Adapter Health Diagnostic Commands:"
+                    .bright_yellow()
+                    .bold()
+            );
+            println!("  nic                                 Run 2-second health sampling diagnostic on current active adapter");
+            println!("  nic status / health / stats [name]  Sample health and metrics for default or named adapter");
+            println!("  nic list                            List all detected network adapters and link states");
+            println!("  nic <name|index>                    Sample health for specific adapter name or index");
+            return;
+        }
+
+        let provider = WindowsPowershellNicProvider;
+
+        if args
+            .first()
+            .map(|s| s.eq_ignore_ascii_case("list"))
+            .unwrap_or(false)
+        {
+            match provider.query_adapters() {
+                Ok(adapters) => {
+                    println!("\n{}", "Detected Network Adapters:".bold());
+                    for a in adapters {
+                        let status_styled = if a.status.eq_ignore_ascii_case("Up") {
+                            a.status.green().bold()
+                        } else {
+                            a.status.dimmed()
+                        };
+                        println!(
+                            "  [{:>2}] {:<24} Status: {:<12} Link: {:<10} ({})",
+                            a.interface_index,
+                            a.name.bold(),
+                            status_styled,
+                            a.link_speed_str,
+                            a.description
+                        );
+                    }
+                    println!();
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to list network adapters: {}",
+                        "[ERR]".bright_red().bold(),
+                        e
+                    );
+                }
+            }
+            return;
+        }
+
+        let mut filter: Option<&str> = None;
+        if let Some(first) = args.first() {
+            if first.eq_ignore_ascii_case("status")
+                || first.eq_ignore_ascii_case("health")
+                || first.eq_ignore_ascii_case("stats")
+            {
+                if let Some(second) = args.get(1) {
+                    filter = Some(second);
+                }
+            } else {
+                filter = Some(first);
+            }
+        }
+
+        let adapter_filter = filter.unwrap_or(self.iface.name.as_str());
+
+        println!(
+            "{}",
+            format!(
+                "Sampling network adapter telemetry for '{}' (2-second interval)...",
+                adapter_filter
+            )
+            .cyan()
+        );
+
+        match sample_nic_health(
+            &provider,
+            Some(adapter_filter),
+            std::time::Duration::from_secs(2),
+        ) {
+            Ok(report) => {
+                print_nic_report(&report);
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} NIC health diagnostic failed: {}",
+                    "[ERR]".bright_red().bold(),
+                    e
+                );
+            }
+        }
     }
 
     pub fn handle_router(&mut self, args: &[&str]) {
