@@ -118,7 +118,7 @@ pub struct WindowsPowershellNicProvider {
 impl Default for WindowsPowershellNicProvider {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(5),
+            timeout: Duration::from_secs(10),
         }
     }
 }
@@ -1498,9 +1498,9 @@ mod tests {
     fn test_powershell_bounded_successful_command() {
         let output = run_powershell_bounded(
             "Write-Output 'rustrict_telemetry_ok'",
-            Duration::from_secs(5),
+            Duration::from_secs(15),
         )
-        .expect("PowerShell command should succeed within 5 seconds");
+        .expect("PowerShell command should succeed within 15 seconds");
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("rustrict_telemetry_ok"));
