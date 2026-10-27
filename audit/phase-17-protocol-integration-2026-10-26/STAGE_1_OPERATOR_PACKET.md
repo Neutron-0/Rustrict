@@ -1,9 +1,12 @@
 # Rustrict Phase 17 — Stage 1 Operator Runbook & Lab Safety Packet
 
-**Document Version:** 1.3.0
-**Date:** 2026-10-27 (Phase 18.3 Reconciled Baseline)
+**Document Version:** 1.4.0
+**Date:** 2026-10-27 (Phase 18.4 Reconciled Baseline)
 **Audience:** Physical Router Test Operators, Network Test Engineers, Safety Verifiers
-**Target Codebase Revision:** Phase 18.3 (`bd06f1c` / `HEAD`)
+**Target Codebase Revision:**
+- **Implementation Code Revision:** Phase 18.4 (`9106be3999e4cbbe8933b9dfa3848b788ef976a4`)
+- **Phase 18.3 Code Baseline:** `daa2a1cea9b4c46f0b970dbc892e95129ff33514`
+- **Phase 18.3 Documentation HEAD:** `9e6c7da124110f6d3a1a5b712d9f66c109379879`
 
 ---
 
@@ -28,10 +31,15 @@ Stage 1 is the **first physical connection test** between the Rustrict managemen
    - An active unconfirmed record is persisted locally to prevent duplicate conflicting actions.
    - Follow-up mutations overlapping with any active unconfirmed (`Unknown`) or `PartialFailure` scope are **strictly blocked** by the execution engine until manually verified or reconciled out-of-band by the operator.
 6. **No Mock Mode Equivalence**: Mock mode (`router connect mock`) is strictly an in-memory development harness and must never be recorded as live router hardware validation.
-7. **Persistent Enforcement Precondition & Fail-Closed Safety (Phase 18.3)**:
+7. **Persistent Enforcement Precondition & Fail-Closed Safety (Phase 18.3 & 18.4)**:
    - Before launching Stage 1, verify that `%ProgramData%\Rustrict\rustrict_state.json` contains no unmanaged, stale, or conflicting persisted blocks from previous testing.
    - Rustrict enforces fail-closed restoration at startup: if scoped forwarding or packet injection dependencies fail, persisted blocks are marked `Persisted [Inactive]` in memory and are **never** added to the spoofer or limiter. Saved records on disk are strictly preserved without deletion or overwrite.
-   - On shutdown or Ctrl+C, Windows IP forwarding cleanup is rigorously queried and verified; failures are reported to the operator with exit code 1. Zero orphaned forwarding states or active worker threads are permitted prior to Stage 1.
+   - Target address validation strictly rejects subnet network identifiers and directed-broadcast addresses across all configured CIDRs (preserving valid RFC 3021 /31 and /32 host addresses).
+   - Scoped IP forwarding queries actual OS state before reporting readiness (ignoring stale internal flags); sets and verifies `Enabled` postconditions; preserves original baselines; and on shutdown executes bounded retries, reporting structured failures and exiting code 1 on verification failure.
+8. **Startup Driver & Thread Initialization Semantics (Source-Verified)**:
+   - `ArpSpoofer::new()`: Attempts to open the raw Layer 2 injection sender (`pcap_open_live`) during construction. It does **not** start its background worker thread, does **not** add any targets, and transmits **zero** frames until targets are explicitly added and active.
+   - `PassiveIdentitySniffer::new()`: Spawns a background thread opening Npcap in promiscuous capture mode to listen on UDP port 67/68 for DHCP Option 12 hostnames. It is strictly a passive receiver and transmits **zero** packets.
+   - `TrafficLimiter::new()`: Instantiates with empty rule maps and inactive driver handles; it does **not** open the kernel `WinDivert` driver until active limits or blocks are applied.
 
 ---
 
