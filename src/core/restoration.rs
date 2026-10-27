@@ -28,38 +28,23 @@ pub fn validate_restored_target(
         .parse()
         .map_err(|e| format!("Malformed MAC address '{}': {}", mac_str, e))?;
 
-    // 2. Self and Gateway exclusion checks
-    if *ip == params.iface_ip {
-        return Err(format!(
-            "Local interface IP {} cannot be an enforcement target",
-            ip
-        ));
-    }
-    if *ip == params.gateway_ip {
-        return Err(format!(
-            "Default gateway IP {} cannot be an enforcement target",
-            ip
-        ));
-    }
-    if mac == params.iface_mac {
-        return Err(format!(
-            "Local interface MAC {} cannot be an enforcement target",
-            mac
-        ));
-    }
-    if mac == params.gateway_mac {
-        return Err(format!(
-            "Default gateway MAC {} cannot be an enforcement target",
-            mac
-        ));
-    }
+    // 2. Delegate to centralized TargetAdmissionValidator (enforcing controller/gateway exclusions,
+    // unicast validity, subnet network and directed broadcast addresses, and concrete boundaries)
+    let validator = crate::core::admission::TargetAdmissionValidator::new(
+        params.iface_ip,
+        params.iface_mac,
+        params.gateway_ip,
+        params.gateway_mac,
+        scope,
+    );
 
-    // 3. Delegate to shared target validation rule (checks unspecified, loopback,
-    // broadcast, multicast, zero/broadcast/multicast MAC, explicit exclusions,
-    // subnet network and directed broadcast addresses, and strict mode boundaries).
-    scope
-        .validate_target(ip, Some(&mac))
-        .map_err(|e| format!("Scope violation: {}", e))?;
+    validator
+        .validate_target(
+            ip,
+            Some(&mac),
+            crate::core::admission::AdmissionOperation::LocalEnforcement,
+        )
+        .map_err(|e| format!("Admission violation: {}", e))?;
 
     Ok(mac)
 }

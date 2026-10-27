@@ -125,7 +125,7 @@ impl std::fmt::Display for Ipv4Cidr {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeManager {
     pub allowed_cidrs: Vec<Ipv4Cidr>,
     pub excluded_ips: HashSet<Ipv4Addr>,
@@ -298,6 +298,24 @@ impl ScopeManager {
         Ok(())
     }
 
+    /// Sanitizes scope configuration loaded from untrusted storage or external input.
+    /// Retains only valid, routable unicast CIDR boundaries and valid exclusion entries.
+    pub fn sanitize(&mut self) {
+        self.allowed_cidrs.retain(|c| {
+            c.prefix > 0
+                && c.prefix <= 32
+                && !c.network.is_unspecified()
+                && !c.network.is_loopback()
+                && !c.network.is_broadcast()
+                && !c.network.is_multicast()
+        });
+        self.excluded_ips.retain(|ip| {
+            !ip.is_unspecified() && !ip.is_loopback() && !ip.is_broadcast() && !ip.is_multicast()
+        });
+        self.excluded_macs
+            .retain(|mac| !mac.is_zero() && !mac.is_broadcast() && (mac.0[0] & 1 == 0));
+    }
+
     pub fn clear(&mut self) {
         self.allowed_cidrs.clear();
         self.excluded_ips.clear();
@@ -431,5 +449,57 @@ mod tests {
         assert!(scope
             .validate_target(&Ipv4Addr::new(172, 16, 0, 10), None)
             .is_ok());
+    }
+
+    #[test]
+    fn test_scope_sanitize_filters_invalid_untrusted_entries() {
+        let mut scope = ScopeManager::new();
+        // Insert invalid CIDRs manually
+        scope.allowed_cidrs.push(Ipv4Cidr {
+            network: Ipv4Addr::new(0, 0, 0, 0),
+            prefix: 0,
+        });
+        scope.allowed_cidrs.push(Ipv4Cidr {
+            network: Ipv4Addr::new(127, 0, 0, 0),
+            prefix: 8,
+        });
+        scope.allowed_cidrs.push(Ipv4Cidr {
+            network: Ipv4Addr::new(224, 0, 0, 0),
+            prefix: 4,
+        });
+        scope.allowed_cidrs.push(Ipv4Cidr {
+            network: Ipv4Addr::new(255, 255, 255, 255),
+            prefix: 32,
+        });
+        scope.allowed_cidrs.push(Ipv4Cidr {
+            network: Ipv4Addr::new(192, 168, 1, 0),
+            prefix: 24,
+        });
+
+        scope.excluded_ips.insert(Ipv4Addr::new(0, 0, 0, 0));
+        scope.excluded_ips.insert(Ipv4Addr::new(127, 0, 0, 1));
+        scope.excluded_ips.insert(Ipv4Addr::new(192, 168, 1, 200));
+
+        scope.excluded_macs.insert(MacAddress::ZERO);
+        scope.excluded_macs.insert(MacAddress::BROADCAST);
+        scope
+            .excluded_macs
+            .insert("00:11:22:33:44:55".parse().unwrap());
+
+        scope.sanitize();
+
+        assert_eq!(scope.allowed_cidrs.len(), 1);
+        assert_eq!(
+            scope.allowed_cidrs[0],
+            Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap()
+        );
+        assert_eq!(scope.excluded_ips.len(), 1);
+        assert!(scope
+            .excluded_ips
+            .contains(&Ipv4Addr::new(192, 168, 1, 200)));
+        assert_eq!(scope.excluded_macs.len(), 1);
+        assert!(scope
+            .excluded_macs
+            .contains(&"00:11:22:33:44:55".parse().unwrap()));
     }
 }

@@ -242,6 +242,25 @@ impl RawL2Sender {
         }
         Ok(())
     }
+
+    /// Creates a dummy packet sender for hermetic integration testing without Npcap DLL.
+    pub fn new_dummy_for_testing() -> Self {
+        unsafe extern "C" fn dummy_send(
+            _handle: *mut std::ffi::c_void,
+            _frame: *const u8,
+            _len: i32,
+        ) -> i32 {
+            0
+        }
+        unsafe extern "C" fn dummy_close(_handle: *mut std::ffi::c_void) {}
+
+        Self {
+            handle: std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut std::ffi::c_void,
+            send_fn: dummy_send,
+            close_fn: dummy_close,
+            h_module: std::ptr::null_mut(),
+        }
+    }
 }
 
 impl Drop for RawL2Sender {

@@ -11,6 +11,7 @@ use crate::cli::table::{
     render_router_policy_detail, render_router_providers_table,
     render_router_unified_policies_table, render_scope_table, render_services_table,
 };
+use crate::core::admission::{AdmissionOperation, TargetAdmissionValidator};
 use crate::core::assessment::{AuditFinding, ServiceEntry};
 use crate::core::scope::{Ipv4Cidr, ScopeManager};
 use crate::gateway::admin::{
@@ -41,6 +42,7 @@ pub struct RustrictCli {
     router_registry: Arc<RouterRegistry>,
     policy_engine: Arc<PolicyExecutionEngine>,
     simulated_inputs: Vec<String>,
+    pub is_router_lab: bool,
 }
 
 /// Reads password from console with echo disabled to prevent credential leaking
@@ -90,16 +92,24 @@ impl RustrictCli {
         let sniffer = crate::resolver::passive::PassiveIdentitySniffer::new(&iface.device_path);
         let persistent_state = crate::state::PersistentState::load();
 
-        let scope = if let Some(ref saved_scope) = persistent_state.scope {
-            saved_scope.clone()
+        let mut scope = if let Some(mut saved_scope) = persistent_state.scope.clone() {
+            saved_scope.sanitize();
+            saved_scope
         } else {
-            let mut s = ScopeManager::default();
-            let prefix = u32::from(iface.netmask).count_ones() as u8;
-            if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
-                s.add_cidr_direct(local_cidr);
-            }
-            s
+            ScopeManager::default()
         };
+
+        if scope.allowed_cidrs.is_empty() {
+            let prefix = u32::from(iface.netmask).count_ones() as u8;
+            let prefix = if prefix > 0 && prefix <= 32 {
+                prefix
+            } else {
+                24
+            };
+            if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+                scope.add_cidr_direct(local_cidr);
+            }
+        }
 
         let mut hosts = Vec::new();
 
@@ -208,6 +218,86 @@ impl RustrictCli {
             router_registry,
             policy_engine,
             simulated_inputs: Vec::new(),
+            is_router_lab: false,
+        }
+    }
+
+    /// Creates a read-only router lab environment.
+    /// In this mode, no raw Layer 2 packet injection sender is initialized,
+    /// persistent blocks are loaded as inactive inventory without activation,
+    /// OS forwarding is never touched, and local destructive commands (block, limit, simulate)
+    /// are strictly disabled.
+    pub fn new_router_lab(iface: NetworkInterface) -> Self {
+        let scanner = SubnetScanner::new(iface.ip, iface.netmask, iface.gateway);
+        let spoofer = ArpSpoofer::new_inactive(iface.mac, iface.gateway, iface.gateway_mac);
+        let limiter = TrafficLimiter::new();
+        let sniffer = crate::resolver::passive::PassiveIdentitySniffer::new_inactive();
+        let persistent_state = crate::state::PersistentState::load();
+
+        let mut scope = if let Some(mut saved_scope) = persistent_state.scope.clone() {
+            saved_scope.sanitize();
+            saved_scope
+        } else {
+            ScopeManager::default()
+        };
+
+        if scope.allowed_cidrs.is_empty() {
+            let prefix = u32::from(iface.netmask).count_ones() as u8;
+            let prefix = if prefix > 0 && prefix <= 32 {
+                prefix
+            } else {
+                24
+            };
+            if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+                scope.add_cidr_direct(local_cidr);
+            }
+        }
+
+        let mut hosts = Vec::new();
+        if !persistent_state.blocked_hosts.is_empty() {
+            println!(
+                "{} Router-lab mode: Loading {} persistent blocked device(s) as INACTIVE (local enforcement disabled)...",
+                "[INFO]".cyan().bold(),
+                persistent_state.blocked_hosts.len()
+            );
+            for (idx, b) in persistent_state.blocked_hosts.iter().enumerate() {
+                let mac = b.mac.parse().unwrap_or(MacAddress::ZERO);
+                let dir = persistent_state.get_direction(&b.ip);
+                let mut host = Host::with_source(
+                    idx,
+                    b.ip,
+                    mac,
+                    b.name.clone(),
+                    crate::types::NameSource::Manual,
+                    "Persisted Device".into(),
+                );
+                host.status = HostStatus::PersistedInactive(dir);
+                host.persistent_block = true;
+                hosts.push(host);
+            }
+        }
+
+        let router_registry = Arc::new(RouterRegistry::new(iface.gateway));
+        router_registry.set_controller_ip(iface.ip);
+        let policy_engine = Arc::new(PolicyExecutionEngine::new(router_registry.clone()));
+        let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+
+        Self {
+            iface,
+            scanner,
+            spoofer,
+            limiter,
+            sniffer,
+            hosts,
+            persistent_state,
+            scope,
+            services: HashMap::new(),
+            findings: Vec::new(),
+            admin_provider,
+            router_registry,
+            policy_engine,
+            simulated_inputs: Vec::new(),
+            is_router_lab: true,
         }
     }
 
@@ -257,7 +347,29 @@ impl RustrictCli {
             router_registry,
             policy_engine,
             simulated_inputs: Vec::new(),
+            is_router_lab: false,
         }
+    }
+
+    /// Creates a test CLI instance with a dummy L2 packet injection sender.
+    pub fn new_with_dummy_injection_for_testing() -> Self {
+        let mut cli = Self::new_for_testing();
+        cli.spoofer = ArpSpoofer::new_with_dummy_sender_for_testing(
+            cli.iface.mac,
+            cli.iface.gateway,
+            cli.iface.gateway_mac,
+        );
+        cli
+    }
+
+    pub fn admission_validator(&self) -> TargetAdmissionValidator<'_> {
+        TargetAdmissionValidator::new(
+            self.iface.ip,
+            self.iface.mac,
+            self.iface.gateway,
+            self.iface.gateway_mac,
+            &self.scope,
+        )
     }
 
     pub fn with_simulated_inputs(mut self, inputs: Vec<String>) -> Self {
@@ -285,6 +397,22 @@ impl RustrictCli {
 
     pub fn policy_engine(&self) -> &Arc<PolicyExecutionEngine> {
         &self.policy_engine
+    }
+
+    pub fn iface(&self) -> &NetworkInterface {
+        &self.iface
+    }
+
+    pub fn set_spoofer(&mut self, spoofer: ArpSpoofer) {
+        self.spoofer = spoofer;
+    }
+
+    pub fn hosts(&self) -> &[Host] {
+        &self.hosts
+    }
+
+    pub fn hosts_mut(&mut self) -> &mut Vec<Host> {
+        &mut self.hosts
     }
 
     pub fn set_hosts(&mut self, hosts: Vec<Host>) {
@@ -498,9 +626,18 @@ impl RustrictCli {
         render_hosts_table(&self.hosts);
     }
 
-    fn handle_limit(&mut self, args: &[&str]) {
+    pub fn handle_limit(&mut self, args: &[&str]) {
         if args.len() < 2 {
             println!("Usage: limit <id|ip|all> <rate> [--upload] [--download]");
+            return;
+        }
+
+        // 1. Guard against router-lab mode
+        if self.is_router_lab {
+            println!(
+                "{} Local enforcement command 'limit' is disabled in router-lab mode. Router-lab mode is strictly read-only for local Layer 2/3 interfaces.",
+                "[ERR]".red().bold()
+            );
             return;
         }
 
@@ -519,6 +656,15 @@ impl RustrictCli {
             dir = Direction::Incoming;
         }
 
+        // 2. Fail-closed injection check
+        if !self.spoofer.has_sender() {
+            println!(
+                "{} Aborting operation: Raw Layer 2 packet injection sender is not initialized (Npcap unavailable).",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
         let ids = match self.resolve_targets(args[0]) {
             Ok(ids) => ids,
             Err(e) => {
@@ -527,13 +673,18 @@ impl RustrictCli {
             }
         };
 
-        // 1. Pre-validate target scope and exclusions before mutating state or enabling forwarding
+        // 3. Pre-validate target scope and exclusions before mutating state or enabling forwarding
+        let validator = self.admission_validator();
         let mut target_hosts = Vec::new();
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id) {
-                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                if let Err(reason) = validator.validate_target(
+                    &host.ip,
+                    Some(&host.mac),
+                    AdmissionOperation::LocalEnforcement,
+                ) {
                     println!(
-                        "{} Scope Error for {}: {}",
+                        "{} Scope / Admission Error for {}: {}",
                         "[ERR]".red().bold(),
                         host.ip,
                         reason
@@ -552,7 +703,7 @@ impl RustrictCli {
             return;
         }
 
-        // 2. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
+        // 4. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
         if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
             println!(
                 "{} Aborting operation: Failed to enable scoped IP forwarding on {}: {}",
@@ -563,13 +714,42 @@ impl RustrictCli {
             return;
         }
 
-        // 3. Mutate host state, spoofer, limiter
+        // 5. Atomic multi-target activation with transactional rollback
+        let mut activated = Vec::new();
+        let mut failure = None;
+        for host in &target_hosts {
+            match self.spoofer.add(host.clone()) {
+                Ok(()) => {
+                    self.limiter.limit(host.ip, dir, rate);
+                    activated.push(host.clone());
+                }
+                Err(err) => {
+                    failure = Some((host.ip, err));
+                    break;
+                }
+            }
+        }
+
+        if let Some((failed_ip, err)) = failure {
+            for act in &activated {
+                self.spoofer.remove(&act.ip);
+                self.limiter.unlimit(&act.ip);
+            }
+            println!(
+                "{} Enforcement transaction failed on {}: {}. Rolled back {} previously activated target(s). Zero state mutated.",
+                "[ERR]".red().bold(),
+                failed_ip,
+                err,
+                activated.len()
+            );
+            return;
+        }
+
+        // 6. Mutate host state only after verified transactional success
         for host in target_hosts {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Limited(rate, dir);
             }
-            let _ = self.spoofer.add(host.clone());
-            self.limiter.limit(host.ip, dir, rate);
             println!(
                 "{} Limited {} to {} ({})",
                 "OK".green().bold(),
@@ -580,9 +760,18 @@ impl RustrictCli {
         }
     }
 
-    fn handle_block(&mut self, args: &[&str]) {
+    pub fn handle_block(&mut self, args: &[&str]) {
         if args.is_empty() {
             println!("Usage: block <id|ip|all> [--upload] [--download]");
+            return;
+        }
+
+        // 1. Guard against router-lab mode
+        if self.is_router_lab {
+            println!(
+                "{} Local enforcement command 'block' is disabled in router-lab mode. Router-lab mode is strictly read-only for local Layer 2/3 interfaces.",
+                "[ERR]".red().bold()
+            );
             return;
         }
 
@@ -593,6 +782,15 @@ impl RustrictCli {
             dir = Direction::Incoming;
         }
 
+        // 2. Fail-closed injection check
+        if !self.spoofer.has_sender() {
+            println!(
+                "{} Aborting operation: Raw Layer 2 packet injection sender is not initialized (Npcap unavailable).",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
         let ids = match self.resolve_targets(args[0]) {
             Ok(ids) => ids,
             Err(e) => {
@@ -601,13 +799,18 @@ impl RustrictCli {
             }
         };
 
-        // 1. Pre-validate target scope and exclusions before mutating state or enabling forwarding
+        // 3. Pre-validate target scope and exclusions before mutating state or enabling forwarding
+        let validator = self.admission_validator();
         let mut target_hosts = Vec::new();
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id) {
-                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                if let Err(reason) = validator.validate_target(
+                    &host.ip,
+                    Some(&host.mac),
+                    AdmissionOperation::LocalEnforcement,
+                ) {
                     println!(
-                        "{} Scope Error for {}: {}",
+                        "{} Scope / Admission Error for {}: {}",
                         "[ERR]".red().bold(),
                         host.ip,
                         reason
@@ -626,7 +829,7 @@ impl RustrictCli {
             return;
         }
 
-        // 2. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
+        // 4. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
         if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
             println!(
                 "{} Aborting operation: Failed to enable scoped IP forwarding on {}: {}",
@@ -637,15 +840,44 @@ impl RustrictCli {
             return;
         }
 
-        // 3. Mutate host state, persistent records, spoofer, limiter
+        // 5. Atomic multi-target activation with transactional rollback
+        let mut activated = Vec::new();
+        let mut failure = None;
+        for host in &target_hosts {
+            match self.spoofer.add(host.clone()) {
+                Ok(()) => {
+                    self.limiter.block(host.ip, dir);
+                    activated.push(host.clone());
+                }
+                Err(err) => {
+                    failure = Some((host.ip, err));
+                    break;
+                }
+            }
+        }
+
+        if let Some((failed_ip, err)) = failure {
+            for act in &activated {
+                self.spoofer.remove(&act.ip);
+                self.limiter.unlimit(&act.ip);
+            }
+            println!(
+                "{} Enforcement transaction failed on {}: {}. Rolled back {} previously activated target(s). Zero state mutated.",
+                "[ERR]".red().bold(),
+                failed_ip,
+                err,
+                activated.len()
+            );
+            return;
+        }
+
+        // 6. Mutate host state and persistent records only after verified transactional success
         for host in target_hosts {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Blocked(dir);
                 h.persistent_block = true;
                 self.persistent_state.add_blocked(h, dir);
             }
-            let _ = self.spoofer.add(host.clone());
-            self.limiter.block(host.ip, dir);
             println!(
                 "{} Blocked {} ({}) [Persistent]",
                 "OK".green().bold(),
@@ -655,7 +887,7 @@ impl RustrictCli {
         }
     }
 
-    fn handle_free(&mut self, args: &[&str]) {
+    pub fn handle_free(&mut self, args: &[&str]) {
         if args.is_empty() {
             println!("Usage: free <id|ip|all>");
             return;
@@ -774,7 +1006,7 @@ impl RustrictCli {
         }
 
         let has_persistent_blocks = self.hosts.iter().any(|h| h.persistent_block);
-        let forwarding_ok = if has_persistent_blocks {
+        let forwarding_ok = if has_persistent_blocks && !self.is_router_lab {
             match crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
                 Ok(_) => true,
                 Err(e) => {
@@ -801,6 +1033,14 @@ impl RustrictCli {
             true
         };
 
+        let validator = TargetAdmissionValidator::new(
+            self.iface.ip,
+            self.iface.mac,
+            self.iface.gateway,
+            self.iface.gateway_mac,
+            &self.scope,
+        );
+
         // Upsert newly discovered/confirmed hosts
         for new_h in new_hosts {
             if let Some(existing) = self
@@ -818,19 +1058,32 @@ impl RustrictCli {
                 if existing.vendor.is_empty() || existing.vendor == "Generic Network Device" {
                     existing.vendor = new_h.vendor;
                 }
-                // Ensure persistent block is continuously enforced only if forwarding is verified
-                if existing.persistent_block && forwarding_ok {
+                // Ensure persistent block is continuously enforced only if forwarding is verified and not router-lab mode
+                if existing.persistent_block && forwarding_ok && !self.is_router_lab {
                     let dir = match existing.status {
                         HostStatus::Blocked(dir) => Some(dir),
-                        HostStatus::PersistedInactive(dir) => {
-                            existing.status = HostStatus::Blocked(dir);
-                            Some(dir)
-                        }
+                        HostStatus::PersistedInactive(dir) => Some(dir),
                         _ => None,
                     };
                     if let Some(dir) = dir {
-                        let _ = self.spoofer.add(existing.clone());
-                        self.limiter.block(existing.ip, dir);
+                        if self.spoofer.has_sender()
+                            && validator
+                                .validate_target(
+                                    &existing.ip,
+                                    Some(&existing.mac),
+                                    AdmissionOperation::LocalEnforcement,
+                                )
+                                .is_ok()
+                        {
+                            if self.spoofer.add(existing.clone()).is_ok() {
+                                self.limiter.block(existing.ip, dir);
+                                existing.status = HostStatus::Blocked(dir);
+                            } else {
+                                existing.status = HostStatus::PersistedInactive(dir);
+                            }
+                        } else {
+                            existing.status = HostStatus::PersistedInactive(dir);
+                        }
                     }
                 }
             } else {
@@ -1069,9 +1322,18 @@ impl RustrictCli {
         }
     }
 
-    fn handle_simulate(&mut self, args: &[&str]) {
+    pub fn handle_simulate(&mut self, args: &[&str]) {
         if args.is_empty() {
             println!("Usage: simulate <id|ip|all> [drop <0-100>] [delay <ms>] [jitter <ms>] OR simulate <id|ip|all> clear");
+            return;
+        }
+
+        // 1. Guard against router-lab mode
+        if self.is_router_lab {
+            println!(
+                "{} Local fault simulation command 'simulate' is disabled in router-lab mode. Router-lab mode is strictly read-only for local Layer 2/3 interfaces.",
+                "[ERR]".red().bold()
+            );
             return;
         }
 
@@ -1135,13 +1397,27 @@ impl RustrictCli {
 
         let profile = FaultProfile::new(drop_pct, delay_ms, jitter_ms);
 
-        // 1. Pre-validate target scope and exclusions
+        // 2. Fail-closed injection check
+        if !self.spoofer.has_sender() {
+            println!(
+                "{} Aborting operation: Raw Layer 2 packet injection sender is not initialized (Npcap unavailable).",
+                "[ERR]".red().bold()
+            );
+            return;
+        }
+
+        // 3. Pre-validate target scope and exclusions
+        let validator = self.admission_validator();
         let mut target_hosts = Vec::new();
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
-                if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
+                if let Err(reason) = validator.validate_target(
+                    &host.ip,
+                    Some(&host.mac),
+                    AdmissionOperation::LocalEnforcement,
+                ) {
                     println!(
-                        "{} Scope Error for {}: {}",
+                        "{} Scope / Admission Error for {}: {}",
                         "[ERR]".red().bold(),
                         host.ip,
                         reason
@@ -1160,7 +1436,7 @@ impl RustrictCli {
             return;
         }
 
-        // 2. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
+        // 4. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
         if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
             println!(
                 "{} Aborting operation: Failed to enable scoped IP forwarding on {}: {}",
@@ -1171,10 +1447,38 @@ impl RustrictCli {
             return;
         }
 
-        // 3. Mutate spoofer and limiter
+        // 5. Atomic multi-target activation with transactional rollback
+        let mut activated = Vec::new();
+        let mut failure = None;
+        for host in &target_hosts {
+            match self.spoofer.add(host.clone()) {
+                Ok(()) => {
+                    self.limiter.set_fault(host.ip, profile.clone());
+                    activated.push(host.clone());
+                }
+                Err(err) => {
+                    failure = Some((host.ip, err));
+                    break;
+                }
+            }
+        }
+
+        if let Some((failed_ip, err)) = failure {
+            for act in &activated {
+                self.spoofer.remove(&act.ip);
+                self.limiter.clear_fault(&act.ip);
+            }
+            println!(
+                "{} Simulation transaction failed on {}: {}. Rolled back {} previously activated target(s). Zero state mutated.",
+                "[ERR]".red().bold(),
+                failed_ip,
+                err,
+                activated.len()
+            );
+            return;
+        }
+
         for host in target_hosts {
-            let _ = self.spoofer.add(host.clone());
-            self.limiter.set_fault(host.ip, profile.clone());
             println!(
                 "{} Simulated network resilience profile on {}: drop={}% delay={}ms jitter={}ms",
                 "OK".green().bold(),
@@ -1807,7 +2111,11 @@ impl RustrictCli {
                 } else {
                     match self.resolve_single_target(target_arg) {
                         Ok((ip, mac)) => {
-                            if let Err(e) = self.scope.validate_target(&ip, mac.as_ref()) {
+                            if let Err(e) = self.admission_validator().validate_target(
+                                &ip,
+                                mac.as_ref(),
+                                AdmissionOperation::RouterPolicy,
+                            ) {
                                 println!(
                                     "{} Target {} is blocked by operational scope: {}",
                                     "[ERR]".red().bold(),
@@ -1921,7 +2229,11 @@ impl RustrictCli {
                 } else {
                     match self.resolve_single_target(target_arg) {
                         Ok((ip, mac)) => {
-                            if let Err(e) = self.scope.validate_target(&ip, mac.as_ref()) {
+                            if let Err(e) = self.admission_validator().validate_target(
+                                &ip,
+                                mac.as_ref(),
+                                AdmissionOperation::RouterPolicy,
+                            ) {
                                 println!(
                                     "{} Target {} is blocked by operational scope: {}",
                                     "[ERR]".red().bold(),

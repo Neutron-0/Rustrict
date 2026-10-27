@@ -22,6 +22,8 @@ fn main() {
 
     print_banner("2.0.0");
 
+    let is_router_lab = args.iter().any(|a| a == "--router-lab");
+
     // 1. Run Pre-flight Environment Diagnostics
     let env_status = platform::check_environment();
     if !env_status.is_admin {
@@ -32,19 +34,29 @@ fn main() {
         std::process::exit(1);
     }
 
-    if !env_status.npcap_available {
-        eprintln!(
-            "{} Warning: {}",
-            "[WARN]".yellow().bold(),
-            env_status.npcap_details
+    if is_router_lab {
+        println!(
+            "{} Operating in READ-ONLY Router-Lab mode (--router-lab active).",
+            "[MODE]".bright_cyan().bold()
         );
-    }
-    if !env_status.windivert_available {
-        eprintln!(
-            "{} Warning: {}",
-            "[WARN]".yellow().bold(),
-            env_status.windivert_details
+        println!(
+            "     Local packet injection (Npcap/WinDivert) and OS forwarding mutations are disabled.\n"
         );
+    } else {
+        if !env_status.npcap_available {
+            eprintln!(
+                "{} Warning: {}",
+                "[WARN]".yellow().bold(),
+                env_status.npcap_details
+            );
+        }
+        if !env_status.windivert_available {
+            eprintln!(
+                "{} Warning: {}",
+                "[WARN]".yellow().bold(),
+                env_status.windivert_details
+            );
+        }
     }
 
     // 2. Discover default network interface and gateway
@@ -74,7 +86,11 @@ fn main() {
     );
 
     // 3. Start interactive REPL
-    let mut app = RustrictCli::new(iface);
+    let mut app = if is_router_lab {
+        RustrictCli::new_router_lab(iface)
+    } else {
+        RustrictCli::new(iface)
+    };
     app.run_interactive();
 
     // 4. Cleanup on normal exit

@@ -1,7 +1,9 @@
+pub mod admission;
 pub mod assessment;
 pub mod restoration;
 pub mod scope;
 
+pub use admission::{AdmissionOperation, TargetAdmissionValidator};
 pub use assessment::{AuditFinding, AuditSeverity, PortStatus, ServiceEntry};
 pub use restoration::{
     restore_persistent_blocks_with, validate_restored_target, PersistentBlockActivator,
