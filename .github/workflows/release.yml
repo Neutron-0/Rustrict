@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. v2.0.0)'
+        required: false
+        default: 'v2.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Package Windows Release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust 1.88.0 (MSRV)
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Package Release Archive
+        id: package
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { '${{ github.event.inputs.version }}' }
+          if (-not $tag) { $tag = 'v2.0.0' }
+          $cleanVersion = $tag.TrimStart('v')
+          $archiveName = "rustrict-v$cleanVersion-x86_64-pc-windows-msvc.zip"
+          
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          New-Item -ItemType Directory -Path staging -Force | Out-Null
+          
+          Copy-Item target/release/rustrict.exe staging/
+          Copy-Item target/release/WinDivert.dll staging/
+          Copy-Item target/release/WinDivert64.sys staging/
+          Copy-Item LICENSE staging/
+          Copy-Item README.md staging/
+          
+          Compress-Archive -Path staging/* -DestinationPath "dist/$archiveName" -Force
+          $hash = (Get-FileHash -Path "dist/$archiveName" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist/SHA256SUMS.txt -Value "$hash  $archiveName"
+          
+          Write-Host "Archive: dist/$archiveName"
+          Write-Host "SHA256:  $hash"
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          echo "archive=$archiveName" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          name: Rustrict ${{ steps.package.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.package.outputs.archive }}
+            dist/SHA256SUMS.txt

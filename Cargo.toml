@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88.0"
 authors = ["Neutron-0"]
 description = "High-performance Windows network bandwidth limiter, traffic shaper, and device manager"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/Neutron-0/Rustrict"
 
 [dependencies]

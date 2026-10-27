@@ -39,6 +39,7 @@ Rustrict employs asynchronous Layer 2 ARP operations, multi-protocol identity re
   - [Persistent Block Lifecycle](#persistent-block-lifecycle)
 - [CLI Command Reference](#cli-command-reference)
 - [Requirements](#requirements)
+- [Installation](#installation)
 - [Building from Source](#building-from-source)
 - [Project Structure](#project-structure)
 - [Test Suite](#test-suite)
@@ -856,6 +857,26 @@ rustrict > limit all 200kbit          # Throttle entire network
 
 ---
 
+## Installation
+
+### Quick Install (PowerShell)
+
+Install Rustrict and kernel driver dependencies automatically in one command:
+
+```powershell
+irm https://raw.githubusercontent.com/Neutron-0/Rustrict/main/scripts/install.ps1 | iex
+```
+
+The installer:
+1. Downloads the verified release package and validates its SHA-256 checksum against `SHA256SUMS.txt`.
+2. Installs `rustrict.exe`, `WinDivert.dll`, and `WinDivert64.sys` to `%LOCALAPPDATA%\Programs\rustrict\bin`.
+3. Adds Rustrict to your User `PATH` environment variable.
+
+### Pre-compiled Releases
+Standalone zip archives containing `rustrict.exe`, WinDivert drivers, and SHA-256 manifests are available on the [GitHub Releases](https://github.com/Neutron-0/Rustrict/releases) page.
+
+---
+
 ## Building from Source
 
 ```powershell
@@ -1033,4 +1054,8 @@ cargo test
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Docs: [Install](docs/INSTALL.md) · [Usage](docs/USAGE.md) · [Safety](docs/SAFETY.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md).
+Rustrict is released under a proprietary source-available license. See the [LICENSE](LICENSE) file for complete terms and conditions.
+
+Under this license, you are welcome to view, inspect, clone, compile, and run the software locally for personal, educational, research, and non-commercial evaluation purposes. Commercial exploitation, redistribution, embedding, and bundling into proprietary products or services are prohibited without prior written authorization.
+
+Docs: [Install](docs/INSTALL.md) · [Usage](docs/USAGE.md) · [Safety](docs/SAFETY.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md).
