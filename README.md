@@ -823,6 +823,7 @@ flowchart TD
 | **`block`** | `block <targets> [--upload] [--download]` | Completely cuts off device internet access by dropping all forwarded packets. **Persists across restarts** — blocked devices are saved to `rustrict_state.json` and automatically re-armed on next launch. |
 | **`free`** | `free <targets>` | Removes all limits and blocks for specified devices. Restores authentic ARP cache entries. Removes persistent block rules from disk. |
 | **`add`** | `add <ip> [--mac <mac>]` | Manually inserts a device into the management table. If `--mac` is omitted, the MAC is resolved via the Windows kernel ARP API. |
+| **`nic`** | `nic [status\|health\|stats\|list] [name\|index]` | Physical network adapter health diagnostic. Performs bounded 2-second telemetry sampling, computes Rx/Tx throughput rates (bps), link speed utilization %, packet errors and discards, and heuristic health classifications (`Normal`, `Elevated`, `Saturated`, `Degraded`, `Unavailable`). |
 | **`clear`** | `clear` / `cls` | Clears the terminal screen. |
 | **`help`** | `help` / `?` | Displays command reference. |
 | **`exit`** | `quit` / `exit` | Stops all spoofing, restores ARP tables, disables IP forwarding, and exits cleanly. |
@@ -865,7 +866,7 @@ cd rustrict
 # Build optimized release binary
 cargo build --release
 
-# Run the test suite (26 tests)
+# Run the automated test suite (275 tests across 27 binaries)
 cargo test
 
 # Launch (Administrator terminal required)
@@ -973,18 +974,37 @@ rustrict/
 
 ## Test Suite
 
-Rustrict includes **39 automated tests** covering all critical subsystems:
+Rustrict includes **275 automated tests** across 27 test binaries covering all critical subsystems:
 
 | Test File | Tests | Coverage |
 | :--- | :---: | :--- |
+| `src/lib.rs` (unittests) | 13 | Curl bounded pipe handling, process isolation, secret buffer zeroization, safe forwarding lifecycle, and NIC health telemetry parsing/thresholds |
 | `test_assessment.rs` | 5 | CIDR normalization, ScopeManager strict authorization and exclusions, port string parsing, FaultProfile jitter/drop simulation, SARIF v2.1.0/JSON/Markdown report generation |
-| `test_fixes.rs` | 8 | BitRate overflow protection, mDNS question echo parsing, HTML title Unicode extraction, SOAP tag prefix handling, bounded scan ranges, LLMNR PTR parsing, PersistentState bidirectional direction serialization, environment diagnostics |
-| `test_target_resolution.rs` | 12 | Target resolution by ID, by IP, mixed lists, `all` keyword, deduplication, unknown ID/IP errors, ambiguous records, non-destructive upsert, fresh rescan pruning with blocked device preservation, PersistentState roundtrip |
-| `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
-| `test_gateway.rs` | 4 | SOAP XML tag extraction, missing tag handling, SSDP response header parsing, GatewayHostEntry construction |
-| `test_smb.rs` | 1 | SMB2 NTLMSSP Type 2 challenge AV_PAIR parsing (MsvAvDnsComputerName / MsvAvNbComputerName) |
-| `test_tls.rs` | 1 | X.509 certificate Common Name extraction via ASN.1 OID `2.5.4.3` |
+| `test_avm_admin.rs` | 20 | AVM FRITZ!Box TR-064 SOAP admin, Digest auth, HostFilter WAN pause/resume, multi-target policies, and TLS certificate error rejection |
+| `test_cli_confirmation.rs` | 10 | Operator mutation confirmation workflows, auto-confirm `--yes` flag, cancellation, and evidence validation |
 | `test_dhcp.rs` | 1 | DHCP Option 12 (Host Name) extraction from raw BOOTP packet bytes |
+| `test_diagnostics.rs` | 15 | Read-only diagnostic checks, evidence export schema, secret sanitization, offline evidence validation, and inventory normalization |
+| `test_fixes.rs` | 8 | BitRate overflow protection, mDNS question echo parsing, HTML title Unicode extraction, SOAP tag prefix handling, bounded scan ranges, LLMNR PTR parsing, PersistentState bidirectional direction serialization, environment diagnostics |
+| `test_gateway.rs` | 4 | SOAP XML tag extraction, missing tag handling, SSDP response header parsing, GatewayHostEntry construction |
+| `test_mikrotik_admin.rs` | 20 | MikroTik RouterOS v7 REST admin, HTTPS enforcement, autonomous recovery watchdog, multi-target policies, and atomic rollback |
+| `test_openwrt_admin.rs` | 21 | OpenWrt ubus JSON-RPC admin, session management, firewall4 NFT rules, autonomous recovery watchdog, and HTTP redirect rejection |
+| `test_persistence.rs` | 9 | Cross-process file locking contention, atomic write replacement, schema versioning, secret zeroization on disk, and audit history logging |
+| `test_policy_engine.rs` | 13 | Execution engine state transitions, gateway/controller lockout protection, conflict preflight detection, and Unicode-safe diagnostic redaction |
+| `test_policy_views.rs` | 7 | Policy table formatting, lifecycle state transitions, detailed policy inspection, and failure sanitization |
+| `test_protocol_integration.rs` | 17 | Local loopback router emulation, HTTP/REST/SOAP/SSH protocol flows, operation-aware retry isolation, and uncertain outcome handling |
+| `test_provider_contracts.rs` | 8 | Provider contract compliance, normalized capabilities, read-only guarantees, and structured diagnostic export |
+| `test_reliability.rs` | 9 | DPAPI credential protection, memory hygiene, multi-instance file lock synchronization, and corrupted state recovery |
+| `test_router_admin.rs` | 12 | Router administration baseline, mock provider auth, timeout simulation, scope exclusion enforcement, and clean disconnect |
+| `test_safe_networking.rs` | 6 | Hermetic scanner test seams (0 ARP probes), safe scoped IP forwarding lifecycle, LinkSpeed parsing, NIC health metrics, and heuristic classifications |
+| `test_smb.rs` | 2 | SMB2 NTLMSSP Type 2 challenge AV_PAIR parsing (MsvAvDnsComputerName / MsvAvNbComputerName) and odd-trailing-byte robustness |
+| `test_ssh_admin.rs` | 17 | OpenWrt SSH provider, key auth, command injection prevention, non-root user rejection, and autonomous watchdog lifecycle |
+| `test_target_resolution.rs` | 12 | Target resolution by ID, by IP, mixed lists, `all` keyword, deduplication, unknown ID/IP errors, ambiguous records, non-destructive upsert, fresh rescan pruning with blocked device preservation, PersistentState roundtrip |
+| `test_tls.rs` | 2 | X.509 certificate Common Name extraction via ASN.1 OID `2.5.4.3` and BMPString odd-trailing-byte robustness |
+| `test_unifi_admin.rs` | 19 | Ubiquiti UniFi Controller HTTPS REST admin, session cookie auth, Traffic Rules / Firewall Rules, site discovery, and cleanup |
+| `test_unified_admin.rs` | 10 | Unified RouterRegistry provider dispatch, no silent fallback to ARP spoofing, lockout prevention, and preflight validation |
+| `test_verification.rs` | 5 | Blackhole MAC properties (unicast, locally administered), TokenBucket rate shaping/refill, ScopeManager strict mode, RFC 3021 /31 and /32 subnet clamping |
+| `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
+| **Total** | **275** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
 
 Run the full suite:
 ```powershell
