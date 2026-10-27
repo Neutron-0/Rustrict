@@ -10,7 +10,7 @@
 To maintain clean separation between source/test implementations and documentation/audit artifacts, Phase 18.4 changes are staged into two focused commits:
 
 ### Commit 1: Implementation & Automated Regression Tests
-**Commit Hash:** `9106be3999e4cbbe8933b9dfa3848b788ef976a4`  
+**Commit Hash:** `9106be33ceb4486e6fe2a272ea2773c71f0177ba`  
 **Message:** `fix(platform): verify OS forwarding preconditions and reject directed-broadcast targets`  
 **Files:**
 - `src/platform/windows.rs` (verified forwarding preconditions, original baseline preservation, terminating PowerShell error action, bounded retry cleanup)

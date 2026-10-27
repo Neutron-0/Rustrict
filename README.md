@@ -866,7 +866,7 @@ cd rustrict
 # Build optimized release binary
 cargo build --release
 
-# Run the automated test suite (306 tests across 27 binaries)
+# Run the automated test suite (315 tests across 28 binaries)
 cargo test
 
 # Launch (Administrator terminal required)
@@ -974,7 +974,7 @@ rustrict/
 
 ## Test Suite
 
-Rustrict includes **306 automated tests** across 27 test binaries covering all critical subsystems:
+Rustrict includes **315 automated tests** across 28 test binaries covering all critical subsystems:
 
 | Test File | Tests | Coverage |
 | :--- | :---: | :--- |
@@ -1004,7 +1004,8 @@ Rustrict includes **306 automated tests** across 27 test binaries covering all c
 | `test_unified_admin.rs` | 10 | Unified RouterRegistry provider dispatch, no silent fallback to ARP spoofing, lockout prevention, and preflight validation |
 | `test_verification.rs` | 5 | Blackhole MAC properties (unicast, locally administered), TokenBucket rate shaping/refill, ScopeManager strict mode, RFC 3021 /31 and /32 subnet clamping |
 | `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
-| **Total** | **306** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
+| `test_batched_readiness.rs` | 6 | Centralized target admission contract (mandatory controller/gateway exclusions, concrete boundary enforcement), untrusted saved scope sanitization, fail-closed without packet injection driver, multi-target atomic rollback, and read-only router-lab mode |
+| **Total** | **315** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
 
 Run the full suite:
 ```powershell

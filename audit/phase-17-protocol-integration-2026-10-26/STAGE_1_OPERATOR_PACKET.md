@@ -1,12 +1,12 @@
 # Rustrict Phase 17 — Stage 1 Operator Runbook & Lab Safety Packet
 
-**Document Version:** 1.4.0
-**Date:** 2026-10-27 (Phase 18.4 Reconciled Baseline)
+**Document Version:** 1.5.0
+**Date:** 2026-10-27 (Phase 19.0 Reconciled Release Baseline)
 **Audience:** Physical Router Test Operators, Network Test Engineers, Safety Verifiers
 **Target Codebase Revision:**
-- **Implementation Code Revision:** Phase 18.4 (`9106be3999e4cbbe8933b9dfa3848b788ef976a4`)
-- **Phase 18.3 Code Baseline:** `daa2a1cea9b4c46f0b970dbc892e95129ff33514`
-- **Phase 18.3 Documentation HEAD:** `9e6c7da124110f6d3a1a5b712d9f66c109379879`
+- **Implementation Code Revision:** Phase 18.5–19.0 (`10dd09706d2796ebc62b34354719485a4edb92eb`)
+- **Phase 18.4 Code Baseline:** `9106be33ceb4486e6fe2a272ea2773c71f0177ba`
+- **Phase 18.4 Documentation HEAD:** `ce3b57087f46fe7d7149052a05634e5e8bb744a6`
 
 ---
 
@@ -17,7 +17,7 @@ Stage 1 is the **first physical connection test** between the Rustrict managemen
 > [!IMPORTANT]
 > **Zero Unplanned Mutations**: Stage 1 verifies discovery, authentication, read-only status inspection, and diagnostic evidence export. **No policy enforcement (`pause`, `adjust`) may be committed during read-only Stage 1.**
 >
-> This document authorizes **READ-ONLY LAB DIAGNOSTICS ONLY**. It does NOT authorize Stage 2 active policy enforcement or live production deployment.
+> This document authorizes **READ-ONLY LAB DIAGNOSTICS ONLY**. Operators MUST invoke Rustrict using `--router-lab` mode (`rustrict --router-lab`) to guarantee zero Layer 2 packet injection sender initialization and zero OS forwarding mutations. It does NOT authorize Stage 2 active policy enforcement or live production deployment.
 
 ### Hard Constraints:
 1. **Zero Unplanned Mutations**: All active policy enforcement commands (`router pause`, `router adjust`, `router resume`) are strictly excluded from Stage 1 execution.
