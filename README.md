@@ -866,7 +866,7 @@ cd rustrict
 # Build optimized release binary
 cargo build --release
 
-# Run the automated test suite (276 tests across 27 binaries)
+# Run the automated test suite (282 tests across 27 binaries)
 cargo test
 
 # Launch (Administrator terminal required)
@@ -974,11 +974,11 @@ rustrict/
 
 ## Test Suite
 
-Rustrict includes **276 automated tests** across 27 test binaries covering all critical subsystems:
+Rustrict includes **282 automated tests** across 27 test binaries covering all critical subsystems:
 
 | Test File | Tests | Coverage |
 | :--- | :---: | :--- |
-| `src/lib.rs` (unittests) | 17 | Curl bounded pipe handling, process isolation, secret buffer zeroization, safe forwarding lifecycle, and robust NIC health telemetry (monotonic reset detection, missing stats handling, ambiguous matching) |
+| `src/lib.rs` (unittests) | 23 | Bounded process execution and child process reaping, concurrent pipe draining, secret buffer zeroization, safe forwarding lifecycle, and robust NIC health telemetry (zero false-normal, monotonic decrease reset detection, missing counter invalidation, ambiguous matching) |
 | `test_assessment.rs` | 5 | CIDR normalization, ScopeManager strict authorization and exclusions, port string parsing, FaultProfile jitter/drop simulation, SARIF v2.1.0/JSON/Markdown report generation |
 | `test_avm_admin.rs` | 20 | AVM FRITZ!Box TR-064 SOAP admin, Digest auth, HostFilter WAN pause/resume, multi-target policies, and TLS certificate error rejection |
 | `test_cli_confirmation.rs` | 10 | Operator mutation confirmation workflows, auto-confirm `--yes` flag, cancellation, and evidence validation |
@@ -1004,7 +1004,7 @@ Rustrict includes **276 automated tests** across 27 test binaries covering all c
 | `test_unified_admin.rs` | 10 | Unified RouterRegistry provider dispatch, no silent fallback to ARP spoofing, lockout prevention, and preflight validation |
 | `test_verification.rs` | 5 | Blackhole MAC properties (unicast, locally administered), TokenBucket rate shaping/refill, ScopeManager strict mode, RFC 3021 /31 and /32 subnet clamping |
 | `unit_tests.rs` | 7 | MAC formatting/parsing, OUI vendor lookup, BitRate unit parsing, TokenBucket rate-limiting, Layer 2 ARP reply frame crafting, 802.11 Deauth frame generation, EAPOL frame detection |
-| **Total** | **276** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
+| **Total** | **282** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
 
 Run the full suite:
 ```powershell
