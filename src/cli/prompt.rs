@@ -454,15 +454,6 @@ impl RustrictCli {
         render_hosts_table(&self.hosts);
     }
 
-    fn ensure_forwarding_active(&self) {
-        if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
-            eprintln!(
-                "[WARN] Failed to enable scoped IP forwarding on {}: {}",
-                self.iface.name, e
-            );
-        }
-    }
-
     fn handle_limit(&mut self, args: &[&str]) {
         if args.len() < 2 {
             println!("Usage: limit <id|ip|all> <rate> [--upload] [--download]");
@@ -492,10 +483,10 @@ impl RustrictCli {
             }
         };
 
-        self.ensure_forwarding_active();
-
+        // 1. Pre-validate target scope and exclusions before mutating state or enabling forwarding
+        let mut target_hosts = Vec::new();
         for id in ids {
-            if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
+            if let Some(host) = self.hosts.iter().find(|h| h.id == id) {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
                     println!(
                         "{} Scope Error for {}: {}",
@@ -505,17 +496,43 @@ impl RustrictCli {
                     );
                     continue;
                 }
-                host.status = HostStatus::Limited(rate, dir);
-                self.spoofer.add(host.clone());
-                self.limiter.limit(host.ip, dir, rate);
-                println!(
-                    "{} Limited {} to {} ({})",
-                    "OK".green().bold(),
-                    host.ip,
-                    rate,
-                    dir.pretty()
-                );
+                target_hosts.push(host.clone());
             }
+        }
+
+        if target_hosts.is_empty() {
+            println!(
+                "{} No valid in-scope target hosts to limit.",
+                "[WARN]".yellow().bold()
+            );
+            return;
+        }
+
+        // 2. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
+        if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
+            println!(
+                "{} Aborting operation: Failed to enable scoped IP forwarding on {}: {}",
+                "[ERR]".red().bold(),
+                self.iface.name,
+                e
+            );
+            return;
+        }
+
+        // 3. Mutate host state, spoofer, limiter
+        for host in target_hosts {
+            if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
+                h.status = HostStatus::Limited(rate, dir);
+            }
+            self.spoofer.add(host.clone());
+            self.limiter.limit(host.ip, dir, rate);
+            println!(
+                "{} Limited {} to {} ({})",
+                "OK".green().bold(),
+                host.ip,
+                rate,
+                dir.pretty()
+            );
         }
     }
 
@@ -540,10 +557,10 @@ impl RustrictCli {
             }
         };
 
-        self.ensure_forwarding_active();
-
+        // 1. Pre-validate target scope and exclusions before mutating state or enabling forwarding
+        let mut target_hosts = Vec::new();
         for id in ids {
-            if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
+            if let Some(host) = self.hosts.iter().find(|h| h.id == id) {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
                     println!(
                         "{} Scope Error for {}: {}",
@@ -553,18 +570,44 @@ impl RustrictCli {
                     );
                     continue;
                 }
-                host.status = HostStatus::Blocked(dir);
-                host.persistent_block = true;
-                self.persistent_state.add_blocked(host, dir);
-                self.spoofer.add(host.clone());
-                self.limiter.block(host.ip, dir);
-                println!(
-                    "{} Blocked {} ({}) [Persistent]",
-                    "OK".green().bold(),
-                    host.ip,
-                    dir.pretty()
-                );
+                target_hosts.push(host.clone());
             }
+        }
+
+        if target_hosts.is_empty() {
+            println!(
+                "{} No valid in-scope target hosts to block.",
+                "[WARN]".yellow().bold()
+            );
+            return;
+        }
+
+        // 2. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
+        if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
+            println!(
+                "{} Aborting operation: Failed to enable scoped IP forwarding on {}: {}",
+                "[ERR]".red().bold(),
+                self.iface.name,
+                e
+            );
+            return;
+        }
+
+        // 3. Mutate host state, persistent records, spoofer, limiter
+        for host in target_hosts {
+            if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
+                h.status = HostStatus::Blocked(dir);
+                h.persistent_block = true;
+                self.persistent_state.add_blocked(h, dir);
+            }
+            self.spoofer.add(host.clone());
+            self.limiter.block(host.ip, dir);
+            println!(
+                "{} Blocked {} ({}) [Persistent]",
+                "OK".green().bold(),
+                host.ip,
+                dir.pretty()
+            );
         }
     }
 
@@ -688,7 +731,14 @@ impl RustrictCli {
 
         let has_persistent_blocks = self.hosts.iter().any(|h| h.persistent_block);
         if has_persistent_blocks {
-            self.ensure_forwarding_active();
+            if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
+                eprintln!(
+                    "{} Failed to enable scoped IP forwarding for persistent blocks on {}: {}",
+                    "[ERR]".bright_red().bold(),
+                    self.iface.name,
+                    e
+                );
+            }
         }
 
         // Upsert newly discovered/confirmed hosts
@@ -1017,8 +1067,8 @@ impl RustrictCli {
 
         let profile = FaultProfile::new(drop_pct, delay_ms, jitter_ms);
 
-        self.ensure_forwarding_active();
-
+        // 1. Pre-validate target scope and exclusions
+        let mut target_hosts = Vec::new();
         for id in ids {
             if let Some(host) = self.hosts.iter().find(|h| h.id == id).cloned() {
                 if let Err(reason) = self.scope.validate_target(&host.ip, Some(&host.mac)) {
@@ -1030,18 +1080,41 @@ impl RustrictCli {
                     );
                     continue;
                 }
-
-                self.spoofer.add(host.clone());
-                self.limiter.set_fault(host.ip, profile.clone());
-                println!(
-                    "{} Simulated network resilience profile on {}: drop={}% delay={}ms jitter={}ms",
-                    "OK".green().bold(),
-                    host.ip,
-                    drop_pct,
-                    delay_ms,
-                    jitter_ms
-                );
+                target_hosts.push(host);
             }
+        }
+
+        if target_hosts.is_empty() {
+            println!(
+                "{} No valid in-scope target hosts to simulate.",
+                "[WARN]".yellow().bold()
+            );
+            return;
+        }
+
+        // 2. Fail-closed forwarding check: Abort operation if forwarding cannot be enabled
+        if let Err(e) = crate::platform::ensure_scoped_forwarding_enabled(&self.iface.name) {
+            println!(
+                "{} Aborting operation: Failed to enable scoped IP forwarding on {}: {}",
+                "[ERR]".red().bold(),
+                self.iface.name,
+                e
+            );
+            return;
+        }
+
+        // 3. Mutate spoofer and limiter
+        for host in target_hosts {
+            self.spoofer.add(host.clone());
+            self.limiter.set_fault(host.ip, profile.clone());
+            println!(
+                "{} Simulated network resilience profile on {}: drop={}% delay={}ms jitter={}ms",
+                "OK".green().bold(),
+                host.ip,
+                drop_pct,
+                delay_ms,
+                jitter_ms
+            );
         }
     }
 
@@ -1120,106 +1193,15 @@ impl RustrictCli {
     }
 
     pub fn handle_nic(&self, args: &[&str]) {
-        use crate::monitor::nic::{
-            print_nic_report, sample_nic_health, NicTelemetryProvider, WindowsPowershellNicProvider,
-        };
+        use crate::monitor::nic::{run_nic_cli, WindowsPowershellNicProvider};
 
-        if args
-            .first()
-            .map(|s| s.eq_ignore_ascii_case("help"))
-            .unwrap_or(false)
-        {
-            println!(
-                "{}",
-                "Physical Network Adapter Health Diagnostic Commands:"
-                    .bright_yellow()
-                    .bold()
+        let provider = WindowsPowershellNicProvider::default();
+        if let Err(e) = run_nic_cli(&provider, Some(self.iface.name.as_str()), args) {
+            eprintln!(
+                "{} NIC health diagnostic failed: {}",
+                "[ERR]".bright_red().bold(),
+                e
             );
-            println!("  nic                                 Run 2-second health sampling diagnostic on current active adapter");
-            println!("  nic status / health / stats [name]  Sample health and metrics for default or named adapter");
-            println!("  nic list                            List all detected network adapters and link states");
-            println!("  nic <name|index>                    Sample health for specific adapter name or index");
-            return;
-        }
-
-        let provider = WindowsPowershellNicProvider;
-
-        if args
-            .first()
-            .map(|s| s.eq_ignore_ascii_case("list"))
-            .unwrap_or(false)
-        {
-            match provider.query_adapters() {
-                Ok(adapters) => {
-                    println!("\n{}", "Detected Network Adapters:".bold());
-                    for a in adapters {
-                        let status_styled = if a.status.eq_ignore_ascii_case("Up") {
-                            a.status.green().bold()
-                        } else {
-                            a.status.dimmed()
-                        };
-                        println!(
-                            "  [{:>2}] {:<24} Status: {:<12} Link: {:<10} ({})",
-                            a.interface_index,
-                            a.name.bold(),
-                            status_styled,
-                            a.link_speed_str,
-                            a.description
-                        );
-                    }
-                    println!();
-                }
-                Err(e) => {
-                    eprintln!(
-                        "{} Failed to list network adapters: {}",
-                        "[ERR]".bright_red().bold(),
-                        e
-                    );
-                }
-            }
-            return;
-        }
-
-        let mut filter: Option<&str> = None;
-        if let Some(first) = args.first() {
-            if first.eq_ignore_ascii_case("status")
-                || first.eq_ignore_ascii_case("health")
-                || first.eq_ignore_ascii_case("stats")
-            {
-                if let Some(second) = args.get(1) {
-                    filter = Some(second);
-                }
-            } else {
-                filter = Some(first);
-            }
-        }
-
-        let adapter_filter = filter.unwrap_or(self.iface.name.as_str());
-
-        println!(
-            "{}",
-            format!(
-                "Sampling network adapter telemetry for '{}' (2-second interval)...",
-                adapter_filter
-            )
-            .cyan()
-        );
-
-        match sample_nic_health(
-            &provider,
-            Some(adapter_filter),
-            std::time::Duration::from_secs(2),
-        ) {
-            Ok(report) => {
-                print_nic_report(&report);
-            }
-            Err(e) => {
-                eprintln!(
-                    "{} NIC health diagnostic failed: {}",
-                    "[ERR]".bright_red().bold(),
-                    e
-                );
-            }
         }
     }
 

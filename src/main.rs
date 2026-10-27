@@ -4,6 +4,22 @@ use rustrict::platform;
 
 fn main() {
     platform::enable_ansi_support();
+
+    // Check for standalone CLI commands (e.g. read-only NIC diagnostics)
+    // Dispatched before environment checks, interface resolution, or SendARP.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1
+        && (args[1].eq_ignore_ascii_case("nic") || args[1].eq_ignore_ascii_case("adapter"))
+    {
+        let arg_slices: Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
+        let provider = rustrict::monitor::nic::WindowsPowershellNicProvider::default();
+        if let Err(e) = rustrict::monitor::nic::run_nic_cli(&provider, None, &arg_slices) {
+            eprintln!("{} {}", "[ERR]".bright_red().bold(), e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     print_banner("2.0.0");
 
     // 1. Run Pre-flight Environment Diagnostics
