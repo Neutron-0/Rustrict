@@ -53,27 +53,33 @@ function Download-FileReliable([string[]]$Urls, [string]$OutPath) {
     
     $downloadSucceeded = $false
     $lastError = ""
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     
     foreach ($url in $Urls) {
-        # 1. System.Net.WebClient (direct streaming in .NET)
-        try {
-            $wc = New-Object System.Net.WebClient
-            $wc.Headers.Add("User-Agent", "Rustrict-Installer")
-            $wc.DownloadFile($url, $OutPath)
-            if ((Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
-                $downloadSucceeded = $true
-                break
+        # 1. Priority: curl.exe with forced IPv4 (-4) and visual progress bar (-#)
+        if ($curl) {
+            try {
+                if (Test-Path $OutPath) { Remove-Item -Force $OutPath }
+                & curl.exe -4 -# -L -f --connect-timeout 15 -o $OutPath $url
+                if ($LASTEXITCODE -eq 0 -and (Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
+                    $downloadSucceeded = $true
+                    break
+                } else {
+                    $lastError = "curl.exe exited with code $LASTEXITCODE"
+                }
+            } catch {
+                $lastError = $_.Exception.Message
             }
-        } catch {
-            $lastError = $_.Exception.Message
         }
         
-        # 2. curl.exe with -sSL via Start-Process (isolated stream avoids PS stderr trap)
-        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-        if (-not $downloadSucceeded -and $curl) {
+        # 2. Fallback: System.Net.WebClient (direct streaming in .NET)
+        if (-not $downloadSucceeded) {
             try {
-                $curlProcess = Start-Process -FilePath "curl.exe" -ArgumentList @("-sSL", "--connect-timeout", "15", "--max-time", "120", "-o", $OutPath, $url) -Wait -PassThru -NoNewWindow
-                if ($curlProcess.ExitCode -eq 0 -and (Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
+                if (Test-Path $OutPath) { Remove-Item -Force $OutPath }
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers.Add("User-Agent", "Rustrict-Installer")
+                $wc.DownloadFile($url, $OutPath)
+                if ((Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
                     $downloadSucceeded = $true
                     break
                 }
@@ -82,9 +88,10 @@ function Download-FileReliable([string[]]$Urls, [string]$OutPath) {
             }
         }
         
-        # 3. Invoke-WebRequest fallback
+        # 3. Fallback: Invoke-WebRequest
         if (-not $downloadSucceeded) {
             try {
+                if (Test-Path $OutPath) { Remove-Item -Force $OutPath }
                 Invoke-WebRequest -Uri $url -OutFile $OutPath -UseBasicParsing -TimeoutSec 60
                 if ((Test-Path $OutPath) -and (Get-Item $OutPath).Length -gt 0) {
                     $downloadSucceeded = $true
