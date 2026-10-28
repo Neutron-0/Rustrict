@@ -25,6 +25,35 @@ irm https://raw.githubusercontent.com/Neutron-0/Rustrict/main/scripts/install.ps
 
 ---
 
+## Upgrading Rustrict
+
+To upgrade an existing installation to the latest release at any time:
+
+### Quick 1-Line Upgrade
+Run in an elevated Administrator PowerShell prompt:
+
+```powershell
+irm https://raw.githubusercontent.com/Neutron-0/Rustrict/main/scripts/install.ps1 | iex
+```
+
+### In-App Upgrade Check
+Inside the `rustrict` interactive shell, type:
+```text
+rustrict > upgrade
+```
+or
+```text
+rustrict > update
+```
+This prints the installed version, official GitHub Releases link, and upgrade command.
+
+### What Happens During an Upgrade?
+- **Rule Preservation**: All persisted blocked hosts, scope definitions, and exclusions in `%ProgramData%\Rustrict\rustrict_state.json` remain untouched and are reloaded automatically on next run.
+- **Kernel Driver Safety**: If the `WinDivert` driver service is currently active and locked by the Windows kernel, the installer safely retains the existing driver file and updates `rustrict.exe` without requiring a reboot or system restart.
+- **Path Persistence**: The binary path (`%LOCALAPPDATA%\Programs\rustrict\bin`) remains in your User `PATH`, so you can immediately run `rustrict` without reconfiguring environment variables.
+
+---
+
 ## Method 2: Pre-compiled GitHub Release (Manual)
 
 1. Navigate to [GitHub Releases](https://github.com/Neutron-0/Rustrict/releases).

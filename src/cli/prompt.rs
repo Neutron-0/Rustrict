@@ -477,7 +477,7 @@ impl RustrictCli {
 
         let cmd = args[0].to_lowercase();
         match cmd.as_str() {
-            "help" | "?" | "clear" | "cls" | "quit" | "exit" => Ok(()),
+            "help" | "?" | "clear" | "cls" | "quit" | "exit" | "upgrade" | "update" => Ok(()),
             "hosts" | "devices" | "targets" | "list" | "ls" => Ok(()),
             "status" => Ok(()),
             "state" => Ok(()),
@@ -572,6 +572,7 @@ impl RustrictCli {
             "free" | "unblock" | "unlimit" | "release" => self.handle_free(&args[1..]),
             "status" => self.handle_status(),
             "state" => self.handle_state(&args[1..]),
+            "upgrade" | "update" => self.handle_upgrade(),
             "add" => self.handle_add(&args[1..]),
             "router" => self.handle_router(&args[1..]),
             "nic" | "adapter" => self.handle_nic(&args[1..]),
@@ -2067,6 +2068,7 @@ impl RustrictCli {
             println!("  router export-evidence [path] [--overwrite]     Export full sanitized read-only evidence bundle (JSON)");
             println!("  router validate-evidence <path>                 Validate exported evidence bundle offline");
             println!("  router disconnect                               Cleanly disconnect active provider (no fallback to ARP)");
+            println!("  upgrade / update                                Instructions to upgrade rustrict to latest release");
             println!("  clear / cls                                     Clears screen");
             println!("  quit / exit                                     Exits rustrict cleanly\n");
             return;
@@ -2088,8 +2090,25 @@ impl RustrictCli {
         println!("  add <ip> [--mac <mac>]                          Manually adds a host to table");
         println!("  router [capabilities|status|policies|preview|pause|resume|adjust|connect] [...] Router administration via authenticated firewall");
         println!("  nic [status|health|stats|list] [name|index]     Physical network adapter health telemetry and diagnostics");
+        println!("  upgrade / update                                Instructions to upgrade rustrict to latest release");
         println!("  clear                                           Clears screen");
         println!("  quit / exit                                     Exits rustrict and restores network\n");
+    }
+
+    pub fn handle_upgrade(&self) {
+        println!(
+            "\n{}",
+            "─── Rustrict Update & Upgrade Guide ───".cyan().bold()
+        );
+        println!("Installed Version: v{}", env!("CARGO_PKG_VERSION"));
+        println!("Official Releases: https://github.com/Neutron-0/Rustrict/releases");
+        println!("\nTo upgrade Rustrict to the latest version at any time, run in PowerShell:");
+        println!("  {}", "irm https://raw.githubusercontent.com/Neutron-0/Rustrict/main/scripts/install.ps1 | iex".yellow().bold());
+        println!("\nPersistence & Driver Invariants:");
+        println!("  • Persisted block rules and scope settings in %ProgramData%\\Rustrict are safely preserved.");
+        println!(
+            "  • Kernel driver services (WinDivert) are safely retained without interruption.\n"
+        );
     }
 
     pub fn handle_nic(&self, args: &[&str]) {

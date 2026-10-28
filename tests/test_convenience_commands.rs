@@ -118,3 +118,10 @@ fn test_state_status_and_clear() {
     assert!(cli.dispatch_command("state status"));
     assert!(cli.dispatch_command("state clear"));
 }
+
+#[test]
+fn test_upgrade_and_update_command_dispatch() {
+    let mut cli = RustrictCli::new_for_testing();
+    assert!(cli.dispatch_command("upgrade"));
+    assert!(cli.dispatch_command("update"));
+}

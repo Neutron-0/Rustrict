@@ -234,3 +234,23 @@ rustrict > state clear                      # Wipe all saved persistent blocks f
 | **"WinDivertOpen failed (Error Code: 5)"** | Driver permission denied | Ensure PowerShell is running as Administrator. |
 | **"WinDivert.dll not found"** | Missing driver DLL/SYS | Run the 1-line PowerShell installer (`install.ps1`) or ensure `WinDivert.dll` and `WinDivert64.sys` are alongside `rustrict.exe`. |
 | **"Gateway IP cannot be an enforcement target"** | Gateway preservation active | Rustrict deliberately prevents blocking your default router to prevent whole-LAN outages. |
+
+---
+
+## 12. Upgrading & Version Management
+
+### Check Version & Upgrade Info in Interactive Shell
+```text
+rustrict > upgrade
+rustrict > update
+```
+
+### Upgrade to the Latest Version Anytime
+In an Administrator PowerShell window, run:
+```powershell
+irm https://raw.githubusercontent.com/Neutron-0/Rustrict/main/scripts/install.ps1 | iex
+```
+
+- **Saved Blocks & Rules Preserved:** Upgrading retains `%ProgramData%\Rustrict\rustrict_state.json`.
+- **Zero Kernel Interruption:** If `WinDivert` is currently active, the driver service is retained without requiring a reboot.
+- **Instant Path Availability:** Upgraded binary is ready immediately in User `PATH`.

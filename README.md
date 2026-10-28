@@ -890,7 +890,7 @@ cd rustrict
 # Build optimized release binary
 cargo build --release
 
-# Run the automated test suite (349 tests across 30 binaries)
+# Run the automated test suite (350 tests across 30 binaries)
 cargo test
 
 # Launch in Standard Mode (Administrator terminal required)
@@ -1001,7 +1001,7 @@ rustrict/
 
 ## Test Suite
 
-Rustrict includes **349 automated tests** across 29 test binaries covering all critical subsystems:
+Rustrict includes **350 automated tests** across 29 test binaries covering all critical subsystems:
 
 | Test File | Tests | Coverage |
 | :--- | :---: | :--- |
@@ -1035,7 +1035,7 @@ Rustrict includes **349 automated tests** across 29 test binaries covering all c
 | `test_batched_readiness.rs` | 6 | Centralized target admission contract (mandatory controller/gateway exclusions, concrete boundary enforcement), untrusted saved scope sanitization, fail-closed without packet injection driver, multi-target atomic rollback, and read-only router-lab mode |
 | `test_router_lab_isolation.rs` | 16 | Strict router-lab allowlist enforcement, default-deny rejection of destructive/mutating commands, privilege decoupling (standard user support), clean EOF shutdown, fake/mock provider safety, and source counter proof of 0 side effects |
 | `test_router_lab_zero_probe.rs` | 10 | Zero-probe router-lab startup, passive local OS route/IP/adapter resolution, unresolved gateway MAC handling, zero SendARP/ICMP pings, enforcement-driver loading bypass, and clean shutdown |
-| **Total** | **349** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
+| **Total** | **350** | **100% Passing automated test suite on Windows 11 MSVC and Rust 1.88.0 MSRV** |
 
 Run the full suite:
 ```powershell
