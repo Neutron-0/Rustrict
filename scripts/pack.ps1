@@ -1,6 +1,6 @@
 # Packs release artifacts into standard zip and computes SHA256SUMS.txt
 param(
-    [string]$Version = "2.0.0",
+    [string]$Version = "2.0.1",
     [string]$OutputDir = "target\packages"
 )
 

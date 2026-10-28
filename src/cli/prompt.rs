@@ -900,7 +900,8 @@ impl RustrictCli {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Limited(rate, dir);
             }
-            self.spoofer.update_status(&host.ip, HostStatus::Limited(rate, dir));
+            self.spoofer
+                .update_status(&host.ip, HostStatus::Limited(rate, dir));
             println!(
                 "{} Limited {} to {} ({})",
                 "OK".green().bold(),
@@ -1042,7 +1043,8 @@ impl RustrictCli {
                 h.persistent_block = true;
                 self.persistent_state.add_blocked(h, dir);
             }
-            self.spoofer.update_status(&host.ip, HostStatus::Blocked(dir));
+            self.spoofer
+                .update_status(&host.ip, HostStatus::Blocked(dir));
             println!(
                 "{} Blocked {} ({}) [Persistent]",
                 "OK".green().bold(),
@@ -1503,7 +1505,11 @@ impl RustrictCli {
                     local_cidr
                 );
             }
-            Err(e) => println!("{} Failed to compute local CIDR: {}", "[ERR]".red().bold(), e),
+            Err(e) => println!(
+                "{} Failed to compute local CIDR: {}",
+                "[ERR]".red().bold(),
+                e
+            ),
         }
     }
 
@@ -1527,49 +1533,113 @@ impl RustrictCli {
     }
 
     pub fn handle_status(&self) {
-        println!("{}", "============================================================".cyan());
-        println!(" {}", "Rustrict System & Network Status".bright_cyan().bold());
-        println!("{}", "============================================================".cyan());
-        println!("  {:<26} {}", "Active Network Adapter:", self.iface.name.bright_white().bold());
-        println!("  {:<26} {} ({})", "Local Controller IP:", self.iface.ip, self.iface.mac);
-        println!("  {:<26} {} ({})", "Default Gateway:", self.iface.gateway, self.iface.gateway_mac);
+        println!(
+            "{}",
+            "============================================================".cyan()
+        );
+        println!(
+            " {}",
+            "Rustrict System & Network Status".bright_cyan().bold()
+        );
+        println!(
+            "{}",
+            "============================================================".cyan()
+        );
+        println!(
+            "  {:<26} {}",
+            "Active Network Adapter:",
+            self.iface.name.bright_white().bold()
+        );
+        println!(
+            "  {:<26} {} ({})",
+            "Local Controller IP:", self.iface.ip, self.iface.mac
+        );
+        println!(
+            "  {:<26} {} ({})",
+            "Default Gateway:", self.iface.gateway, self.iface.gateway_mac
+        );
         println!("  {:<26} {}", "Subnet Netmask:", self.iface.netmask);
-        println!("  {:<26} {}", "Operation Mode:", if self.is_router_lab {
-            "READ-ONLY Router-Lab (Safe)".bright_yellow().bold()
-        } else {
-            "ACTIVE Local Enforcement (Privileged)".bright_green().bold()
-        });
-        println!("  {:<26} {}", "Scope Strict Mode:", if self.scope.strict_mode {
-            "ENABLED (targets strictly bounded)".yellow()
-        } else {
-            "DISABLED (all LAN targets permitted)".green()
-        });
-        println!("  {:<26} {} defined", "Authorized Boundaries:", self.scope.allowed_cidrs.len());
+        println!(
+            "  {:<26} {}",
+            "Operation Mode:",
+            if self.is_router_lab {
+                "READ-ONLY Router-Lab (Safe)".bright_yellow().bold()
+            } else {
+                "ACTIVE Local Enforcement (Privileged)"
+                    .bright_green()
+                    .bold()
+            }
+        );
+        println!(
+            "  {:<26} {}",
+            "Scope Strict Mode:",
+            if self.scope.strict_mode {
+                "ENABLED (targets strictly bounded)".yellow()
+            } else {
+                "DISABLED (all LAN targets permitted)".green()
+            }
+        );
+        println!(
+            "  {:<26} {} defined",
+            "Authorized Boundaries:",
+            self.scope.allowed_cidrs.len()
+        );
         for (i, c) in self.scope.allowed_cidrs.iter().enumerate() {
             if i < 5 {
                 println!("    - {}", c);
             } else if i == 5 {
-                println!("    ... and {} more (run 'scope status' to view all)", self.scope.allowed_cidrs.len() - 5);
+                println!(
+                    "    ... and {} more (run 'scope status' to view all)",
+                    self.scope.allowed_cidrs.len() - 5
+                );
                 break;
             }
         }
         let online_count = self.hosts.iter().filter(|h| h.online).count();
-        let blocked_count = self.hosts.iter().filter(|h| matches!(h.status, HostStatus::Blocked(_))).count();
-        let limited_count = self.hosts.iter().filter(|h| matches!(h.status, HostStatus::Limited(_, _))).count();
-        println!("  {:<26} {} total ({} online)", "Discovered Devices:", self.hosts.len(), online_count.to_string().bright_green());
-        println!("  {:<26} {} blocked, {} rate-limited", "Active Enforcements:", blocked_count.to_string().bright_red(), limited_count.to_string().bright_yellow());
-        println!("  {:<26} {}", "Packet Injection (Npcap):", if self.spoofer.has_sender() {
-            "READY (Sender initialized)".bright_green()
-        } else {
-            "UNAVAILABLE (Read-only or Npcap missing)".red()
-        });
-        println!("{}", "============================================================".cyan());
+        let blocked_count = self
+            .hosts
+            .iter()
+            .filter(|h| matches!(h.status, HostStatus::Blocked(_)))
+            .count();
+        let limited_count = self
+            .hosts
+            .iter()
+            .filter(|h| matches!(h.status, HostStatus::Limited(_, _)))
+            .count();
+        println!(
+            "  {:<26} {} total ({} online)",
+            "Discovered Devices:",
+            self.hosts.len(),
+            online_count.to_string().bright_green()
+        );
+        println!(
+            "  {:<26} {} blocked, {} rate-limited",
+            "Active Enforcements:",
+            blocked_count.to_string().bright_red(),
+            limited_count.to_string().bright_yellow()
+        );
+        println!(
+            "  {:<26} {}",
+            "Packet Injection (Npcap):",
+            if self.spoofer.has_sender() {
+                "READY (Sender initialized)".bright_green()
+            } else {
+                "UNAVAILABLE (Read-only or Npcap missing)".red()
+            }
+        );
+        println!(
+            "{}",
+            "============================================================".cyan()
+        );
     }
 
     pub fn handle_state(&mut self, args: &[&str]) {
         if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
             println!("Persistent State Status:");
-            println!("  Persisted Blocked Devices: {}", self.persistent_state.blocked_hosts.len());
+            println!(
+                "  Persisted Blocked Devices: {}",
+                self.persistent_state.blocked_hosts.len()
+            );
             for b in &self.persistent_state.blocked_hosts {
                 println!("    - {} [{}] ({})", b.ip, b.mac, b.direction);
             }
@@ -1587,7 +1657,10 @@ impl RustrictCli {
                 if let Err(e) = self.persistent_state.save() {
                     println!("{} Failed to clear state file: {}", "[ERR]".red().bold(), e);
                 } else {
-                    println!("{} Successfully cleared persisted blocks and state file", "OK".green().bold());
+                    println!(
+                        "{} Successfully cleared persisted blocks and state file",
+                        "OK".green().bold()
+                    );
                 }
             }
             _ => println!("Usage: state [status | clear]"),

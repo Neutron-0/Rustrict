@@ -21,7 +21,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "2.0.0",
+    [string]$Version = "2.0.1",
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\rustrict\bin",
     [string]$LocalArchive = "",
     [switch]$SkipChecksum = $false,

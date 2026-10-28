@@ -12,11 +12,21 @@ fn test_scope_add_all_authorizes_all_private_networks() {
     let cidrs = &scope.allowed_cidrs;
 
     // Verify all standard RFC 1918 + carrier subnets are present
-    assert!(cidrs.iter().any(|c| c.network == Ipv4Addr::new(10, 0, 0, 0) && c.prefix == 8));
-    assert!(cidrs.iter().any(|c| c.network == Ipv4Addr::new(172, 16, 0, 0) && c.prefix == 12));
-    assert!(cidrs.iter().any(|c| c.network == Ipv4Addr::new(192, 168, 0, 0) && c.prefix == 16));
-    assert!(cidrs.iter().any(|c| c.network == Ipv4Addr::new(100, 64, 0, 0) && c.prefix == 10));
-    assert!(cidrs.iter().any(|c| c.network == Ipv4Addr::new(169, 254, 0, 0) && c.prefix == 16));
+    assert!(cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(10, 0, 0, 0) && c.prefix == 8));
+    assert!(cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(172, 16, 0, 0) && c.prefix == 12));
+    assert!(cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(192, 168, 0, 0) && c.prefix == 16));
+    assert!(cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(100, 64, 0, 0) && c.prefix == 10));
+    assert!(cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(169, 254, 0, 0) && c.prefix == 16));
 
     // Verify targets across different subnets are now in scope
     let target1 = Ipv4Addr::new(192, 168, 36, 84);
@@ -33,7 +43,10 @@ fn test_scope_all_alias() {
     cli.dispatch_command("scope all");
 
     let scope = cli.scope();
-    assert!(scope.allowed_cidrs.iter().any(|c| c.network == Ipv4Addr::new(192, 168, 0, 0)));
+    assert!(scope
+        .allowed_cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(192, 168, 0, 0)));
 }
 
 #[test]
@@ -43,12 +56,18 @@ fn test_scope_smart_cidr_parsing() {
     // Adding without explicit prefix should automatically deduce /24 for .0 subnets
     cli.dispatch_command("scope add 192.168.36.0");
     let scope = cli.scope();
-    assert!(scope.allowed_cidrs.iter().any(|c| c.network == Ipv4Addr::new(192, 168, 36, 0) && c.prefix == 24));
+    assert!(scope
+        .allowed_cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(192, 168, 36, 0) && c.prefix == 24));
 
     // Adding a single host IP should automatically deduce /32
     cli.dispatch_command("scope add 192.168.39.250");
     let scope = cli.scope();
-    assert!(scope.allowed_cidrs.iter().any(|c| c.network == Ipv4Addr::new(192, 168, 39, 250) && c.prefix == 32));
+    assert!(scope
+        .allowed_cidrs
+        .iter()
+        .any(|c| c.network == Ipv4Addr::new(192, 168, 39, 250) && c.prefix == 32));
 }
 
 #[test]

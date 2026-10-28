@@ -44,8 +44,13 @@ jobs:
           New-Item -ItemType Directory -Path staging -Force | Out-Null
           
           Copy-Item target/release/rustrict.exe staging/
-          Copy-Item target/release/WinDivert.dll staging/
-          Copy-Item target/release/WinDivert64.sys staging/
+          if (Test-Path drivers/WinDivert.dll) {
+              Copy-Item drivers/WinDivert.dll staging/
+              Copy-Item drivers/WinDivert64.sys staging/
+          } elseif (Test-Path target/release/WinDivert.dll) {
+              Copy-Item target/release/WinDivert.dll staging/
+              Copy-Item target/release/WinDivert64.sys staging/
+          }
           Copy-Item LICENSE staging/
           Copy-Item README.md staging/
           

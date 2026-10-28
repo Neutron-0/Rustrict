@@ -20,7 +20,7 @@ fn main() {
         return;
     }
 
-    print_banner("2.0.0");
+    print_banner("2.0.1");
 
     let is_router_lab = args.iter().any(|a| a == "--router-lab");
 

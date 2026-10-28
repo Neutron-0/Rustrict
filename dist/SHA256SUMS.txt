@@ -1,1 +1,1 @@
-f1f1f29b3d3b8f9d444c9206fde874ee2a5e591f0ac8cff42b9076dd5ac66838  rustrict-v2.0.0-x86_64-pc-windows-msvc.zip
+3f0aa12c94951e2c0f1f432ea0770e4ff0139ff8848e28ee42474816d14d3abb  rustrict-v2.0.1-x86_64-pc-windows-msvc.zip

@@ -231,7 +231,11 @@ mod tests {
         // In permissive mode (strict_mode == false), private LAN targets across other subnets are admitted
         let cross_subnet_private = Ipv4Addr::new(192, 168, 36, 84);
         assert!(validator2
-            .validate_target(&cross_subnet_private, None, AdmissionOperation::LocalEnforcement)
+            .validate_target(
+                &cross_subnet_private,
+                None,
+                AdmissionOperation::LocalEnforcement
+            )
             .is_ok());
         let class_a_private = Ipv4Addr::new(10, 76, 113, 26);
         assert!(validator2

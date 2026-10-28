@@ -26,6 +26,7 @@ fn main() {
     // Potential source locations for WinDivert driver binaries
     let home = env::var("USERPROFILE").unwrap_or_default();
     let candidates = vec![
+        PathBuf::from("drivers"),
         PathBuf::from("target/release"),
         PathBuf::from(format!(
             "{home}\\anaconda3\\Lib\\site-packages\\pydivert\\windivert_dll"
