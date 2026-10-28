@@ -99,14 +99,15 @@ impl RustrictCli {
             ScopeManager::default()
         };
 
-        if scope.allowed_cidrs.is_empty() {
-            let prefix = u32::from(iface.netmask).count_ones() as u8;
-            let prefix = if prefix > 0 && prefix <= 32 {
-                prefix
-            } else {
-                24
-            };
-            if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+        // Always ensure the current active interface's subnet is present in the operational scope
+        let prefix = u32::from(iface.netmask).count_ones() as u8;
+        let prefix = if prefix > 0 && prefix <= 32 {
+            prefix
+        } else {
+            24
+        };
+        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+            if !scope.allowed_cidrs.contains(&local_cidr) {
                 scope.add_cidr_direct(local_cidr);
             }
         }
@@ -241,14 +242,15 @@ impl RustrictCli {
             ScopeManager::default()
         };
 
-        if scope.allowed_cidrs.is_empty() {
-            let prefix = u32::from(iface.netmask).count_ones() as u8;
-            let prefix = if prefix > 0 && prefix <= 32 {
-                prefix
-            } else {
-                24
-            };
-            if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+        // Always ensure the current active interface's subnet is present in the operational scope
+        let prefix = u32::from(iface.netmask).count_ones() as u8;
+        let prefix = if prefix > 0 && prefix <= 32 {
+            prefix
+        } else {
+            24
+        };
+        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+            if !scope.allowed_cidrs.contains(&local_cidr) {
                 scope.add_cidr_direct(local_cidr);
             }
         }
@@ -476,7 +478,9 @@ impl RustrictCli {
         let cmd = args[0].to_lowercase();
         match cmd.as_str() {
             "help" | "?" | "clear" | "cls" | "quit" | "exit" => Ok(()),
-            "hosts" => Ok(()),
+            "hosts" | "devices" | "targets" | "list" | "ls" => Ok(()),
+            "status" => Ok(()),
+            "state" => Ok(()),
             "nic" | "adapter" => Ok(()),
             "router" => {
                 if args.len() < 2 || args[1].eq_ignore_ascii_case("help") {
@@ -528,7 +532,7 @@ impl RustrictCli {
             "audit" => Err("Command 'audit' is blocked in router-lab mode: active network auditing is strictly prohibited.".to_string()),
             "add" => Err("Command 'add' is blocked in router-lab mode: manual target addition is prohibited.".to_string()),
             "scope" => Err("Command 'scope' is blocked in router-lab mode: scope mutations are prohibited.".to_string()),
-            "free" => Err("Command 'free' is blocked in router-lab mode: local target modification is prohibited.".to_string()),
+            "free" | "unblock" | "unlimit" | "release" => Err("Command 'free/unblock' is blocked in router-lab mode: local target modification is prohibited.".to_string()),
             "block" => Err("Command 'block' is blocked in router-lab mode: local network enforcement is disabled.".to_string()),
             "limit" => Err("Command 'limit' is blocked in router-lab mode: local traffic limiting is disabled.".to_string()),
             "simulate" => Err("Command 'simulate' is blocked in router-lab mode: network simulation is disabled.".to_string()),
@@ -557,7 +561,7 @@ impl RustrictCli {
 
         match args[0].to_lowercase().as_str() {
             "scan" => self.handle_scan(&args[1..]),
-            "hosts" => self.handle_hosts(),
+            "hosts" | "devices" | "targets" | "list" | "ls" => self.handle_hosts(),
             "scope" => self.handle_scope(&args[1..]),
             "ports" => self.handle_ports(&args[1..]),
             "audit" => self.handle_audit(&args[1..]),
@@ -565,7 +569,9 @@ impl RustrictCli {
             "export" => self.handle_export(&args[1..]),
             "limit" => self.handle_limit(&args[1..]),
             "block" => self.handle_block(&args[1..]),
-            "free" => self.handle_free(&args[1..]),
+            "free" | "unblock" | "unlimit" | "release" => self.handle_free(&args[1..]),
+            "status" => self.handle_status(),
+            "state" => self.handle_state(&args[1..]),
             "add" => self.handle_add(&args[1..]),
             "router" => self.handle_router(&args[1..]),
             "nic" | "adapter" => self.handle_nic(&args[1..]),
@@ -856,6 +862,9 @@ impl RustrictCli {
         }
 
         // 5. Atomic multi-target activation with transactional rollback
+        for host in &mut target_hosts {
+            host.status = HostStatus::Limited(rate, dir);
+        }
         let mut activated = Vec::new();
         let mut failure = None;
         for host in &target_hosts {
@@ -891,6 +900,7 @@ impl RustrictCli {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Limited(rate, dir);
             }
+            self.spoofer.update_status(&host.ip, HostStatus::Limited(rate, dir));
             println!(
                 "{} Limited {} to {} ({})",
                 "OK".green().bold(),
@@ -932,7 +942,17 @@ impl RustrictCli {
             return;
         }
 
-        let ids = match self.resolve_targets(args[0]) {
+        let target_tokens: Vec<&str> = args
+            .iter()
+            .filter(|&&a| !a.starts_with("--"))
+            .cloned()
+            .collect();
+        if target_tokens.is_empty() {
+            println!("Usage: block <id|ip|all> [--upload] [--download]");
+            return;
+        }
+        let combined_target = target_tokens.join(",");
+        let ids = match self.resolve_targets(&combined_target) {
             Ok(ids) => ids,
             Err(e) => {
                 println!("{} {}", "[ERR]".red().bold(), e);
@@ -982,6 +1002,9 @@ impl RustrictCli {
         }
 
         // 5. Atomic multi-target activation with transactional rollback
+        for host in &mut target_hosts {
+            host.status = HostStatus::Blocked(dir);
+        }
         let mut activated = Vec::new();
         let mut failure = None;
         for host in &target_hosts {
@@ -1019,6 +1042,7 @@ impl RustrictCli {
                 h.persistent_block = true;
                 self.persistent_state.add_blocked(h, dir);
             }
+            self.spoofer.update_status(&host.ip, HostStatus::Blocked(dir));
             println!(
                 "{} Blocked {} ({}) [Persistent]",
                 "OK".green().bold(),
@@ -1038,11 +1062,21 @@ impl RustrictCli {
         }
 
         if args.is_empty() {
-            println!("Usage: free <id|ip|all>");
+            println!("Usage: free <id|ip|all> (or unblock <id|ip|all>)");
             return;
         }
 
-        let ids = match self.resolve_targets(args[0]) {
+        let target_tokens: Vec<&str> = args
+            .iter()
+            .filter(|&&a| !a.starts_with("--"))
+            .cloned()
+            .collect();
+        if target_tokens.is_empty() {
+            println!("Usage: free <id|ip|all> (or unblock <id|ip|all>)");
+            return;
+        }
+        let combined_target = target_tokens.join(",");
+        let ids = match self.resolve_targets(&combined_target) {
             Ok(ids) => ids,
             Err(e) => {
                 println!("{} {}", "[ERR]".red().bold(), e);
@@ -1279,18 +1313,65 @@ impl RustrictCli {
         match args[0].to_lowercase().as_str() {
             "add" => {
                 if args.len() < 2 {
-                    println!("Usage: scope add <cidr> (e.g. scope add 192.168.1.0/24)");
+                    println!("Usage: scope add <cidr|all|local> (e.g. scope add all, scope add 192.168.1.0/24)");
                     return;
                 }
-                match args[1].parse::<Ipv4Cidr>() {
+                if args[1].eq_ignore_ascii_case("all") {
+                    self.add_all_private_cidrs_to_scope();
+                    return;
+                }
+                if args[1].eq_ignore_ascii_case("local") {
+                    self.add_local_interface_to_scope();
+                    return;
+                }
+
+                let raw_cidr = args[1].trim();
+                let cidr_to_parse = if raw_cidr.contains('/') {
+                    raw_cidr.to_string()
+                } else if raw_cidr.ends_with(".0") {
+                    format!("{}/24", raw_cidr)
+                } else {
+                    format!("{}/32", raw_cidr)
+                };
+
+                match cidr_to_parse.parse::<Ipv4Cidr>() {
                     Ok(cidr) => {
                         self.scope.add_cidr_direct(cidr.clone());
                         self.persistent_state.scope = Some(self.scope.clone());
                         let _ = self.persistent_state.save();
                         println!("{} Added CIDR {} to operational scope", "OK".green().bold(), cidr);
                     }
-                    Err(e) => println!("{} Failed to parse CIDR: {}", "[ERR]".red().bold(), e),
+                    Err(e) => println!("{} Failed to parse CIDR '{}': {}", "[ERR]".red().bold(), raw_cidr, e),
                 }
+            }
+            "all" => {
+                self.add_all_private_cidrs_to_scope();
+            }
+            "local" | "auto" => {
+                self.add_local_interface_to_scope();
+            }
+            "reset" => {
+                self.reset_scope_to_defaults();
+            }
+            "clear" => {
+                self.scope.allowed_cidrs.clear();
+                self.scope.excluded_ips.clear();
+                self.scope.excluded_macs.clear();
+                self.persistent_state.scope = Some(self.scope.clone());
+                let _ = self.persistent_state.save();
+                println!("{} Cleared all operational scope CIDRs and exclusions", "OK".green().bold());
+            }
+            "on" => {
+                self.scope.set_strict(true);
+                self.persistent_state.scope = Some(self.scope.clone());
+                let _ = self.persistent_state.save();
+                println!("{} Scope strict mode ENABLED (out-of-scope targets blocked)", "OK".green().bold());
+            }
+            "off" => {
+                self.scope.set_strict(false);
+                self.persistent_state.scope = Some(self.scope.clone());
+                let _ = self.persistent_state.save();
+                println!("{} Scope strict mode DISABLED", "OK".green().bold());
             }
             "remove" | "rm" => {
                 if args.len() < 2 {
@@ -1358,7 +1439,158 @@ impl RustrictCli {
                     _ => println!("Invalid argument. Use 'scope strict on' or 'scope strict off'"),
                 }
             }
-            _ => println!("Usage: scope [status | add <cidr> | remove <cidr> | exclude-ip <ip> | exclude-mac <mac> | strict <on|off>]"),
+            _ => println!("Usage: scope [status | add <cidr|all|local> | all | reset | clear | strict <on|off> | exclude-ip <ip> | exclude-mac <mac>]"),
+        }
+    }
+
+    pub fn add_all_private_cidrs_to_scope(&mut self) {
+        let subnets = [
+            ("10.0.0.0", 8),
+            ("172.16.0.0", 12),
+            ("192.168.0.0", 16),
+            ("100.64.0.0", 10),
+            ("169.254.0.0", 16),
+        ];
+        for (ip_str, prefix) in subnets {
+            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                if let Ok(cidr) = Ipv4Cidr::new(ip, prefix) {
+                    if !self.scope.allowed_cidrs.contains(&cidr) {
+                        self.scope.add_cidr_direct(cidr);
+                    }
+                }
+            }
+        }
+        let iface_prefix = u32::from(self.iface.netmask).count_ones() as u8;
+        let iface_prefix = if iface_prefix > 0 && iface_prefix <= 32 {
+            iface_prefix
+        } else {
+            24
+        };
+        if let Ok(local_cidr) = Ipv4Cidr::new(self.iface.ip, iface_prefix) {
+            if !self.scope.allowed_cidrs.contains(&local_cidr) {
+                self.scope.add_cidr_direct(local_cidr);
+            }
+        }
+
+        self.persistent_state.scope = Some(self.scope.clone());
+        let _ = self.persistent_state.save();
+
+        println!(
+            "{} Added all standard private network boundaries to scope:",
+            "OK".green().bold()
+        );
+        println!("     10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16");
+        println!("     All LAN devices are now authorized for management.");
+    }
+
+    pub fn add_local_interface_to_scope(&mut self) {
+        let prefix = u32::from(self.iface.netmask).count_ones() as u8;
+        let prefix = if prefix > 0 && prefix <= 32 {
+            prefix
+        } else {
+            24
+        };
+        match Ipv4Cidr::new(self.iface.ip, prefix) {
+            Ok(local_cidr) => {
+                if !self.scope.allowed_cidrs.contains(&local_cidr) {
+                    self.scope.add_cidr_direct(local_cidr.clone());
+                }
+                self.persistent_state.scope = Some(self.scope.clone());
+                let _ = self.persistent_state.save();
+                println!(
+                    "{} Added local interface subnet {} to operational scope",
+                    "OK".green().bold(),
+                    local_cidr
+                );
+            }
+            Err(e) => println!("{} Failed to compute local CIDR: {}", "[ERR]".red().bold(), e),
+        }
+    }
+
+    pub fn reset_scope_to_defaults(&mut self) {
+        self.scope = ScopeManager::default();
+        let prefix = u32::from(self.iface.netmask).count_ones() as u8;
+        let prefix = if prefix > 0 && prefix <= 32 {
+            prefix
+        } else {
+            24
+        };
+        if let Ok(local_cidr) = Ipv4Cidr::new(self.iface.ip, prefix) {
+            self.scope.add_cidr_direct(local_cidr);
+        }
+        self.persistent_state.scope = Some(self.scope.clone());
+        let _ = self.persistent_state.save();
+        println!(
+            "{} Scope reset to active adapter defaults (strict mode enabled)",
+            "OK".green().bold()
+        );
+    }
+
+    pub fn handle_status(&self) {
+        println!("{}", "============================================================".cyan());
+        println!(" {}", "Rustrict System & Network Status".bright_cyan().bold());
+        println!("{}", "============================================================".cyan());
+        println!("  {:<26} {}", "Active Network Adapter:", self.iface.name.bright_white().bold());
+        println!("  {:<26} {} ({})", "Local Controller IP:", self.iface.ip, self.iface.mac);
+        println!("  {:<26} {} ({})", "Default Gateway:", self.iface.gateway, self.iface.gateway_mac);
+        println!("  {:<26} {}", "Subnet Netmask:", self.iface.netmask);
+        println!("  {:<26} {}", "Operation Mode:", if self.is_router_lab {
+            "READ-ONLY Router-Lab (Safe)".bright_yellow().bold()
+        } else {
+            "ACTIVE Local Enforcement (Privileged)".bright_green().bold()
+        });
+        println!("  {:<26} {}", "Scope Strict Mode:", if self.scope.strict_mode {
+            "ENABLED (targets strictly bounded)".yellow()
+        } else {
+            "DISABLED (all LAN targets permitted)".green()
+        });
+        println!("  {:<26} {} defined", "Authorized Boundaries:", self.scope.allowed_cidrs.len());
+        for (i, c) in self.scope.allowed_cidrs.iter().enumerate() {
+            if i < 5 {
+                println!("    - {}", c);
+            } else if i == 5 {
+                println!("    ... and {} more (run 'scope status' to view all)", self.scope.allowed_cidrs.len() - 5);
+                break;
+            }
+        }
+        let online_count = self.hosts.iter().filter(|h| h.online).count();
+        let blocked_count = self.hosts.iter().filter(|h| matches!(h.status, HostStatus::Blocked(_))).count();
+        let limited_count = self.hosts.iter().filter(|h| matches!(h.status, HostStatus::Limited(_, _))).count();
+        println!("  {:<26} {} total ({} online)", "Discovered Devices:", self.hosts.len(), online_count.to_string().bright_green());
+        println!("  {:<26} {} blocked, {} rate-limited", "Active Enforcements:", blocked_count.to_string().bright_red(), limited_count.to_string().bright_yellow());
+        println!("  {:<26} {}", "Packet Injection (Npcap):", if self.spoofer.has_sender() {
+            "READY (Sender initialized)".bright_green()
+        } else {
+            "UNAVAILABLE (Read-only or Npcap missing)".red()
+        });
+        println!("{}", "============================================================".cyan());
+    }
+
+    pub fn handle_state(&mut self, args: &[&str]) {
+        if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+            println!("Persistent State Status:");
+            println!("  Persisted Blocked Devices: {}", self.persistent_state.blocked_hosts.len());
+            for b in &self.persistent_state.blocked_hosts {
+                println!("    - {} [{}] ({})", b.ip, b.mac, b.direction);
+            }
+            if let Some(ref sc) = self.persistent_state.scope {
+                println!("  Persisted Scope Boundaries: {}", sc.allowed_cidrs.len());
+                println!("  Persisted Strict Mode:     {}", sc.strict_mode);
+            }
+            return;
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "clear" | "reset" => {
+                self.persistent_state.blocked_hosts.clear();
+                self.persistent_state.scope = None;
+                if let Err(e) = self.persistent_state.save() {
+                    println!("{} Failed to clear state file: {}", "[ERR]".red().bold(), e);
+                } else {
+                    println!("{} Successfully cleared persisted blocks and state file", "OK".green().bold());
+                }
+            }
+            _ => println!("Usage: state [status | clear]"),
         }
     }
 
@@ -1769,15 +2001,17 @@ impl RustrictCli {
 
         println!("{}", "rustrict Commands:".bright_yellow().bold());
         println!("  scan [--range <start-end>] [--fresh] [--ports]  Scans network (use --ports for service enumeration)");
-        println!("  hosts                                           Displays discovered hosts and live online/offline state");
-        println!("  scope [status|add|remove|exclude-ip|strict]     Manages authorized targets and operational boundaries");
+        println!("  hosts / devices / list                          Displays discovered hosts and live online/offline state");
+        println!("  status                                          Displays complete runtime system, adapter, and network status");
+        println!("  scope [status|add <cidr|all|local>|reset|clear] Manages authorized targets and operational boundaries");
         println!("  ports <id|ip|all> [port-range]                  Enumerates open TCP services and grabs service banners");
         println!("  audit <id|ip|all>                               Performs active security posture checks (TLS & SMB)");
         println!("  simulate <id|ip|all> [drop %] [delay ms] [...]  Simulates network resilience and fault injection");
         println!("  export [markdown|json|sarif] [filename]         Exports structured assessment reports and evidence");
         println!("  limit <id|ip|all> <rate> [...]                  Limits bandwidth (e.g. limit 1 200kbit, limit all 1mbit)");
         println!("  block <id|ip|all> [...]                         Blocks host internet access [Persists across restarts]");
-        println!("  free <id|ip|all>                                Removes limits and unblocks host [Clears persistent rule]");
+        println!("  free / unblock <id|ip|all>                      Removes limits and unblocks host [Clears persistent rule]");
+        println!("  state [status|clear]                            Inspects or clears persistent blocked records and saved state");
         println!("  add <ip> [--mac <mac>]                          Manually adds a host to table");
         println!("  router [capabilities|status|policies|preview|pause|resume|adjust|connect] [...] Router administration via authenticated firewall");
         println!("  nic [status|health|stats|list] [name|index]     Physical network adapter health telemetry and diagnostics");

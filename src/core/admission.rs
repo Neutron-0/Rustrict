@@ -92,9 +92,10 @@ impl<'a> TargetAdmissionValidator<'a> {
         self.scope.validate_target(ip, mac)?;
 
         // 3. Concrete boundary enforcement:
-        // Even in permissive mode (strict_mode == false), destructive local operations
-        // (block, limit, simulate) strictly require a concrete operational boundary.
-        // Operating ARP spoofing / traffic diversion outside configured network boundaries is disallowed.
+        // In strict mode (strict_mode == true), destructive local operations (block, limit, simulate)
+        // require the target IP to be contained within an explicitly authorized CIDR boundary.
+        // In permissive mode (strict_mode == false), all private LAN addresses (RFC 1918, CGNAT, link-local)
+        // and any explicitly allowed CIDRs are admitted; arbitrary public Internet IPs (e.g. 8.8.8.8) are rejected.
         if matches!(op, AdmissionOperation::LocalEnforcement) {
             if self.scope.allowed_cidrs.is_empty() {
                 return Err(
@@ -102,11 +103,26 @@ impl<'a> TargetAdmissionValidator<'a> {
                         .into(),
                 );
             }
-            if !self.scope.allowed_cidrs.iter().any(|c| c.contains(ip)) {
-                return Err(format!(
-                    "Target IP {} is outside authorized network boundary CIDRs for active local enforcement.",
-                    ip
-                ));
+            if self.scope.strict_mode {
+                if !self.scope.allowed_cidrs.iter().any(|c| c.contains(ip)) {
+                    return Err(format!(
+                        "Target IP {} is outside authorized network boundary CIDRs for active local enforcement.",
+                        ip
+                    ));
+                }
+            } else {
+                let is_private = ip.is_private()
+                    || ip.is_link_local()
+                    || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xC0) == 64); // RFC 6598 100.64.0.0/10
+
+                let in_allowed = self.scope.allowed_cidrs.iter().any(|c| c.contains(ip));
+
+                if !is_private && !in_allowed {
+                    return Err(format!(
+                        "Target IP {} is outside authorized network boundary CIDRs for active local enforcement.",
+                        ip
+                    ));
+                }
             }
         }
 
@@ -210,6 +226,16 @@ mod tests {
         let in_boundary_ip = Ipv4Addr::new(192, 168, 1, 42);
         assert!(validator2
             .validate_target(&in_boundary_ip, None, AdmissionOperation::LocalEnforcement)
+            .is_ok());
+
+        // In permissive mode (strict_mode == false), private LAN targets across other subnets are admitted
+        let cross_subnet_private = Ipv4Addr::new(192, 168, 36, 84);
+        assert!(validator2
+            .validate_target(&cross_subnet_private, None, AdmissionOperation::LocalEnforcement)
+            .is_ok());
+        let class_a_private = Ipv4Addr::new(10, 76, 113, 26);
+        assert!(validator2
+            .validate_target(&class_a_private, None, AdmissionOperation::LocalEnforcement)
             .is_ok());
     }
 }

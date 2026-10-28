@@ -130,6 +130,12 @@ impl ArpSpoofer {
         Ok(())
     }
 
+    pub fn update_status(&self, ip: &Ipv4Addr, status: crate::types::HostStatus) {
+        if let Some(target) = self.targets.write().get_mut(ip) {
+            target.status = status;
+        }
+    }
+
     pub fn remove(&self, ip: &Ipv4Addr) {
         if let Some(host) = self.targets.write().remove(ip) {
             self.restore(&host);
