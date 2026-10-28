@@ -239,9 +239,16 @@ try {
         $sourceFile = Join-Path $extractStaging $file
         if (Test-Path $sourceFile) {
             $destFile = Join-Path $InstallDir $file
-            $tempTarget = Join-Path $InstallDir ("$file.tmp." + [System.Guid]::NewGuid().ToString("N"))
-            Copy-Item -Path $sourceFile -Destination $tempTarget -Force
-            Move-Item -Path $tempTarget -Destination $destFile -Force
+            try {
+                Copy-Item -Path $sourceFile -Destination $destFile -Force -ErrorAction Stop
+            } catch {
+                # If driver file is currently loaded in the Windows kernel, keep existing copy
+                if (Test-Path $destFile) {
+                    Write-Host "Notice: $file is currently locked by active system service; preserving installed copy." -ForegroundColor Yellow
+                } else {
+                    throw "Failed to install ${file}: $_"
+                }
+            }
         }
     }
 
