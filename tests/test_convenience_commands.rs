@@ -131,14 +131,14 @@ fn test_blockmode_command_dispatch() {
     use rustrict::spoofer::SpooferMode;
 
     let mut cli = RustrictCli::new_for_testing();
-    assert_eq!(cli.spoofer().mode(), SpooferMode::Blackhole);
-
-    assert!(cli.dispatch_command("blockmode"));
-    assert!(cli.dispatch_command("blockmode mitm"));
     assert_eq!(cli.spoofer().mode(), SpooferMode::Mitm);
 
-    assert!(cli.dispatch_command("spoofer blackhole"));
+    assert!(cli.dispatch_command("blockmode"));
+    assert!(cli.dispatch_command("blockmode blackhole"));
     assert_eq!(cli.spoofer().mode(), SpooferMode::Blackhole);
+
+    assert!(cli.dispatch_command("spoofer mitm"));
+    assert_eq!(cli.spoofer().mode(), SpooferMode::Mitm);
 
     assert!(cli.dispatch_command("blockmode invalid_mode"));
 }

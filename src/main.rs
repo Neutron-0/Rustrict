@@ -325,19 +325,15 @@ fn main() {
         RustrictCli::new(iface)
     };
 
-    // Apply startup flags if provided
+    // Apply startup flags if provided (permissive by default unless --strict is explicitly passed)
     if args.iter().any(|a| a == "--strict") {
         app.set_strict_mode(true);
         println!(
             "{} Strict mode explicitly enabled by CLI flag.",
             "[SCOPE]".bright_yellow().bold()
         );
-    } else if args.iter().any(|a| a == "--permissive") {
+    } else {
         app.set_strict_mode(false);
-        println!(
-            "{} Permissive LAN mode explicitly enabled by CLI flag.",
-            "[SCOPE]".bright_green().bold()
-        );
     }
 
     for (i, arg) in args.iter().enumerate() {

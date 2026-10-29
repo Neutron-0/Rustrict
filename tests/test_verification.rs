@@ -116,13 +116,13 @@ fn test_spoofer_mode_toggle_and_properties() {
     let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
 
     let spoofer = ArpSpoofer::new_inactive(local_mac, gateway_ip, gateway_mac);
-    assert_eq!(spoofer.mode(), SpooferMode::Blackhole);
-
-    spoofer.set_mode(SpooferMode::Mitm);
     assert_eq!(spoofer.mode(), SpooferMode::Mitm);
 
     spoofer.set_mode(SpooferMode::Blackhole);
     assert_eq!(spoofer.mode(), SpooferMode::Blackhole);
+
+    spoofer.set_mode(SpooferMode::Mitm);
+    assert_eq!(spoofer.mode(), SpooferMode::Mitm);
 }
 
 #[test]

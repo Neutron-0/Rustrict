@@ -98,6 +98,8 @@ impl RustrictCli {
         } else {
             ScopeManager::default()
         };
+        // Default to permissive LAN operations
+        scope.set_strict(false);
 
         // Always ensure the current active interface's subnet is present in the operational scope
         let prefix = u32::from(iface.netmask).count_ones() as u8;
@@ -254,6 +256,8 @@ impl RustrictCli {
         } else {
             ScopeManager::default()
         };
+        // Default to permissive LAN operations
+        scope.set_strict(false);
 
         let prefix = u32::from(iface.netmask).count_ones() as u8;
         let prefix = if prefix > 0 && prefix <= 32 {
@@ -328,6 +332,8 @@ impl RustrictCli {
         } else {
             ScopeManager::default()
         };
+        // Default to permissive LAN operations
+        scope.set_strict(false);
 
         // Always ensure the current active interface's subnet is present in the operational scope
         let prefix = u32::from(iface.netmask).count_ones() as u8;
@@ -695,6 +701,65 @@ impl RustrictCli {
             "state" => self.handle_state(&args[1..]),
             "upgrade" | "update" => self.handle_upgrade(),
             "blockmode" | "spoofer" => self.handle_blockmode(&args[1..]),
+            "mode" => {
+                if args.len() > 1
+                    && (args[1].eq_ignore_ascii_case("strict")
+                        || args[1].eq_ignore_ascii_case("permissive"))
+                {
+                    let sub_cmd = format!("strict {}", args[1..].join(" "));
+                    self.dispatch_command(&sub_cmd);
+                } else {
+                    self.handle_blockmode(&args[1..]);
+                }
+            }
+            "strict" => {
+                let sub = args.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                let sub2 = args.get(2).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "off"
+                    || sub == "false"
+                    || sub == "disable"
+                    || (sub == "mode" && (sub2 == "off" || sub2 == "false" || sub2 == "disable"))
+                {
+                    self.scope.set_strict(false);
+                    self.persistent_state.scope = Some(self.scope.clone());
+                    let _ = self.persistent_state.save();
+                    println!(
+                        "{} Strict mode DISABLED (Permissive LAN enforcement active).",
+                        "OK".green().bold()
+                    );
+                } else if sub == "on"
+                    || sub == "true"
+                    || sub == "enable"
+                    || (sub == "mode" && (sub2 == "on" || sub2 == "true" || sub2 == "enable"))
+                {
+                    self.scope.set_strict(true);
+                    self.persistent_state.scope = Some(self.scope.clone());
+                    let _ = self.persistent_state.save();
+                    println!(
+                        "{} Strict mode ENABLED (Only authorized CIDRs allowed).",
+                        "OK".green().bold()
+                    );
+                } else {
+                    println!(
+                        "Strict Mode Status: {}",
+                        if self.scope.strict_mode {
+                            "ENABLED (Strict)".yellow().bold()
+                        } else {
+                            "DISABLED (Permissive)".green().bold()
+                        }
+                    );
+                    println!("Usage: 'strict off' (or 'strict on') to toggle.");
+                }
+            }
+            "permissive" | "unrestrict" => {
+                self.scope.set_strict(false);
+                self.persistent_state.scope = Some(self.scope.clone());
+                let _ = self.persistent_state.save();
+                println!(
+                    "{} Permissive mode ENABLED (All private LANs permitted).",
+                    "OK".green().bold()
+                );
+            }
             "add" => self.handle_add(&args[1..]),
             "router" => self.handle_router(&args[1..]),
             "nic" | "adapter" => self.handle_nic(&args[1..]),
@@ -1486,17 +1551,17 @@ impl RustrictCli {
                 let _ = self.persistent_state.save();
                 println!("{} Cleared all operational scope CIDRs and exclusions", "OK".green().bold());
             }
-            "on" => {
+            "on" | "enable" => {
                 self.scope.set_strict(true);
                 self.persistent_state.scope = Some(self.scope.clone());
                 let _ = self.persistent_state.save();
                 println!("{} Scope strict mode ENABLED (out-of-scope targets blocked)", "OK".green().bold());
             }
-            "off" => {
+            "off" | "permissive" | "disable" => {
                 self.scope.set_strict(false);
                 self.persistent_state.scope = Some(self.scope.clone());
                 let _ = self.persistent_state.save();
-                println!("{} Scope strict mode DISABLED", "OK".green().bold());
+                println!("{} Scope strict mode DISABLED (Permissive LAN enforcement active)", "OK".green().bold());
             }
             "remove" | "rm" => {
                 if args.len() < 2 {
@@ -2201,6 +2266,8 @@ impl RustrictCli {
         println!("  hosts / devices / list                          Displays discovered hosts and live online/offline state");
         println!("  status                                          Displays complete runtime system, adapter, and network status");
         println!("  scope [status|add <cidr|all|local>|reset|clear] Manages authorized targets and operational boundaries");
+        println!("  strict [off|on] / permissive                    Toggles strict CIDR boundary enforcement (permissive by default)");
+        println!("  mode / blockmode [mitm|blackhole]               Sets block mode: 'mitm' (WinDivert kernel drop) or 'blackhole' (L2 drop)");
         println!("  ports <id|ip|all> [port-range]                  Enumerates open TCP services and grabs service banners");
         println!("  audit <id|ip|all>                               Performs active security posture checks (TLS & SMB)");
         println!("  simulate <id|ip|all> [drop %] [delay ms] [...]  Simulates network resilience and fault injection");
@@ -2285,9 +2352,8 @@ impl RustrictCli {
             "\n{}",
             "─── Rustrict Update & Upgrade Guide ───".cyan().bold()
         );
-        println!("Installed Version: v{}", env!("CARGO_PKG_VERSION"));
-        println!("Official Releases: https://github.com/Neutron-0/Rustrict/releases");
-        println!("\nTo upgrade Rustrict to the latest version at any time, run in PowerShell:");
+        println!("Official Repository: https://github.com/Neutron-0/Rustrict");
+        println!("\nTo install or update Rustrict at any time, run in PowerShell:");
         println!("  {}", "irm https://raw.githubusercontent.com/Neutron-0/Rustrict/main/scripts/install.ps1 | iex".yellow().bold());
         println!("\nPersistence & Driver Invariants:");
         println!("  • Persisted block rules and scope settings in %ProgramData%\\Rustrict are safely preserved.");

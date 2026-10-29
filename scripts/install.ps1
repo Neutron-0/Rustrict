@@ -21,7 +21,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "2.0.2",
+    [string]$Version = "",
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\rustrict\bin",
     [string]$LocalArchive = "",
     [switch]$SkipChecksum = $false,
@@ -111,6 +111,18 @@ function Download-FileReliable([string[]]$Urls, [string]$OutPath) {
 }
 
 $Repo = "Neutron-0/Rustrict"
+if (-not $Version -or $Version -eq "latest") {
+    try {
+        $headers = @{ "User-Agent" = "Rustrict-Installer" }
+        if ($Token) { $headers["Authorization"] = "Bearer $Token" }
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers -UseBasicParsing -TimeoutSec 10
+        if ($rel.tag_name) {
+            $Version = $rel.tag_name
+        }
+    } catch {
+        $Version = "2.0.2"
+    }
+}
 $CleanVersion = $Version.TrimStart('v')
 $Target = "x86_64-pc-windows-msvc"
 $ArchiveName = "rustrict-v$CleanVersion-$Target.zip"
@@ -119,7 +131,6 @@ Write-Host "============================================================" -Foreg
 Write-Host " Rustrict Windows Installer" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "Target Architecture: $Target"
-Write-Host "Target Version:      v$CleanVersion"
 Write-Host "Installation Path:   $InstallDir\rustrict.exe"
 
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rustrict-install-" + [System.Guid]::NewGuid().ToString("N"))
