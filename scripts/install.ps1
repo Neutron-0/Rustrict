@@ -171,12 +171,12 @@ try {
         $releaseBase = "https://github.com/$Repo/releases/download/v$CleanVersion"
 
         $archiveUrls = @(
-            "$rawBase/$ArchiveName",
-            "$releaseBase/$ArchiveName"
+            "$releaseBase/$ArchiveName",
+            "$rawBase/$ArchiveName"
         )
         $sumsUrls = @(
-            "$rawBase/SHA256SUMS.txt",
-            "$releaseBase/SHA256SUMS.txt"
+            "$releaseBase/SHA256SUMS.txt",
+            "$rawBase/SHA256SUMS.txt"
         )
 
         Write-Host "Downloading $ArchiveName..."
