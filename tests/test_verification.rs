@@ -38,10 +38,10 @@ fn test_blocked_vs_limited_arp_frame_crafting() {
     let victim_ip = Ipv4Addr::new(192, 168, 1, 100);
 
     // --- Scenario A: Device is BLOCKED ---
-    // Target must be told Gateway is at BLACKHOLE_MAC
+    // Target must be told Gateway is at BLACKHOLE_MAC, transmitted with host local_mac
     let pkt_to_victim_blocked = craft_arp_reply(
         victim_mac,
-        BLACKHOLE_MAC,
+        local_mac,
         gateway_ip,
         BLACKHOLE_MAC,
         victim_ip,
@@ -54,14 +54,14 @@ fn test_blocked_vs_limited_arp_frame_crafting() {
         parsed_victim.1, BLACKHOLE_MAC,
         "Victim must map Gateway IP to BLACKHOLE_MAC"
     );
-    // Verify Ethernet source and destination headers
+    // Verify Ethernet source and destination headers (source must be transmitting local_mac)
     assert_eq!(&pkt_to_victim_blocked[0..6], &victim_mac.0);
-    assert_eq!(&pkt_to_victim_blocked[6..12], &BLACKHOLE_MAC.0);
+    assert_eq!(&pkt_to_victim_blocked[6..12], &local_mac.0);
 
-    // Gateway must be told Victim is at BLACKHOLE_MAC
+    // Gateway must be told Victim is at BLACKHOLE_MAC, transmitted with host local_mac
     let pkt_to_gw_blocked = craft_arp_reply(
         gateway_mac,
-        BLACKHOLE_MAC,
+        local_mac,
         victim_ip,
         BLACKHOLE_MAC,
         gateway_ip,
@@ -74,6 +74,8 @@ fn test_blocked_vs_limited_arp_frame_crafting() {
         parsed_gw.1, BLACKHOLE_MAC,
         "Gateway must map Victim IP to BLACKHOLE_MAC"
     );
+    assert_eq!(&pkt_to_gw_blocked[0..6], &gateway_mac.0);
+    assert_eq!(&pkt_to_gw_blocked[6..12], &local_mac.0);
 
     // --- Scenario B: Device is LIMITED (MITM mode) ---
     // Target must be told Gateway is at local_mac
@@ -103,6 +105,24 @@ fn test_blocked_vs_limited_arp_frame_crafting() {
         parsed_gw_mitm.1, local_mac,
         "In limited mode, gateway maps Victim IP to host local_mac"
     );
+}
+
+#[test]
+fn test_spoofer_mode_toggle_and_properties() {
+    use rustrict::spoofer::{ArpSpoofer, SpooferMode};
+
+    let local_mac = MacAddress([0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
+    let gateway_mac = MacAddress([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    let gateway_ip = Ipv4Addr::new(192, 168, 1, 1);
+
+    let spoofer = ArpSpoofer::new_inactive(local_mac, gateway_ip, gateway_mac);
+    assert_eq!(spoofer.mode(), SpooferMode::Blackhole);
+
+    spoofer.set_mode(SpooferMode::Mitm);
+    assert_eq!(spoofer.mode(), SpooferMode::Mitm);
+
+    spoofer.set_mode(SpooferMode::Blackhole);
+    assert_eq!(spoofer.mode(), SpooferMode::Blackhole);
 }
 
 #[test]

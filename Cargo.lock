@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "rustrict"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "colored",
  "comfy-table",

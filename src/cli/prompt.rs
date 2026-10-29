@@ -69,14 +69,14 @@ fn read_masked_password() -> io::Result<String> {
                 SetConsoleMode(handle, prev_mode);
                 println!(); // Print newline since Enter wasn't echoed
 
-                return res.map(|_| input.trim().to_string());
+                return res.map(|_| input.trim().trim_start_matches('\u{feff}').to_string());
             }
         }
     }
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
+    Ok(input.trim().trim_start_matches('\u{feff}').to_string())
 }
 
 impl RustrictCli {
@@ -204,6 +204,23 @@ impl RustrictCli {
         let policy_engine = Arc::new(PolicyExecutionEngine::new(router_registry.clone()));
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
+        println!(
+            "{} Scope Mode: {}  |  Block Mode: {}",
+            "[CONFIG]".bright_cyan().bold(),
+            if scope.strict_mode {
+                "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
+            } else {
+                "PERMISSIVE (All private LANs permitted)"
+                    .bright_green()
+                    .bold()
+            },
+            match spoofer.mode() {
+                crate::spoofer::SpooferMode::Blackhole =>
+                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
+                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
+            }
+        );
+
         Self {
             iface,
             scanner,
@@ -220,6 +237,76 @@ impl RustrictCli {
             policy_engine,
             simulated_inputs: Vec::new(),
             is_router_lab: false,
+        }
+    }
+
+    /// Creates a decoupled offline session without live network packet injection or adapter binding.
+    pub fn new_offline(iface: NetworkInterface) -> Self {
+        let scanner = SubnetScanner::new(iface.ip, iface.netmask, iface.gateway);
+        let spoofer = ArpSpoofer::new_inactive(iface.mac, iface.gateway, iface.gateway_mac);
+        let limiter = TrafficLimiter::new();
+        let sniffer = crate::resolver::passive::PassiveIdentitySniffer::new_inactive();
+        let persistent_state = crate::state::PersistentState::load();
+
+        let mut scope = if let Some(mut saved_scope) = persistent_state.scope.clone() {
+            saved_scope.sanitize();
+            saved_scope
+        } else {
+            ScopeManager::default()
+        };
+
+        let prefix = u32::from(iface.netmask).count_ones() as u8;
+        let prefix = if prefix > 0 && prefix <= 32 {
+            prefix
+        } else {
+            24
+        };
+        if let Ok(local_cidr) = Ipv4Cidr::new(iface.ip, prefix) {
+            if !scope.allowed_cidrs.contains(&local_cidr) {
+                scope.add_cidr_direct(local_cidr);
+            }
+        }
+
+        let mut hosts = Vec::new();
+        if !persistent_state.blocked_hosts.is_empty() {
+            for (idx, b) in persistent_state.blocked_hosts.iter().enumerate() {
+                let mac = b.mac.parse().unwrap_or(MacAddress::ZERO);
+                let dir = persistent_state.get_direction(&b.ip);
+                let mut host = Host::with_source(
+                    idx,
+                    b.ip,
+                    mac,
+                    b.name.clone(),
+                    crate::types::NameSource::Manual,
+                    "Persisted Device".into(),
+                );
+                host.status = HostStatus::PersistedInactive(dir);
+                host.persistent_block = true;
+                hosts.push(host);
+            }
+        }
+
+        let router_registry = Arc::new(RouterRegistry::new(iface.gateway));
+        router_registry.set_controller_ip(iface.ip);
+        let policy_engine = Arc::new(PolicyExecutionEngine::new(router_registry.clone()));
+        let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+
+        Self {
+            iface,
+            scanner,
+            spoofer,
+            limiter,
+            sniffer,
+            hosts,
+            persistent_state,
+            scope,
+            services: HashMap::new(),
+            findings: Vec::new(),
+            admin_provider,
+            router_registry,
+            policy_engine,
+            simulated_inputs: Vec::new(),
+            is_router_lab: true,
         }
     }
 
@@ -284,6 +371,23 @@ impl RustrictCli {
         let policy_engine = Arc::new(PolicyExecutionEngine::new(router_registry.clone()));
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
+        println!(
+            "{} Scope Mode: {}  |  Block Mode: {}",
+            "[CONFIG]".bright_cyan().bold(),
+            if scope.strict_mode {
+                "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
+            } else {
+                "PERMISSIVE (All private LANs permitted)"
+                    .bright_green()
+                    .bold()
+            },
+            match spoofer.mode() {
+                crate::spoofer::SpooferMode::Blackhole =>
+                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
+                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
+            }
+        );
+
         Self {
             iface,
             scanner,
@@ -342,6 +446,23 @@ impl RustrictCli {
         router_registry.set_controller_ip(iface.ip);
         let policy_engine = Arc::new(PolicyExecutionEngine::new(router_registry.clone()));
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
+
+        println!(
+            "{} Scope Mode: {}  |  Block Mode: {}",
+            "[CONFIG]".bright_cyan().bold(),
+            if scope.strict_mode {
+                "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
+            } else {
+                "PERMISSIVE (All private LANs permitted)"
+                    .bright_green()
+                    .bold()
+            },
+            match spoofer.mode() {
+                crate::spoofer::SpooferMode::Blackhole =>
+                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
+                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
+            }
+        );
 
         Self {
             iface,
@@ -477,7 +598,7 @@ impl RustrictCli {
 
         let cmd = args[0].to_lowercase();
         match cmd.as_str() {
-            "help" | "?" | "clear" | "cls" | "quit" | "exit" | "upgrade" | "update" => Ok(()),
+            "help" | "?" | "clear" | "cls" | "quit" | "exit" | "upgrade" | "update" | "blockmode" | "spoofer" => Ok(()),
             "hosts" | "devices" | "targets" | "list" | "ls" => Ok(()),
             "status" => Ok(()),
             "state" => Ok(()),
@@ -573,6 +694,7 @@ impl RustrictCli {
             "status" => self.handle_status(),
             "state" => self.handle_state(&args[1..]),
             "upgrade" | "update" => self.handle_upgrade(),
+            "blockmode" | "spoofer" => self.handle_blockmode(&args[1..]),
             "add" => self.handle_add(&args[1..]),
             "router" => self.handle_router(&args[1..]),
             "nic" | "adapter" => self.handle_nic(&args[1..]),
@@ -614,7 +736,7 @@ impl RustrictCli {
                 }
             }
 
-            let input = line.trim();
+            let input = line.trim().trim_start_matches('\u{feff}').trim();
             if input.is_empty() {
                 continue;
             }
@@ -2093,6 +2215,69 @@ impl RustrictCli {
         println!("  upgrade / update                                Instructions to upgrade rustrict to latest release");
         println!("  clear                                           Clears screen");
         println!("  quit / exit                                     Exits rustrict and restores network\n");
+    }
+
+    pub fn scope_mut(&mut self) -> &mut ScopeManager {
+        &mut self.scope
+    }
+
+    pub fn set_strict_mode(&mut self, strict: bool) {
+        self.scope.set_strict(strict);
+    }
+
+    pub fn set_spoofer_mode(&mut self, mode: crate::spoofer::SpooferMode) {
+        self.spoofer.set_mode(mode);
+    }
+
+    fn handle_blockmode(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!(
+                "Current block enforcement mode: {}",
+                match self.spoofer.mode() {
+                    crate::spoofer::SpooferMode::Blackhole =>
+                        "BLACKHOLE (L2 blackhole MAC 02:bf:00:00:00:01, zero local NIC load)"
+                            .bright_green()
+                            .bold(),
+                    crate::spoofer::SpooferMode::Mitm =>
+                        "MITM (Routed to local host MAC, dropped in WinDivert kernel filter)"
+                            .bright_cyan()
+                            .bold(),
+                }
+            );
+            println!("  Usage: 'blockmode blackhole' (drop at L2 switch/AP) or 'blockmode mitm' (drop via WinDivert kernel driver)");
+            return;
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "blackhole" | "bh" | "l2" => {
+                self.spoofer
+                    .set_mode(crate::spoofer::SpooferMode::Blackhole);
+                println!(
+                    "{} Spoofer block mode switched to: {}",
+                    "OK".green().bold(),
+                    "BLACKHOLE (02:bf:00:00:00:01 - dropped silently at L2)"
+                        .bright_green()
+                        .bold()
+                );
+            }
+            "mitm" | "divert" | "drop" | "kernel" => {
+                self.spoofer.set_mode(crate::spoofer::SpooferMode::Mitm);
+                println!(
+                    "{} Spoofer block mode switched to: {}",
+                    "OK".green().bold(),
+                    "MITM (Routed to local host and dropped by WinDivert kernel filter)"
+                        .bright_cyan()
+                        .bold()
+                );
+            }
+            other => {
+                println!(
+                    "{} Unknown block mode '{}'. Choose 'blackhole' or 'mitm'.",
+                    "[ERR]".bright_red().bold(),
+                    other
+                );
+            }
+        }
     }
 
     pub fn handle_upgrade(&self) {

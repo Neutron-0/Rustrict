@@ -1,4 +1,5 @@
 use crate::types::{MacAddress, NetworkInterface};
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::process::Command;
 
@@ -818,6 +819,224 @@ pub fn get_default_interface() -> Result<NetworkInterface, String> {
         mac: local_mac,
         device_path,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceSummary {
+    pub index: u32,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub link_speed: String,
+    pub mac: MacAddress,
+    pub ip: Option<Ipv4Addr>,
+    pub prefix_len: Option<u8>,
+    pub gateway: Option<Ipv4Addr>,
+}
+
+/// Lists all detected network adapters and their IP configurations safely with zero network probes.
+pub fn list_network_interfaces() -> Result<Vec<InterfaceSummary>, String> {
+    let runner = SystemCommandRunner;
+    list_network_interfaces_with(&runner)
+}
+
+pub fn list_network_interfaces_with<R: CommandRunner>(
+    runner: &R,
+) -> Result<Vec<InterfaceSummary>, String> {
+    let adapter_cmd = r#"Get-NetAdapter | ForEach-Object { "$($_.ifIndex)|$($_.Name)|$($_.Status)|$($_.LinkSpeed)|$($_.MacAddress)|$($_.InterfaceDescription)" }"#;
+    let adapter_output = runner.run_powershell(adapter_cmd)?;
+
+    let ip_cmd = r#"Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { "$($_.InterfaceIndex)|$($_.IPAddress)|$($_.PrefixLength)" }"#;
+    let ip_output = runner.run_powershell(ip_cmd).unwrap_or_default();
+
+    let gw_cmd = r#"Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.InterfaceIndex)|$($_.NextHop)" }"#;
+    let gw_output = runner.run_powershell(gw_cmd).unwrap_or_default();
+
+    let mut ip_map: HashMap<u32, (Ipv4Addr, u8)> = HashMap::new();
+    for line in ip_output.lines() {
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() >= 3 {
+            if let (Ok(idx), Ok(ip)) = (
+                parts[0].trim().parse::<u32>(),
+                parts[1].trim().parse::<Ipv4Addr>(),
+            ) {
+                let prefix = parts[2].trim().parse::<u8>().unwrap_or(24);
+                if !ip.is_link_local() || !ip_map.contains_key(&idx) {
+                    ip_map.insert(idx, (ip, prefix));
+                }
+            }
+        }
+    }
+
+    let mut gw_map: HashMap<u32, Ipv4Addr> = HashMap::new();
+    for line in gw_output.lines() {
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() >= 2 {
+            if let (Ok(idx), Ok(gw)) = (
+                parts[0].trim().parse::<u32>(),
+                parts[1].trim().parse::<Ipv4Addr>(),
+            ) {
+                gw_map.entry(idx).or_insert(gw);
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    for line in adapter_output.lines() {
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() >= 6 {
+            let index = parts[0].trim().parse::<u32>().unwrap_or(0);
+            let name = parts[1].trim().to_string();
+            let status = parts[2].trim().to_string();
+            let link_speed = parts[3].trim().to_string();
+            let mac_str = parts[4].trim().replace('-', ":");
+            let mac = mac_str.parse::<MacAddress>().unwrap_or(MacAddress::ZERO);
+            let description = parts[5].trim().to_string();
+
+            let (ip, prefix_len) = match ip_map.get(&index) {
+                Some(&(ip, p)) => (Some(ip), Some(p)),
+                None => (None, None),
+            };
+            let gateway = gw_map.get(&index).copied();
+
+            results.push(InterfaceSummary {
+                index,
+                name,
+                description,
+                status,
+                link_speed,
+                mac,
+                ip,
+                prefix_len,
+                gateway,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
+/// Resolves a network interface specified by adapter name, alias, or interface index.
+pub fn get_interface_by_name_or_index(identifier: &str) -> Result<NetworkInterface, String> {
+    let interfaces = list_network_interfaces()?;
+    let clean_id = identifier.trim();
+
+    let target_summary = if let Ok(idx) = clean_id.parse::<u32>() {
+        interfaces.into_iter().find(|i| i.index == idx)
+    } else {
+        interfaces.into_iter().find(|i| {
+            i.name.eq_ignore_ascii_case(clean_id)
+                || i.name.to_lowercase().contains(&clean_id.to_lowercase())
+                || i.description
+                    .to_lowercase()
+                    .contains(&clean_id.to_lowercase())
+        })
+    };
+
+    let summary = target_summary.ok_or_else(|| {
+        format!(
+            "Network interface '{}' not found. Run 'rustrict --list-interfaces' to view available adapters.",
+            identifier
+        )
+    })?;
+
+    let local_ip = summary.ip.ok_or_else(|| {
+        format!(
+            "Interface '{}' ([{}]) has no active IPv4 address assigned.",
+            summary.name, summary.index
+        )
+    })?;
+
+    let prefix_len = summary.prefix_len.unwrap_or(24).min(32);
+    let mask_u32 = if prefix_len == 0 {
+        0
+    } else {
+        !((1u32 << (32 - prefix_len)) - 1)
+    };
+    let netmask = Ipv4Addr::from(mask_u32);
+
+    let gateway_ip = summary.gateway.unwrap_or_else(|| {
+        Ipv4Addr::new(
+            local_ip.octets()[0],
+            local_ip.octets()[1],
+            local_ip.octets()[2],
+            1,
+        )
+    });
+
+    // Resolve gateway MAC with retries and ARP cache fallback
+    let mut gateway_mac = MacAddress::ZERO;
+    for _ in 0..3 {
+        if let Some(mac) = send_arp(gateway_ip) {
+            gateway_mac = mac;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if gateway_mac == MacAddress::ZERO {
+        for (cached_ip, cached_mac) in get_arp_cache() {
+            if cached_ip == gateway_ip && cached_mac != MacAddress::ZERO {
+                gateway_mac = cached_mac;
+                break;
+            }
+        }
+    }
+    if gateway_mac == MacAddress::ZERO {
+        let _ = Command::new("ping")
+            .args(["-n", "1", "-w", "500", &gateway_ip.to_string()])
+            .output();
+        if let Some(mac) = send_arp(gateway_ip) {
+            gateway_mac = mac;
+        }
+    }
+
+    let safe_iface_name = summary.name.replace('\'', "''");
+    let guid_cmd = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                r#"Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty InterfaceGuid"#,
+                safe_iface_name
+            ),
+        ])
+        .output();
+
+    let guid_str = match guid_cmd {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(_) => String::new(),
+    };
+
+    let device_path = if !guid_str.is_empty() {
+        format!(r"\Device\NPF_{}", guid_str)
+    } else {
+        summary.name.clone()
+    };
+
+    Ok(NetworkInterface {
+        name: summary.name.clone(),
+        description: summary.description,
+        ip: local_ip,
+        netmask,
+        gateway: gateway_ip,
+        gateway_mac,
+        mac: summary.mac,
+        device_path,
+    })
+}
+
+/// Returns a decoupled offline loopback interface for testing, scope analysis, and adapter-free inspection.
+pub fn get_offline_interface() -> NetworkInterface {
+    NetworkInterface {
+        name: "Offline-Decoupled".to_string(),
+        description: "Decoupled offline inspection session (no physical adapter bound)".to_string(),
+        ip: Ipv4Addr::new(127, 0, 0, 1),
+        netmask: Ipv4Addr::new(255, 0, 0, 0),
+        gateway: Ipv4Addr::new(127, 0, 0, 1),
+        gateway_mac: MacAddress::ZERO,
+        mac: MacAddress::ZERO,
+        device_path: "offline".to_string(),
+    }
 }
 
 /// Passive ARP cache query provider trait to allow mock-testing and hermetic discovery.

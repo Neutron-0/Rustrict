@@ -809,6 +809,27 @@ flowchart TD
 
 ## CLI Command Reference
 
+### Command-Line Arguments & Flags
+
+Rustrict can be launched with options or run freestanding diagnostics without administrator privileges:
+
+```powershell
+rustrict [OPTIONS]
+rustrict nic [COMMAND] [ARGS...]
+```
+
+| Flag | Argument | Description | Admin Required |
+| :--- | :--- | :--- | :--- |
+| **`-h, --help`** | None | Displays full usage guide and interactive shell reference | No |
+| **`-v, --version`** | None | Prints version information and target architecture | No |
+| **`-l, --list-interfaces`** | None | Lists all detected network adapters, IPs, MACs, link speeds, and statuses | No |
+| **`-i, --interface`** | `<name\|index>` | Explicitly binds to the specified network adapter (e.g. `-i "Wi-Fi"` or `-i 17`) | Yes (if live) |
+| **`--offline, --no-adapter`** | None | Decoupled offline session without probing or binding to physical NICs | No |
+| **`--router-lab`** | None | Read-only router laboratory mode (zero active network probes or mutations) | No |
+| **`--strict`** | None | Forces strict scope mode on startup (enforce explicit CIDR boundaries) | Yes (if live) |
+| **`--permissive`** | None | Forces permissive scope mode on startup (permits all RFC 1918 private LANs) | Yes (if live) |
+| **`--blockmode`** | `<blackhole\|mitm>` | Sets default block mode: `blackhole` (L2 drop) or `mitm` (WinDivert kernel drop) | Yes (if live) |
+
 ### Interactive Shell Commands
 
 | Command | Syntax | Description |
@@ -823,6 +844,7 @@ flowchart TD
 | **`export`** | `export [markdown\|json\|sarif] [filename]` | Generates structured security assessment and inventory evidence. Supports Markdown executive summaries, structured JSON asset/findings dumps, and industry-standard SARIF v2.1.0 reports for GitHub Security and CI/CD ingestion. |
 | **`limit`** | `limit <targets> <rate> [--upload] [--download]` | Throttles device bandwidth. Targets can be device IDs (`1`), IP addresses (`192.168.18.50`), comma-separated lists (`1,192.168.18.50`), or `all`. Rate supports `bit`, `kbit`, `mbit`, `gbit` units. Direction defaults to `Both`. |
 | **`block`** | `block <targets> [--upload] [--download]` | Completely cuts off device internet access by dropping all forwarded packets. **Persists across restarts** — blocked devices are saved to `rustrict_state.json` and automatically re-armed on next launch. |
+| **`blockmode`** | `blockmode [blackhole \| mitm]` (alias: `spoofer`) | Toggles block enforcement mechanism. `blackhole` routes blocked targets to unicast blackhole MAC `02:bf:00:00:00:01` (dropped silently at L2 switch/AP with zero local CPU/NIC load). `mitm` routes traffic through local host and drops packets in the WinDivert kernel filter. |
 | **`free`** | `free <targets>` (aliases: `unblock`, `unlimit`, `release`) | Removes all limits and blocks for specified devices. Restores authentic ARP cache entries. Removes persistent block rules from disk. |
 | **`add`** | `add <ip> [--mac <mac>]` | Manually inserts a device into the management table. If `--mac` is omitted, the MAC is resolved via the Windows kernel ARP API. |
 | **`nic`** | `nic [status\|health\|stats\|list] [name\|index]` | Physical network adapter health diagnostic. Performs bounded 2-second telemetry sampling, computes Rx/Tx throughput rates (bps), link speed utilization %, packet errors and discards, and heuristic health classifications (`Normal`, `Elevated`, `Saturated`, `Degraded`, `Unavailable`). Can also be invoked directly from the CLI without entering the interactive shell or requiring administrative privileges: `rustrict.exe nic list` or `rustrict.exe nic health "Wi-Fi"`. |
@@ -908,7 +930,7 @@ The compiled binary is located at `target\release\rustrict.exe`. WinDivert drive
 
 ```
 rustrict/
-├── Cargo.toml                    # Package manifest (rustrict v2.0.1)
+├── Cargo.toml                    # Package manifest (rustrict v2.0.2)
 ├── Cargo.lock                    # Dependency lockfile
 ├── build.rs                      # Build script: auto-bundles WinDivert binaries
 ├── .gitignore                    # Excludes target/, state file, IDE configs

@@ -125,3 +125,34 @@ fn test_upgrade_and_update_command_dispatch() {
     assert!(cli.dispatch_command("upgrade"));
     assert!(cli.dispatch_command("update"));
 }
+
+#[test]
+fn test_blockmode_command_dispatch() {
+    use rustrict::spoofer::SpooferMode;
+
+    let mut cli = RustrictCli::new_for_testing();
+    assert_eq!(cli.spoofer().mode(), SpooferMode::Blackhole);
+
+    assert!(cli.dispatch_command("blockmode"));
+    assert!(cli.dispatch_command("blockmode mitm"));
+    assert_eq!(cli.spoofer().mode(), SpooferMode::Mitm);
+
+    assert!(cli.dispatch_command("spoofer blackhole"));
+    assert_eq!(cli.spoofer().mode(), SpooferMode::Blackhole);
+
+    assert!(cli.dispatch_command("blockmode invalid_mode"));
+}
+
+#[test]
+fn test_offline_interface_properties() {
+    let offline_iface = rustrict::platform::get_offline_interface();
+    assert_eq!(offline_iface.name, "Offline-Decoupled");
+    assert_eq!(offline_iface.ip, std::net::Ipv4Addr::new(127, 0, 0, 1));
+    assert_eq!(offline_iface.device_path, "offline");
+
+    let mut cli = RustrictCli::new_offline(offline_iface);
+    assert!(cli.is_router_lab());
+    assert!(cli.dispatch_command("status"));
+    assert!(cli.dispatch_command("scope"));
+    assert!(!cli.dispatch_command("exit"));
+}
