@@ -111,21 +111,8 @@ function Download-FileReliable([string[]]$Urls, [string]$OutPath) {
 }
 
 $Repo = "Neutron-0/Rustrict"
-if (-not $Version -or $Version -eq "latest") {
-    try {
-        $headers = @{ "User-Agent" = "Rustrict-Installer" }
-        if ($Token) { $headers["Authorization"] = "Bearer $Token" }
-        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers -UseBasicParsing -TimeoutSec 10
-        if ($rel.tag_name) {
-            $Version = $rel.tag_name
-        }
-    } catch {
-        $Version = "2.0.2"
-    }
-}
-$CleanVersion = $Version.TrimStart('v')
 $Target = "x86_64-pc-windows-msvc"
-$ArchiveName = "rustrict-v$CleanVersion-$Target.zip"
+$ArchiveName = if ($Version) { "rustrict-v$($Version.TrimStart('v'))-$Target.zip" } else { "rustrict-$Target.zip" }
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host " Rustrict Windows Installer" -ForegroundColor Cyan
@@ -179,14 +166,22 @@ try {
         $sumsPath = Join-Path $TempDir "SHA256SUMS.txt"
 
         $rawBase = "https://raw.githubusercontent.com/$Repo/main/dist"
-        $releaseBase = "https://github.com/$Repo/releases/download/v$CleanVersion"
+        $releaseLatestBase = "https://github.com/$Repo/releases/latest/download"
 
         $archiveUrls = @(
-            "$releaseBase/$ArchiveName",
+            "$releaseLatestBase/$ArchiveName",
             "$rawBase/$ArchiveName"
         )
+        if ($Version) {
+            $cleanV = $Version.TrimStart('v')
+            $archiveUrls = @(
+                "https://github.com/$Repo/releases/download/v$cleanV/rustrict-v$cleanV-$Target.zip",
+                "$releaseLatestBase/$ArchiveName",
+                "$rawBase/$ArchiveName"
+            )
+        }
         $sumsUrls = @(
-            "$releaseBase/SHA256SUMS.txt",
+            "$releaseLatestBase/SHA256SUMS.txt",
             "$rawBase/SHA256SUMS.txt"
         )
 

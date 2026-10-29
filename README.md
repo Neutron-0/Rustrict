@@ -779,8 +779,8 @@ flowchart TD
     D --> E["PersistentState::add_blocked(host, Both)"]
     E --> F["Write ProgramData rustrict_state.json to disk"]
 
-    D --> G["ArpSpoofer::add(host) - Start L2 Blackhole Poisoning"]
-    D --> H["TrafficLimiter::block(ip, Both) - Drop Fallback"]
+    D --> G["ArpSpoofer::add(host) - Start MITM ARP Poisoning (5Hz Dual-Burst)"]
+    D --> H["TrafficLimiter::block(ip, Both) - WinDivert Kernel Packet Drop"]
 
     F --> I["User closes Rustrict (quit)"]
     I --> J["ArpSpoofer::stop() - Restore ARP tables (3-burst)"]
@@ -791,8 +791,8 @@ flowchart TD
     M --> N["PersistentState::load() reads rustrict_state.json"]
     N --> O["For each blocked_host in state:"]
     O --> P["platform::send_arp(ip) to Resolve current MAC"]
-    O --> Q["ArpSpoofer::add(host) - Resume Blackhole Poisoning"]
-    O --> R["TrafficLimiter::block(ip, dir) - Resume Drop Filter"]
+    O --> Q["ArpSpoofer::add(host) - Resume MITM Poisoning"]
+    O --> R["TrafficLimiter::block(ip, dir) - Resume Kernel Drop Filter"]
 
     Q --> S["Device is blocked again without user intervention"]
     R --> S
@@ -837,14 +837,15 @@ rustrict nic [COMMAND] [ARGS...]
 | **`scan`** | `scan [--range <start-end>] [--fresh] [--ports]` | Discovers online hosts via parallel ARP sweep. `--fresh` purges stale offline entries while preserving active rules. `--range 100-200` limits scan to a specific host range within the subnet. `--ports` automatically triggers multi-port service enumeration on discovered hosts. |
 | **`hosts`** | `hosts` (aliases: `devices`, `targets`, `list`, `ls`) | Displays the current device inventory table with IP, MAC, verified hostname, vendor, online/offline state, and management status (Free / Limited / Blocked). Merges any passively discovered DHCP identities. |
 | **`status`** | `status` (alias: `state`) | Displays an overview of current operational state: active blocked and limited devices, strict or permissive scope mode, authorized CIDRs, exclusions, and active network interface. |
-| **`scope`** | `scope [status \| add <cidr\|ip> \| add all \| remove <cidr> \| reset \| clear \| exclude-ip <ip> \| exclude-mac <mac> \| strict <on\|off> \| on \| off]` | Manages authorized target boundaries and operational rules of engagement. `scope add all` authorizes all private RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). `scope reset` returns to local interface defaults. When `strict` mode is enabled, actions targeting out-of-scope CIDRs or excluded IP/MAC endpoints are blocked automatically. |
+| **`scope`** | `scope [status \| add <cidr\|ip> \| add all \| remove <cidr> \| reset \| clear \| exclude-ip <ip> \| exclude-mac <mac> \| strict <on\|off> \| on \| off]` | Manages authorized target boundaries and operational rules of engagement. `scope add all` authorizes all private RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). `scope reset` returns to local interface defaults. By default, **Permissive mode** is active so all private LANs can be managed immediately. When `strict` mode is enabled, actions targeting out-of-scope CIDRs or excluded IP/MAC endpoints are blocked automatically. |
+| **`strict`** | `strict [off \| on]` (aliases: `strict mode [off\|on]`, `permissive`, `unrestrict`) | Toggles strict CIDR boundary enforcement. Run `strict off` or `permissive` to allow all LAN targets without boundary restrictions. Run `strict on` to enforce explicitly authorized CIDRs only. |
 | **`ports`** | `ports <targets> [port-range]` | Performs high-speed multi-threaded TCP connect scan with greeting and HTTP banner grabbing. Defaults to curated Top 25 management ports (`21`, `22`, `80`, `443`, `445`, `3389`, etc.) or custom lists/ranges (e.g. `80,443,8000-8080`). |
 | **`audit`** | `audit <targets>` | Executes active security posture checks against target hosts: tests TLS version negotiation (flags obsolete SSLv3, TLS 1.0, TLS 1.1, weak ciphers) and SMB configuration (detects SMBv1 support and checks whether SMB message signing is mandatory vs optional). |
 | **`simulate`** | `simulate <targets> [drop <0-100>] [delay <ms>] [jitter <ms>]` | Simulates network resilience conditions and fault injection on intercepted target traffic via WinDivert. Use `simulate <targets> clear` to restore normal forwarding. |
 | **`export`** | `export [markdown\|json\|sarif] [filename]` | Generates structured security assessment and inventory evidence. Supports Markdown executive summaries, structured JSON asset/findings dumps, and industry-standard SARIF v2.1.0 reports for GitHub Security and CI/CD ingestion. |
 | **`limit`** | `limit <targets> <rate> [--upload] [--download]` | Throttles device bandwidth. Targets can be device IDs (`1`), IP addresses (`192.168.18.50`), comma-separated lists (`1,192.168.18.50`), or `all`. Rate supports `bit`, `kbit`, `mbit`, `gbit` units. Direction defaults to `Both`. |
-| **`block`** | `block <targets> [--upload] [--download]` | Completely cuts off device internet access by dropping all forwarded packets. **Persists across restarts** — blocked devices are saved to `rustrict_state.json` and automatically re-armed on next launch. |
-| **`blockmode`** | `blockmode [blackhole \| mitm]` (alias: `spoofer`) | Toggles block enforcement mechanism. `blackhole` routes blocked targets to unicast blackhole MAC `02:bf:00:00:00:01` (dropped silently at L2 switch/AP with zero local CPU/NIC load). `mitm` routes traffic through local host and drops packets in the WinDivert kernel filter. |
+| **`block`** | `block <targets> [--upload] [--download]` | Completely cuts off device internet access by dropping all forwarded packets in the WinDivert kernel driver. Targets are actively locked with dual-burst ARP replies and directed requests at 5Hz. **Persists across restarts** — blocked devices are saved to `rustrict_state.json` and automatically re-armed on next launch. |
+| **`mode` / `blockmode`** | `mode [mitm \| blackhole]` (aliases: `blockmode`, `spoofer`) | Configures the block enforcement mechanism. `mitm` (default and recommended) routes traffic through the local host and drops packets via the WinDivert kernel filter with 100% reliability on Wi-Fi and mobile OSes. `blackhole` routes blocked targets to unicast blackhole MAC `02:bf:00:00:00:01` (for hardware switches with DAI/static binding). |
 | **`free`** | `free <targets>` (aliases: `unblock`, `unlimit`, `release`) | Removes all limits and blocks for specified devices. Restores authentic ARP cache entries. Removes persistent block rules from disk. |
 | **`add`** | `add <ip> [--mac <mac>]` | Manually inserts a device into the management table. If `--mac` is omitted, the MAC is resolved via the Windows kernel ARP API. |
 | **`nic`** | `nic [status\|health\|stats\|list] [name\|index]` | Physical network adapter health diagnostic. Performs bounded 2-second telemetry sampling, computes Rx/Tx throughput rates (bps), link speed utilization %, packet errors and discards, and heuristic health classifications (`Normal`, `Elevated`, `Saturated`, `Degraded`, `Unavailable`). Can also be invoked directly from the CLI without entering the interactive shell or requiring administrative privileges: `rustrict.exe nic list` or `rustrict.exe nic health "Wi-Fi"`. |

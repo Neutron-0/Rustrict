@@ -1,14 +1,12 @@
 # Packs release artifacts into standard zip and computes SHA256SUMS.txt
 param(
-    [string]$Version = "2.0.2",
     [string]$OutputDir = "target\packages"
 )
 
 $ErrorActionPreference = "Stop"
 
-$CleanVersion = $Version.TrimStart('v')
 $Target = "x86_64-pc-windows-msvc"
-$ArchiveName = "rustrict-v$CleanVersion-$Target.zip"
+$ArchiveName = "rustrict-$Target.zip"
 
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
