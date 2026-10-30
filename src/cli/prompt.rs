@@ -207,7 +207,7 @@ impl RustrictCli {
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
         println!(
-            "{} Scope Mode: {}",
+            "{} Scope Mode: {}  |  Block Mode: {}",
             "[CONFIG]".bright_cyan().bold(),
             if scope.strict_mode {
                 "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
@@ -215,6 +215,11 @@ impl RustrictCli {
                 "PERMISSIVE (All private LANs permitted)"
                     .bright_green()
                     .bold()
+            },
+            match spoofer.mode() {
+                crate::spoofer::SpooferMode::Blackhole =>
+                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
+                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
             }
         );
 
@@ -373,7 +378,7 @@ impl RustrictCli {
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
         println!(
-            "{} Scope Mode: {}",
+            "{} Scope Mode: {}  |  Block Mode: {}",
             "[CONFIG]".bright_cyan().bold(),
             if scope.strict_mode {
                 "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
@@ -381,6 +386,11 @@ impl RustrictCli {
                 "PERMISSIVE (All private LANs permitted)"
                     .bright_green()
                     .bold()
+            },
+            match spoofer.mode() {
+                crate::spoofer::SpooferMode::Blackhole =>
+                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
+                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
             }
         );
 
@@ -444,7 +454,7 @@ impl RustrictCli {
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
         println!(
-            "{} Scope Mode: {}",
+            "{} Scope Mode: {}  |  Block Mode: {}",
             "[CONFIG]".bright_cyan().bold(),
             if scope.strict_mode {
                 "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
@@ -452,6 +462,11 @@ impl RustrictCli {
                 "PERMISSIVE (All private LANs permitted)"
                     .bright_green()
                     .bold()
+            },
+            match spoofer.mode() {
+                crate::spoofer::SpooferMode::Blackhole =>
+                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
+                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
             }
         );
 
@@ -957,6 +972,22 @@ impl RustrictCli {
             println!(
                 "{} Local enforcement command 'limit' is disabled in router-lab mode. Router-lab mode is strictly read-only for local Layer 2/3 interfaces.",
                 "[ERR]".red().bold()
+            );
+            return;
+        }
+
+        // 1b. Guard against Blackhole mode: rate-limiting requires MITM routing
+        if self.spoofer.mode() == crate::spoofer::SpooferMode::Blackhole {
+            println!(
+                "{} Bandwidth rate-limiting ('limit') is disabled in Blackhole mode.",
+                "[ERR]".red().bold()
+            );
+            println!(
+                "     In Blackhole mode, packets are dropped directly at Layer 2 switch/AP hardware without reaching this PC to be shaped."
+            );
+            println!(
+                "     To enable bandwidth rate-limiting, switch to MITM mode first: '{}'",
+                "mode mitm".bright_yellow().bold()
             );
             return;
         }
@@ -2288,11 +2319,16 @@ impl RustrictCli {
         println!("  status                                          Displays complete runtime system, adapter, and network status");
         println!("  scope [status|add <cidr|all|local>|reset|clear] Manages authorized targets and operational boundaries");
         println!("  strict [off|on] / permissive                    Toggles strict CIDR boundary enforcement (permissive by default)");
+        println!("  mode / blockmode [mitm|blackhole]               Sets block mode: 'mitm' (WinDivert kernel drop + rate shaping) or 'blackhole' (L2 drop, zero host load)");
         println!("  ports <id|ip|all> [port-range]                  Enumerates open TCP services and grabs service banners");
         println!("  audit <id|ip|all>                               Performs active security posture checks (TLS & SMB)");
         println!("  simulate <id|ip|all> [drop %] [delay ms] [...]  Simulates network resilience and fault injection");
         println!("  export [markdown|json|sarif] [filename]         Exports structured assessment reports and evidence");
-        println!("  limit <id|ip|all> <rate> [...]                  Limits bandwidth (e.g. limit 1 200kbit, limit all 1mbit)");
+        if self.spoofer.mode() == crate::spoofer::SpooferMode::Blackhole {
+            println!("  limit <id|ip|all> <rate> [...]                  [Disabled in Blackhole mode - switch to 'mode mitm' to shape bandwidth]");
+        } else {
+            println!("  limit <id|ip|all> <rate> [...]                  Limits bandwidth (e.g. limit 1 200kbit, limit all 1mbit)");
+        }
         println!("  block <id|ip|all> [...]                         Blocks host internet access [Persists across restarts]");
         println!("  free / unblock <id|ip|all>                      Removes limits and unblocks host [Clears persistent rule]");
         println!("  state [status|clear]                            Inspects or clears persistent blocked records and saved state");
@@ -2346,6 +2382,10 @@ impl RustrictCli {
                         .bright_green()
                         .bold()
                 );
+                println!(
+                    "     {} Bandwidth rate-limiting ('limit') is disabled in Blackhole mode. Switch to 'mode mitm' to shape bandwidth.",
+                    "[INFO]".cyan().bold()
+                );
             }
             "mitm" | "divert" | "drop" | "kernel" => {
                 self.spoofer.set_mode(crate::spoofer::SpooferMode::Mitm);
@@ -2355,6 +2395,10 @@ impl RustrictCli {
                     "MITM (Routed to local host and dropped by WinDivert kernel filter)"
                         .bright_cyan()
                         .bold()
+                );
+                println!(
+                    "     {} Bandwidth rate-limiting ('limit') and kernel traffic shaping are fully active in MITM mode.",
+                    "[INFO]".cyan().bold()
                 );
             }
             other => {
