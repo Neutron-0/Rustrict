@@ -1000,6 +1000,7 @@ impl RustrictCli {
             return;
         }
 
+        self.ensure_targets_discovered(args[0]);
         let ids = match self.resolve_targets(args[0]) {
             Ok(ids) => ids,
             Err(e) => {
@@ -1144,6 +1145,7 @@ impl RustrictCli {
             return;
         }
         let combined_target = target_tokens.join(",");
+        self.ensure_targets_discovered(&combined_target);
         let ids = match self.resolve_targets(&combined_target) {
             Ok(ids) => ids,
             Err(e) => {
@@ -1272,6 +1274,7 @@ impl RustrictCli {
             return;
         }
         let combined_target = target_tokens.join(",");
+        self.ensure_targets_discovered(&combined_target);
         let ids = match self.resolve_targets(&combined_target) {
             Ok(ids) => ids,
             Err(e) => {
@@ -1875,6 +1878,7 @@ impl RustrictCli {
             return;
         }
 
+        self.ensure_targets_discovered(args[0]);
         let ids = match self.resolve_targets(args[0]) {
             Ok(ids) => ids,
             Err(e) => {
@@ -1941,6 +1945,7 @@ impl RustrictCli {
             return;
         }
 
+        self.ensure_targets_discovered(args[0]);
         let ids = match self.resolve_targets(args[0]) {
             Ok(ids) => ids,
             Err(e) => {
@@ -2021,6 +2026,7 @@ impl RustrictCli {
             return;
         }
 
+        self.ensure_targets_discovered(args[0]);
         let ids = match self.resolve_targets(args[0]) {
             Ok(ids) => ids,
             Err(e) => {
@@ -2233,6 +2239,27 @@ impl RustrictCli {
                 }
             },
             Err(e) => println!("{} Failed to generate export: {}", "[ERR]".red().bold(), e),
+        }
+    }
+
+    fn ensure_targets_discovered(&mut self, arg: &str) {
+        if self.is_router_lab {
+            return;
+        }
+        for token in arg.split(',') {
+            for part in token.split_whitespace() {
+                let p = part.trim();
+                if let Ok(ip) = p.parse::<Ipv4Addr>() {
+                    if !self.hosts.iter().any(|h| h.ip == ip) {
+                        if let Some(mac) = crate::platform::send_arp(ip) {
+                            let next_id = self.hosts.iter().map(|h| h.id).max().map(|m| m + 1).unwrap_or(0);
+                            let h = Host::new(next_id, ip, mac, "-".to_string(), "On-demand Probe".to_string());
+                            println!("{} Discovered target {} ({}) on-demand", "OK".green().bold(), ip, mac);
+                            self.hosts.push(h);
+                        }
+                    }
+                }
+            }
         }
     }
 

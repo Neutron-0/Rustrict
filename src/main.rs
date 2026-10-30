@@ -64,7 +64,7 @@ fn main() {
         .iter()
         .any(|a| a == "--help" || a == "-h" || a.eq_ignore_ascii_case("help"))
     {
-        print_banner("2.0.2");
+        print_banner("");
         print_cli_usage();
         return;
     }
@@ -73,7 +73,7 @@ fn main() {
         .iter()
         .any(|a| a == "--version" || a == "-v" || a.eq_ignore_ascii_case("version"))
     {
-        println!("rustrict 2.0.2 (x86_64-pc-windows-msvc)");
+        println!("rustrict (x86_64-pc-windows-msvc) [rolling release]");
         return;
     }
 
@@ -81,7 +81,7 @@ fn main() {
         .iter()
         .any(|a| a == "--list-interfaces" || a == "-l" || a.eq_ignore_ascii_case("interfaces"))
     {
-        print_banner("2.0.2");
+        print_banner("");
         match platform::list_network_interfaces() {
             Ok(interfaces) => {
                 println!("{}", "Detected Network Adapters:".bright_yellow().bold());
@@ -145,7 +145,7 @@ fn main() {
         return;
     }
 
-    print_banner("2.0.2");
+    print_banner("");
 
     let is_router_lab = args.iter().any(|a| a == "--router-lab");
     let is_offline = args.iter().any(|a| a == "--offline" || a == "--no-adapter");

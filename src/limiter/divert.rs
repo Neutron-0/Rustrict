@@ -217,6 +217,7 @@ fn run_windivert_loop(
         eprintln!(
             "[ERR] Ensure WinDivert.dll and WinDivert64.sys are placed alongside rustrict.exe.\n"
         );
+        running.store(false, Ordering::SeqCst);
         return;
     }
 
@@ -228,6 +229,7 @@ fn run_windivert_loop(
         );
         if addr.is_none() {
             eprintln!("[ERR] Symbol WinDivertOpen not found in WinDivert.dll");
+            running.store(false, Ordering::SeqCst);
             crate::platform::free_library(h_module);
             return;
         }
@@ -241,6 +243,7 @@ fn run_windivert_loop(
             name.as_ptr() as *const u8,
         );
         if addr.is_none() {
+            running.store(false, Ordering::SeqCst);
             crate::platform::free_library(h_module);
             return;
         }
@@ -254,6 +257,7 @@ fn run_windivert_loop(
             name.as_ptr() as *const u8,
         );
         if addr.is_none() {
+            running.store(false, Ordering::SeqCst);
             crate::platform::free_library(h_module);
             return;
         }
@@ -267,6 +271,7 @@ fn run_windivert_loop(
             name.as_ptr() as *const u8,
         );
         if addr.is_none() {
+            running.store(false, Ordering::SeqCst);
             crate::platform::free_library(h_module);
             return;
         }
@@ -274,7 +279,8 @@ fn run_windivert_loop(
     };
 
     // Open WinDivert on forward layer: layer 1 = NETWORK_FORWARD
-    let filter = CString::new("ip").unwrap();
+    // Using filter "true" captures all forwarded network traffic (IPv4 + IPv6)
+    let filter = CString::new("true").unwrap();
     let handle = unsafe { open_fn(filter.as_ptr(), 1, 0, 0) };
     if handle.is_null() || handle == -1isize as *mut std::ffi::c_void {
         let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
@@ -284,6 +290,7 @@ fn run_windivert_loop(
         } else if err == 2 {
             eprintln!("[ERR] WinDivert64.sys driver file missing from application directory.\n");
         }
+        running.store(false, Ordering::SeqCst);
         unsafe {
             crate::platform::free_library(h_module);
         }
@@ -354,15 +361,7 @@ fn run_windivert_loop(
         // Parse IPv4 header
         let version = (packet_buf[0] >> 4) & 0x0f;
         if version != 4 {
-            let _ = unsafe {
-                send_fn(
-                    handle,
-                    packet_buf.as_ptr(),
-                    read_len,
-                    std::ptr::null_mut(),
-                    addr_buf.as_ptr(),
-                )
-            };
+            // Drop non-IPv4 (such as IPv6) forwarded packets to eliminate IPv6 leak/bypass
             continue;
         }
 
