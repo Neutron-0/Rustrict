@@ -178,16 +178,16 @@ fn run_windivert_loop(
         handle: *mut std::ffi::c_void,
         p_packet: *mut u8,
         packet_len: u32,
-        p_addr: *mut u8,
         p_read_len: *mut u32,
+        p_addr: *mut u8,
     ) -> i32;
 
     type WinDivertSendFn = unsafe extern "system" fn(
         handle: *mut std::ffi::c_void,
         p_packet: *const u8,
         packet_len: u32,
-        p_addr: *const u8,
         p_send_len: *mut u32,
+        p_addr: *const u8,
     ) -> i32;
 
     // Dynamically load WinDivert.dll or WinDivert64.dll from exe dir or PATH
@@ -310,8 +310,8 @@ fn run_windivert_loop(
                             h,
                             pkt.data.as_ptr(),
                             pkt.data.len() as u32,
-                            pkt.addr.as_ptr(),
                             std::ptr::null_mut(),
+                            pkt.addr.as_ptr(),
                         )
                     };
                 }
@@ -329,8 +329,8 @@ fn run_windivert_loop(
                 handle,
                 packet_buf.as_mut_ptr(),
                 packet_buf.len() as u32,
-                addr_buf.as_mut_ptr(),
                 &mut read_len as *mut u32,
+                addr_buf.as_mut_ptr(),
             )
         };
 
@@ -359,8 +359,8 @@ fn run_windivert_loop(
                     handle,
                     packet_buf.as_ptr(),
                     read_len,
-                    addr_buf.as_ptr(),
                     std::ptr::null_mut(),
+                    addr_buf.as_ptr(),
                 )
             };
             continue;
@@ -452,8 +452,8 @@ fn run_windivert_loop(
                 handle,
                 packet_buf.as_ptr(),
                 read_len,
-                addr_buf.as_ptr(),
                 std::ptr::null_mut(),
+                addr_buf.as_ptr(),
             )
         };
     }

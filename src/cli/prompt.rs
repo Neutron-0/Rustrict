@@ -1018,6 +1018,9 @@ impl RustrictCli {
                     Some(&host.mac),
                     AdmissionOperation::LocalEnforcement,
                 ) {
+                    if args[0].eq_ignore_ascii_case("all") {
+                        continue;
+                    }
                     println!(
                         "{} Scope / Admission Error for {}: {}",
                         "[ERR]".red().bold(),
@@ -1159,6 +1162,9 @@ impl RustrictCli {
                     Some(&host.mac),
                     AdmissionOperation::LocalEnforcement,
                 ) {
+                    if args[0].eq_ignore_ascii_case("all") {
+                        continue;
+                    }
                     println!(
                         "{} Scope / Admission Error for {}: {}",
                         "[ERR]".red().bold(),
@@ -2094,6 +2100,9 @@ impl RustrictCli {
                     Some(&host.mac),
                     AdmissionOperation::LocalEnforcement,
                 ) {
+                    if args[0].eq_ignore_ascii_case("all") {
+                        continue;
+                    }
                     println!(
                         "{} Scope / Admission Error for {}: {}",
                         "[ERR]".red().bold(),

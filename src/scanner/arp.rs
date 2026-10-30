@@ -208,17 +208,21 @@ impl SubnetScanner {
         }
         discovered_count.store(host_map.len(), Ordering::SeqCst);
 
-        // 2. Parallel ARP probe for all IPs in range
+        // 2. High-concurrency parallel ARP probe for all IPs in range
+        let num_threads = 128.min(total.max(8));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
         let scanned_clone = Arc::clone(&scanned);
         let disc_clone = Arc::clone(&discovered_count);
         let progress_ref = &on_progress;
         let cached_ips_ref = &cached_ips;
         let probe = Arc::clone(&self.probe);
 
-        let mut probed_results: Vec<(Ipv4Addr, MacAddress)> = Vec::new();
-        // Chunk into batches of 48 to avoid router ARP storm/flood drops
-        for chunk in ip_list.chunks(48) {
-            let chunk_res: Vec<(Ipv4Addr, MacAddress)> = chunk
+        let probed_results: Vec<(Ipv4Addr, MacAddress)> = pool.install(|| {
+            ip_list
                 .par_iter()
                 .filter_map(|&ip| {
                     let mac_opt = probe.send_arp(ip);
@@ -239,10 +243,8 @@ impl SubnetScanner {
                         None
                     }
                 })
-                .collect();
-            probed_results.extend(chunk_res);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+                .collect()
+        });
 
         for (ip, mac) in probed_results {
             host_map.insert(ip, mac);
