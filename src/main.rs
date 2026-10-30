@@ -22,7 +22,6 @@ fn print_cli_usage() {
     println!("      --router-lab            Run in read-only router lab mode (zero active probes/mutations)");
     println!("      --strict                Start with strict scope mode enabled (enforce explicit CIDRs)");
     println!("      --permissive            Start with permissive scope mode (allow all RFC 1918 private LANs)");
-    println!("      --blockmode <MODE>      Set block enforcement mode: 'blackhole' (L2 drop) or 'mitm' (WinDivert kernel drop)");
     println!("\n{}", "SUBCOMMANDS (READ-ONLY):".bold());
     println!("  nic                         Run 2-second real-time health sampling on the active adapter");
     println!(
@@ -41,7 +40,6 @@ fn print_cli_usage() {
     println!(
         "  limit <IP> <RATE>           Enforce bandwidth caps (e.g. limit 192.168.1.50 1mbps)"
     );
-    println!("  blockmode [blackhole|mitm]  Toggle between L2 blackhole dropping and WinDivert kernel drop");
     println!("  scope [on|off|add|list]     Manage target admission boundaries ('scope off' permits all LANs)");
     println!(
         "  scope add all               Quickly authorize all RFC 1918 private subnets into scope"
@@ -334,17 +332,6 @@ fn main() {
         );
     } else {
         app.set_strict_mode(false);
-    }
-
-    for (i, arg) in args.iter().enumerate() {
-        if (arg == "--blockmode" || arg == "-b") && i + 1 < args.len() {
-            let mode_str = args[i + 1].to_lowercase();
-            if mode_str == "mitm" || mode_str == "kernel" {
-                app.set_spoofer_mode(rustrict::spoofer::SpooferMode::Mitm);
-            } else if mode_str == "blackhole" || mode_str == "l2" {
-                app.set_spoofer_mode(rustrict::spoofer::SpooferMode::Blackhole);
-            }
-        }
     }
 
     // 3. Start interactive REPL

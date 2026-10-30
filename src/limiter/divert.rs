@@ -17,7 +17,7 @@ pub fn reset_limiter_activation_count() {
 }
 
 use crate::limiter::fault::FaultProfile;
-use crate::limiter::token_bucket::SharedTokenBucket;
+use crate::limiter::token_bucket::{SharedTokenBucket, TokenResult};
 use crate::types::{BitRate, Direction};
 
 #[derive(Clone)]
@@ -378,21 +378,41 @@ fn run_windivert_loop(
             packet_buf[19],
         );
         let pkt_bits = (read_len as u64) * 8;
+        let ihl = ((packet_buf[0] & 0x0f) * 4) as usize;
+        let protocol = packet_buf[9];
+
+        // Detect pure TCP ACKs (zero payload) to preserve the reverse ACK clock without rate penalty
+        let is_pure_tcp_ack = if protocol == 6 && (read_len as usize) >= (ihl + 20) {
+            let tcp_offset = (((packet_buf[ihl + 12] >> 4) & 0x0f) * 4) as usize;
+            let flags = packet_buf[ihl + 13];
+            let has_ack = (flags & 0x10) != 0;
+            let has_syn_fin = (flags & 0x03) != 0;
+            let total_ip_len = u16::from_be_bytes([packet_buf[2], packet_buf[3]]) as usize;
+            has_ack && !has_syn_fin && (total_ip_len <= (ihl + tcp_offset))
+        } else {
+            false
+        };
 
         let rule_map = rules.read();
         let src_rule = rule_map.get(&src_ip).cloned();
         let dst_rule = rule_map.get(&dst_ip).cloned();
         drop(rule_map);
 
+        let mut pacing_delay = Duration::ZERO;
+
         // Check Outbound (Upload)
         if let Some(rule) = src_rule {
             if rule.direction.includes_outgoing() {
                 if rule.blocked {
-                    continue; // Drop packet
+                    continue; // Drop packet immediately
                 }
-                if let Some(bucket) = rule.ul_bucket {
-                    if !bucket.try_consume(pkt_bits) {
-                        continue; // Exceeded limit: drop packet
+                if !is_pure_tcp_ack {
+                    if let Some(ref bucket) = rule.ul_bucket {
+                        match bucket.consume_or_wait(pkt_bits) {
+                            TokenResult::Immediate => {}
+                            TokenResult::Delay(d) => pacing_delay = pacing_delay.max(d),
+                            TokenResult::Drop => continue, // Tail drop on severe congestion
+                        }
                     }
                 }
             }
@@ -402,11 +422,15 @@ fn run_windivert_loop(
         if let Some(rule) = dst_rule {
             if rule.direction.includes_incoming() {
                 if rule.blocked {
-                    continue; // Drop packet
+                    continue; // Drop packet immediately
                 }
-                if let Some(bucket) = rule.dl_bucket {
-                    if !bucket.try_consume(pkt_bits) {
-                        continue; // Exceeded limit: drop packet
+                if !is_pure_tcp_ack {
+                    if let Some(ref bucket) = rule.dl_bucket {
+                        match bucket.consume_or_wait(pkt_bits) {
+                            TokenResult::Immediate => {}
+                            TokenResult::Delay(d) => pacing_delay = pacing_delay.max(d),
+                            TokenResult::Drop => continue, // Tail drop on severe congestion
+                        }
                     }
                 }
             }
@@ -429,18 +453,20 @@ fn run_windivert_loop(
             }
         }
 
-        let delay = match (src_fault, dst_fault) {
+        let fault_delay = match (src_fault, dst_fault) {
             (Some(f1), Some(f2)) => f1.compute_delay().max(f2.compute_delay()),
             (Some(f), None) | (None, Some(f)) => f.compute_delay(),
             (None, None) => Duration::ZERO,
         };
 
-        if !delay.is_zero() {
-            // Offload delayed packet to background queue without blocking the forward loop
+        let total_delay = pacing_delay.max(fault_delay);
+
+        if !total_delay.is_zero() {
+            // Offload delayed/paced packet to background queue without blocking the forward loop
             let _ = delay_tx.send(DelayedPacket {
                 data: packet_buf[..read_len as usize].to_vec(),
                 addr: addr_buf,
-                send_at: Instant::now() + delay,
+                send_at: Instant::now() + total_delay,
             });
             continue;
         }

@@ -207,7 +207,7 @@ impl RustrictCli {
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
         println!(
-            "{} Scope Mode: {}  |  Block Mode: {}",
+            "{} Scope Mode: {}",
             "[CONFIG]".bright_cyan().bold(),
             if scope.strict_mode {
                 "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
@@ -215,11 +215,6 @@ impl RustrictCli {
                 "PERMISSIVE (All private LANs permitted)"
                     .bright_green()
                     .bold()
-            },
-            match spoofer.mode() {
-                crate::spoofer::SpooferMode::Blackhole =>
-                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
-                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
             }
         );
 
@@ -378,7 +373,7 @@ impl RustrictCli {
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
         println!(
-            "{} Scope Mode: {}  |  Block Mode: {}",
+            "{} Scope Mode: {}",
             "[CONFIG]".bright_cyan().bold(),
             if scope.strict_mode {
                 "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
@@ -386,11 +381,6 @@ impl RustrictCli {
                 "PERMISSIVE (All private LANs permitted)"
                     .bright_green()
                     .bold()
-            },
-            match spoofer.mode() {
-                crate::spoofer::SpooferMode::Blackhole =>
-                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
-                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
             }
         );
 
@@ -454,7 +444,7 @@ impl RustrictCli {
         let admin_provider = policy_engine.clone() as Arc<dyn RouterAdminProvider>;
 
         println!(
-            "{} Scope Mode: {}  |  Block Mode: {}",
+            "{} Scope Mode: {}",
             "[CONFIG]".bright_cyan().bold(),
             if scope.strict_mode {
                 "STRICT (Only explicitly authorized CIDRs)".yellow().bold()
@@ -462,11 +452,6 @@ impl RustrictCli {
                 "PERMISSIVE (All private LANs permitted)"
                     .bright_green()
                     .bold()
-            },
-            match spoofer.mode() {
-                crate::spoofer::SpooferMode::Blackhole =>
-                    "L2 Blackhole (02:bf:00:00:00:01)".green(),
-                crate::spoofer::SpooferMode::Mitm => "MITM WinDivert Kernel Drop".cyan(),
             }
         );
 
@@ -2303,7 +2288,6 @@ impl RustrictCli {
         println!("  status                                          Displays complete runtime system, adapter, and network status");
         println!("  scope [status|add <cidr|all|local>|reset|clear] Manages authorized targets and operational boundaries");
         println!("  strict [off|on] / permissive                    Toggles strict CIDR boundary enforcement (permissive by default)");
-        println!("  mode / blockmode [mitm|blackhole]               Sets block mode: 'mitm' (WinDivert kernel drop) or 'blackhole' (L2 drop)");
         println!("  ports <id|ip|all> [port-range]                  Enumerates open TCP services and grabs service banners");
         println!("  audit <id|ip|all>                               Performs active security posture checks (TLS & SMB)");
         println!("  simulate <id|ip|all> [drop %] [delay ms] [...]  Simulates network resilience and fault injection");
