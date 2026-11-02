@@ -9,11 +9,11 @@ use std::time::Duration;
 pub fn probe_smb_ntlm(ip: Ipv4Addr) -> Option<String> {
     let addr = SocketAddrV4::new(ip, 445);
     let mut stream =
-        TcpStream::connect_timeout(&std::net::SocketAddr::V4(addr), Duration::from_millis(70))
+        TcpStream::connect_timeout(&std::net::SocketAddr::V4(addr), Duration::from_millis(45))
             .ok()?;
 
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(80)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(80)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(50)));
 
     use std::io::{Read, Write};
 

@@ -8,10 +8,10 @@ pub fn probe_tls_certificate(ip: Ipv4Addr) -> Option<String> {
     for port in [3389, 443] {
         let addr = SocketAddrV4::new(ip, port);
         if let Ok(mut stream) =
-            TcpStream::connect_timeout(&std::net::SocketAddr::V4(addr), Duration::from_millis(60))
+            TcpStream::connect_timeout(&std::net::SocketAddr::V4(addr), Duration::from_millis(45))
         {
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(80)));
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(50)));
 
             use std::io::{Read, Write};
 

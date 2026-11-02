@@ -146,16 +146,49 @@ impl SubnetScanner {
         (start_u32..=bounded_end).map(Ipv4Addr::from).collect()
     }
 
-    pub fn scan_subnet<F>(&self, fresh: bool, on_progress: F) -> Vec<Host>
+    pub fn scan_subnet_with_phases<F, R>(
+        &self,
+        fresh: bool,
+        on_progress: F,
+        on_resolve_progress: R,
+    ) -> Vec<Host>
     where
         F: Fn(usize, usize, usize) + Sync + Send,
+        R: Fn(usize, usize) + Sync + Send,
     {
         let ip_list = self.calculate_subnet_ip_range();
         if ip_list.is_empty() {
             return Vec::new();
         }
 
-        self.scan_ip_list(&ip_list, fresh, on_progress)
+        self.scan_ip_list_with_phases(&ip_list, fresh, on_progress, on_resolve_progress)
+    }
+
+    pub fn scan_subnet<F>(&self, fresh: bool, on_progress: F) -> Vec<Host>
+    where
+        F: Fn(usize, usize, usize) + Sync + Send,
+    {
+        self.scan_subnet_with_phases(fresh, on_progress, |_, _| {})
+    }
+
+    pub fn scan_range_with_phases<F, R>(
+        &self,
+        start: Ipv4Addr,
+        end: Ipv4Addr,
+        fresh: bool,
+        on_progress: F,
+        on_resolve_progress: R,
+    ) -> Vec<Host>
+    where
+        F: Fn(usize, usize, usize) + Sync + Send,
+        R: Fn(usize, usize) + Sync + Send,
+    {
+        let ip_list = self.calculate_bounded_range(start, end);
+        if ip_list.is_empty() {
+            return Vec::new();
+        }
+
+        self.scan_ip_list_with_phases(&ip_list, fresh, on_progress, on_resolve_progress)
     }
 
     pub fn scan_range<F>(
@@ -168,17 +201,19 @@ impl SubnetScanner {
     where
         F: Fn(usize, usize, usize) + Sync + Send,
     {
-        let ip_list = self.calculate_bounded_range(start, end);
-        if ip_list.is_empty() {
-            return Vec::new();
-        }
-
-        self.scan_ip_list(&ip_list, fresh, on_progress)
+        self.scan_range_with_phases(start, end, fresh, on_progress, |_, _| {})
     }
 
-    fn scan_ip_list<F>(&self, ip_list: &[Ipv4Addr], fresh: bool, on_progress: F) -> Vec<Host>
+    fn scan_ip_list_with_phases<F, R>(
+        &self,
+        ip_list: &[Ipv4Addr],
+        fresh: bool,
+        on_progress: F,
+        on_resolve_progress: R,
+    ) -> Vec<Host>
     where
         F: Fn(usize, usize, usize) + Sync + Send,
+        R: Fn(usize, usize) + Sync + Send,
     {
         // 1. Asynchronously query router gateway UPnP / TR-064 client list if available
         if let Some(ref gc) = self.gateway_client {
@@ -250,31 +285,42 @@ impl SubnetScanner {
             host_map.insert(ip, mac);
         }
 
-        // Final progress update
+        // Final progress update for ARP discovery phase
         on_progress(total, total, host_map.len());
 
-        // 3. Multi-protocol parallel identity resolution
+        // 3. Multi-protocol high-concurrency parallel identity resolution
         let host_pairs: Vec<(Ipv4Addr, MacAddress)> = host_map.into_iter().collect();
+        let total_hosts = host_pairs.len();
+        let resolved_count = Arc::new(AtomicUsize::new(0));
         let local_ip = self.local_ip;
         let gateway_ip = self.gateway_ip;
         let gc_ref = self.gateway_client.as_deref();
         let probe = Arc::clone(&self.probe);
+        let res_progress_ref = &on_resolve_progress;
 
-        let mut hosts: Vec<Host> = host_pairs
-            .into_par_iter()
-            .enumerate()
-            .map(|(id, (ip, mac))| {
-                let identity = probe.resolve_identity(ip, &mac, local_ip, gateway_ip, gc_ref);
-                Host::with_source(
-                    id,
-                    ip,
-                    mac,
-                    identity.hostname,
-                    identity.source,
-                    identity.vendor,
-                )
-            })
-            .collect();
+        res_progress_ref(0, total_hosts);
+
+        let mut hosts: Vec<Host> = pool.install(|| {
+            host_pairs
+                .into_par_iter()
+                .enumerate()
+                .map(|(id, (ip, mac))| {
+                    let identity = probe.resolve_identity(ip, &mac, local_ip, gateway_ip, gc_ref);
+                    let curr = resolved_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if curr.is_multiple_of(5) || curr == total_hosts {
+                        res_progress_ref(curr, total_hosts);
+                    }
+                    Host::with_source(
+                        id,
+                        ip,
+                        mac,
+                        identity.hostname,
+                        identity.source,
+                        identity.vendor,
+                    )
+                })
+                .collect()
+        });
 
         // Sort by IP address ascending
         hosts.sort_by_key(|h| u32::from(h.ip));

@@ -1,4 +1,51 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::time::Duration;
+
+/// Queries the local router gateway DNS server directly over UDP (port 53) with a strict bounded timeout.
+/// This completely bypasses Windows OS `getnameinfo` and the `dnscache` service RPC queue,
+/// preventing multi-second thread blocking and system unresponsiveness during large subnet scans.
+pub fn query_reverse_dns_via_gateway(ip: Ipv4Addr, gateway_ip: Ipv4Addr) -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.set_read_timeout(Some(Duration::from_millis(45))).ok()?;
+
+    let octets = ip.octets();
+    let ptr_name = format!(
+        "{}.{}.{}.{}.in-addr.arpa",
+        octets[3], octets[2], octets[1], octets[0]
+    );
+
+    let mut packet = Vec::with_capacity(128);
+    // DNS Header
+    let tx_id = 0x5a31u16.to_be_bytes();
+    packet.extend_from_slice(&[
+        tx_id[0], tx_id[1], // Transaction ID
+        0x01, 0x00,         // Flags: Standard query, recursion desired
+        0x00, 0x01,         // Questions: 1
+        0x00, 0x00,         // Answer RRs: 0
+        0x00, 0x00,         // Authority RRs: 0
+        0x00, 0x00,         // Additional RRs: 0
+    ]);
+
+    for part in ptr_name.split('.') {
+        packet.push(part.len() as u8);
+        packet.extend_from_slice(part.as_bytes());
+    }
+    packet.push(0x00);
+    packet.extend_from_slice(&[0x00, 0x0c, 0x00, 0x01]); // PTR (12), IN (1)
+
+    let target = SocketAddrV4::new(gateway_ip, 53);
+    socket.send_to(&packet, target).ok()?;
+
+    let mut buf = [0u8; 1024];
+    if let Ok((len, from)) = socket.recv_from(&mut buf) {
+        if from.ip() == std::net::IpAddr::V4(gateway_ip) && len > 12 {
+            if buf[0] == tx_id[0] && buf[1] == tx_id[1] {
+                return crate::resolver::llmnr::parse_llmnr_response(&buf[..len]);
+            }
+        }
+    }
+    None
+}
 
 /// Performs reverse DNS lookup using native Windows WinSock getnameinfo
 pub fn query_reverse_dns(ip: Ipv4Addr) -> Option<String> {

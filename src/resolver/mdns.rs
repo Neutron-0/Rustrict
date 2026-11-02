@@ -5,7 +5,7 @@ use std::time::Duration;
 pub fn query_mdns(ip: Ipv4Addr) -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket
-        .set_read_timeout(Some(Duration::from_millis(70)))
+        .set_read_timeout(Some(Duration::from_millis(45)))
         .ok()?;
 
     let octets = ip.octets();

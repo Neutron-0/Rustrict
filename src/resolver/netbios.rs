@@ -5,7 +5,7 @@ use std::time::Duration;
 pub fn query_netbios(ip: Ipv4Addr) -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket
-        .set_read_timeout(Some(Duration::from_millis(80)))
+        .set_read_timeout(Some(Duration::from_millis(45)))
         .ok()?;
 
     // NBNS Node Status Query Packet
