@@ -250,3 +250,35 @@ fn test_subnet_scanner_rfc3021_and_range_clamping() {
     let bounded = scanner.calculate_bounded_range(start_ip, end_ip);
     assert_eq!(bounded.len(), 65534);
 }
+
+#[test]
+fn test_directed_arp_request_and_reply_pairing() {
+    use rustrict::spoofer::raw_l2::craft_directed_arp_request;
+
+    let local_mac = MacAddress([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    let victim_mac = MacAddress([0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb]);
+    let victim_ip = Ipv4Addr::new(10, 76, 113, 163);
+    let gateway_ip = Ipv4Addr::new(10, 76, 113, 24);
+    let spoof_mac = BLACKHOLE_MAC;
+
+    let req_frame = craft_directed_arp_request(
+        victim_mac,
+        local_mac,
+        gateway_ip,
+        spoof_mac,
+        victim_ip,
+    );
+
+    // Verify Ethernet Header
+    assert_eq!(&req_frame[0..6], &victim_mac.0, "Dst MAC must be victim");
+    assert_eq!(&req_frame[6..12], &local_mac.0, "Src MAC must be transmitting interface");
+    assert_eq!(&req_frame[12..14], &[0x08, 0x06], "EtherType must be ARP");
+
+    // Verify ARP Header
+    assert_eq!(&req_frame[20..22], &[0x00, 0x01], "Op must be ARP Request (1)");
+    assert_eq!(&req_frame[22..28], &spoof_mac.0, "Sender MAC in payload must be spoof_mac");
+    assert_eq!(&req_frame[28..32], &gateway_ip.octets(), "Sender IP must be gateway_ip");
+    assert_eq!(&req_frame[32..38], &victim_mac.0, "Target MAC in payload must be victim_mac");
+    assert_eq!(&req_frame[38..42], &victim_ip.octets(), "Target IP must be victim_ip");
+}
+

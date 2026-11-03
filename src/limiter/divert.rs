@@ -299,29 +299,6 @@ fn run_windivert_loop(
 
     *active_handle.lock() = Some((WinDivertHandle(handle), close_fn));
 
-    type WinDivertSetParamFn = unsafe extern "system" fn(
-        handle: *mut std::ffi::c_void,
-        param: u32,
-        value: u64,
-    ) -> i32;
-
-    let set_param_fn: Option<WinDivertSetParamFn> = unsafe {
-        let name = CString::new("WinDivertSetParam").unwrap();
-        windows_sys::Win32::System::LibraryLoader::GetProcAddress(
-            h_module,
-            name.as_ptr() as *const u8,
-        )
-        .map(|addr| std::mem::transmute(addr))
-    };
-
-    if let Some(set_param) = set_param_fn {
-        // Expand kernel queue length to max (16,384 packets / 64MB) to prevent packet loss under heavy multi-host forwarding
-        unsafe {
-            set_param(handle, 0 /* WINDIVERT_PARAM_QUEUE_LEN */, 16384);
-            set_param(handle, 2 /* WINDIVERT_PARAM_QUEUE_SIZE */, 67108864);
-        }
-    }
-
     // Spawn non-blocking background worker for delayed packets so the main receive loop is never stalled
     let (delay_tx, delay_rx) = std::sync::mpsc::channel::<DelayedPacket>();
     let delay_running = Arc::clone(&running);

