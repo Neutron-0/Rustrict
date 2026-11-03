@@ -162,38 +162,29 @@ pub fn resolve_identity_with_gateway(
         };
     }
 
-    // 5. Try TCP Probes (SMB, TLS, HTTP) with bounded 45-50ms timeouts
-    // Try SMB NTLMSSP Challenge Leak (Windows Laptops, PCs, Samba NAS)
-    if let Some(name) = smb::probe_smb_ntlm(ip) {
-        return HostIdentity {
-            hostname: name,
-            source: NameSource::Smb,
-            vendor,
-        };
-    }
+    // Fast connectionless identity resolution complete. Heavy TCP handshakes (SMB, TLS, HTTP)
+    // are avoided during standard subnet sweep to prevent TCP half-open SYN queue throttling
+    // and worker thread pool lockup across hundreds of discovered endpoints.
 
-    // Try TLS Certificate Common Name (Windows RDP, HTTPS servers)
-    if let Some(name) = tls::probe_tls_certificate(ip) {
-        return HostIdentity {
-            hostname: name,
-            source: NameSource::Tls,
-            vendor,
-        };
-    }
-
-    // Try HTTP banner / title probe (Routers, IP cams, Web consoles)
-    if let Some(title) = probe_http_title(ip) {
-        return HostIdentity {
-            hostname: title,
-            source: NameSource::HttpTitle,
-            vendor,
-        };
-    }
-
-    // 6. No authentic hostname resolved - do NOT guess or fake a device name.
+    // 5. No authentic hostname resolved - do NOT guess or fake a device name.
     HostIdentity {
         hostname: String::new(),
         source: NameSource::Unresolved,
         vendor,
     }
+}
+
+/// Deep TCP-based identity probe for explicit single-target inspection (SMB, TLS, HTTP)
+#[allow(dead_code)]
+pub fn probe_tcp_identity(ip: Ipv4Addr) -> Option<(String, NameSource)> {
+    if let Some(name) = smb::probe_smb_ntlm(ip) {
+        return Some((name, NameSource::Smb));
+    }
+    if let Some(name) = tls::probe_tls_certificate(ip) {
+        return Some((name, NameSource::Tls));
+    }
+    if let Some(title) = probe_http_title(ip) {
+        return Some((title, NameSource::HttpTitle));
+    }
+    None
 }

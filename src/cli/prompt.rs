@@ -1045,6 +1045,7 @@ impl RustrictCli {
             return;
         }
 
+        let is_all_selection = args[0].eq_ignore_ascii_case("all");
         self.ensure_targets_discovered(args[0]);
         let ids = match self.resolve_targets(args[0]) {
             Ok(ids) => ids,
@@ -1064,7 +1065,7 @@ impl RustrictCli {
                     Some(&host.mac),
                     AdmissionOperation::LocalEnforcement,
                 ) {
-                    if args[0].eq_ignore_ascii_case("all") {
+                    if is_all_selection {
                         continue;
                     }
                     println!(
@@ -1072,6 +1073,18 @@ impl RustrictCli {
                         "[ERR]".red().bold(),
                         host.ip,
                         reason
+                    );
+                    continue;
+                }
+                if host.mac == self.iface.gateway_mac || host.mac.is_zero() || host.mac.is_broadcast() || (host.mac.0[0] & 1 != 0) {
+                    if is_all_selection {
+                        continue;
+                    }
+                    println!(
+                        "{} Cannot limit {}: Incompatible MAC address {} (Gateway/Proxy-ARP/Multicast)",
+                        "[WARN]".yellow().bold(),
+                        host.ip,
+                        host.mac
                     );
                     continue;
                 }
@@ -1103,7 +1116,7 @@ impl RustrictCli {
             host.status = HostStatus::Limited(rate, dir);
         }
         let mut activated = Vec::new();
-        let mut failure = None;
+        let mut failures = Vec::new();
         for host in &target_hosts {
             match self.spoofer.add(host.clone()) {
                 Ok(()) => {
@@ -1111,17 +1124,20 @@ impl RustrictCli {
                     activated.push(host.clone());
                 }
                 Err(err) => {
-                    failure = Some((host.ip, err));
-                    break;
+                    failures.push((host.ip, err));
+                    if !is_all_selection {
+                        break;
+                    }
                 }
             }
         }
 
-        if let Some((failed_ip, err)) = failure {
+        if !failures.is_empty() && !is_all_selection {
             for act in &activated {
                 self.spoofer.remove(&act.ip);
                 self.limiter.unlimit(&act.ip);
             }
+            let (failed_ip, err) = &failures[0];
             println!(
                 "{} Enforcement transaction failed on {}: {}. Rolled back {} previously activated target(s). Zero state mutated.",
                 "[ERR]".red().bold(),
@@ -1133,18 +1149,38 @@ impl RustrictCli {
         }
 
         // 6. Mutate host state only after verified transactional success
-        for host in target_hosts {
+        let count = activated.len();
+        for host in activated {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Limited(rate, dir);
             }
             self.spoofer
                 .update_status(&host.ip, HostStatus::Limited(rate, dir));
+            if count <= 10 {
+                println!(
+                    "{} Limited {} to {} ({})",
+                    "OK".green().bold(),
+                    host.ip,
+                    rate,
+                    dir.pretty()
+                );
+            }
+        }
+        if count > 10 {
             println!(
-                "{} Limited {} to {} ({})",
+                "{} Limited {} target host(s) to {} ({})",
                 "OK".green().bold(),
-                host.ip,
+                count.to_string().cyan().bold(),
                 rate,
                 dir.pretty()
+            );
+        }
+        for (failed_ip, err) in failures {
+            println!(
+                "{} Skipped {}: {}",
+                "[WARN]".yellow().bold(),
+                failed_ip,
+                err
             );
         }
     }
@@ -1189,6 +1225,7 @@ impl RustrictCli {
             println!("Usage: block <id|ip|all> [--upload] [--download]");
             return;
         }
+        let is_all_selection = target_tokens.iter().any(|&t| t.eq_ignore_ascii_case("all"));
         let combined_target = target_tokens.join(",");
         self.ensure_targets_discovered(&combined_target);
         let ids = match self.resolve_targets(&combined_target) {
@@ -1209,7 +1246,7 @@ impl RustrictCli {
                     Some(&host.mac),
                     AdmissionOperation::LocalEnforcement,
                 ) {
-                    if args[0].eq_ignore_ascii_case("all") {
+                    if is_all_selection {
                         continue;
                     }
                     println!(
@@ -1217,6 +1254,18 @@ impl RustrictCli {
                         "[ERR]".red().bold(),
                         host.ip,
                         reason
+                    );
+                    continue;
+                }
+                if host.mac == self.iface.gateway_mac || host.mac.is_zero() || host.mac.is_broadcast() || (host.mac.0[0] & 1 != 0) {
+                    if is_all_selection {
+                        continue;
+                    }
+                    println!(
+                        "{} Cannot block {}: Incompatible MAC address {} (Gateway/Proxy-ARP/Multicast)",
+                        "[WARN]".yellow().bold(),
+                        host.ip,
+                        host.mac
                     );
                     continue;
                 }
@@ -1248,7 +1297,7 @@ impl RustrictCli {
             host.status = HostStatus::Blocked(dir);
         }
         let mut activated = Vec::new();
-        let mut failure = None;
+        let mut failures = Vec::new();
         for host in &target_hosts {
             match self.spoofer.add(host.clone()) {
                 Ok(()) => {
@@ -1256,17 +1305,20 @@ impl RustrictCli {
                     activated.push(host.clone());
                 }
                 Err(err) => {
-                    failure = Some((host.ip, err));
-                    break;
+                    failures.push((host.ip, err));
+                    if !is_all_selection {
+                        break;
+                    }
                 }
             }
         }
 
-        if let Some((failed_ip, err)) = failure {
+        if !failures.is_empty() && !is_all_selection {
             for act in &activated {
                 self.spoofer.remove(&act.ip);
                 self.limiter.unlimit(&act.ip);
             }
+            let (failed_ip, err) = &failures[0];
             println!(
                 "{} Enforcement transaction failed on {}: {}. Rolled back {} previously activated target(s). Zero state mutated.",
                 "[ERR]".red().bold(),
@@ -1277,9 +1329,9 @@ impl RustrictCli {
             return;
         }
 
-        // 6. Mutate host state and persistent records only after verified transactional success
-        let count = target_hosts.len();
-        for host in target_hosts {
+        // 6. Mutate host state and persistent records for all successfully activated hosts
+        let count = activated.len();
+        for host in activated {
             if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
                 h.status = HostStatus::Blocked(dir);
                 h.persistent_block = true;
@@ -1302,6 +1354,14 @@ impl RustrictCli {
                 "OK".green().bold(),
                 count.to_string().cyan().bold(),
                 dir.pretty()
+            );
+        }
+        for (failed_ip, err) in failures {
+            println!(
+                "{} Skipped {}: {}",
+                "[WARN]".yellow().bold(),
+                failed_ip,
+                err
             );
         }
     }
@@ -1449,17 +1509,13 @@ impl RustrictCli {
             self.hosts.retain(|h| {
                 h.persistent_block
                     || h.status != HostStatus::Free
-                    || new_hosts
-                        .iter()
-                        .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac))
+                    || new_hosts.iter().any(|nh| nh.ip == h.ip)
             });
         }
 
         // Update reachability flags for remaining existing hosts
         for h in &mut self.hosts {
-            let is_alive = new_hosts
-                .iter()
-                .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac));
+            let is_alive = new_hosts.iter().any(|nh| nh.ip == h.ip);
             h.online = is_alive;
         }
 
@@ -1499,14 +1555,15 @@ impl RustrictCli {
             &self.scope,
         );
 
-        // Upsert newly discovered/confirmed hosts
+        // Upsert newly discovered/confirmed hosts.
+        // Primary key is IP address: distinct IP addresses must NEVER collapse into one another,
+        // even if they share an AP/proxy-ARP MAC address on enterprise/mesh networks.
         for new_h in new_hosts {
             if let Some(existing) = self
                 .hosts
                 .iter_mut()
-                .find(|h| (h.mac != MacAddress::ZERO && h.mac == new_h.mac) || h.ip == new_h.ip)
+                .find(|h| h.ip == new_h.ip)
             {
-                existing.ip = new_h.ip;
                 existing.mac = new_h.mac;
                 existing.online = true;
                 if new_h.name_source != crate::types::NameSource::Unresolved {

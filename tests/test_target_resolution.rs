@@ -148,9 +148,9 @@ fn test_non_destructive_upsert() {
     for new_h in new_scan {
         if let Some(existing) = current_hosts
             .iter_mut()
-            .find(|h| (h.mac != MacAddress::ZERO && h.mac == new_h.mac) || h.ip == new_h.ip)
+            .find(|h| h.ip == new_h.ip)
         {
-            existing.ip = new_h.ip;
+            existing.mac = new_h.mac;
             if new_h.name_source != NameSource::Unresolved {
                 existing.name = new_h.name;
                 existing.name_source = new_h.name_source;
@@ -169,6 +169,44 @@ fn test_non_destructive_upsert() {
     assert!(current_hosts.iter().any(|h| h.name == "New-Phone"));
     // Total should be 4
     assert_eq!(current_hosts.len(), 4);
+}
+
+#[test]
+fn test_reconcile_preserves_distinct_ips_sharing_same_mac_proxy_arp() {
+    let mut current_hosts = Vec::new();
+    let shared_mac = MacAddress([0xba, 0x65, 0xe3, 0x5b, 0xd1, 0x67]);
+
+    let mut scanned_hosts = Vec::new();
+    for i in 1..=20 {
+        scanned_hosts.push(Host::with_source(
+            i - 1,
+            Ipv4Addr::new(10, 76, 113, i as u8),
+            shared_mac,
+            format!("Host-{}", i),
+            NameSource::Unresolved,
+            "AP Proxy".to_string(),
+        ));
+    }
+
+    // Reconcile into current_hosts
+    for new_h in scanned_hosts {
+        if let Some(existing) = current_hosts.iter_mut().find(|h: &&mut Host| h.ip == new_h.ip) {
+            existing.mac = new_h.mac;
+            existing.name = new_h.name.clone();
+        } else {
+            let id = current_hosts.len();
+            let mut added = new_h;
+            added.id = id;
+            current_hosts.push(added);
+        }
+    }
+
+    // All 20 hosts MUST be preserved and not collapsed into 1 entry!
+    assert_eq!(current_hosts.len(), 20);
+    for i in 1..=20 {
+        let ip = Ipv4Addr::new(10, 76, 113, i as u8);
+        assert!(current_hosts.iter().any(|h| h.ip == ip));
+    }
 }
 
 #[test]
@@ -198,7 +236,7 @@ fn test_fresh_rescan_prunes_unmanaged_but_preserves_blocked() {
                 || h.status != rustrict::types::HostStatus::Free
                 || new_scan
                     .iter()
-                    .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac))
+                    .any(|nh| nh.ip == h.ip)
         });
     }
 
@@ -206,7 +244,7 @@ fn test_fresh_rescan_prunes_unmanaged_but_preserves_blocked() {
     for h in &mut current_hosts {
         let is_alive = new_scan
             .iter()
-            .any(|nh| nh.ip == h.ip || (nh.mac != MacAddress::ZERO && nh.mac == h.mac));
+            .any(|nh| nh.ip == h.ip);
         h.online = is_alive;
     }
 

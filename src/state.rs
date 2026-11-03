@@ -1,5 +1,5 @@
 use crate::core::scope::ScopeManager;
-use crate::types::{Direction, Host, MacAddress};
+use crate::types::{Direction, Host};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::Ipv4Addr;
@@ -59,8 +59,7 @@ impl PersistentState {
 
     pub fn add_blocked(&mut self, host: &Host, dir: Direction) {
         let mac_str = host.mac.to_string();
-        self.blocked_hosts
-            .retain(|b| b.ip != host.ip && (host.mac == MacAddress::ZERO || b.mac != mac_str));
+        self.blocked_hosts.retain(|b| b.ip != host.ip);
         self.blocked_hosts.push(PersistentBlockedHost {
             ip: host.ip,
             mac: mac_str,
