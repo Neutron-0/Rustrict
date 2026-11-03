@@ -46,6 +46,15 @@ pub fn validate_restored_target(
         )
         .map_err(|e| format!("Admission violation: {}", e))?;
 
+    // Ensure restored target belongs to the active interface's subnet or authorized CIDR boundaries.
+    // Restoring records from an unrelated network triggers non-routable Layer 2 ARP floods.
+    if !scope.allowed_cidrs.iter().any(|c| c.contains(ip)) {
+        return Err(format!(
+            "Target IP {} is outside active interface subnet or authorized CIDRs",
+            ip
+        ));
+    }
+
     Ok(mac)
 }
 

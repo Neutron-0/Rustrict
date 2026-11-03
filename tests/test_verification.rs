@@ -280,5 +280,22 @@ fn test_directed_arp_request_and_reply_pairing() {
     assert_eq!(&req_frame[28..32], &gateway_ip.octets(), "Sender IP must be gateway_ip");
     assert_eq!(&req_frame[32..38], &victim_mac.0, "Target MAC in payload must be victim_mac");
     assert_eq!(&req_frame[38..42], &victim_ip.octets(), "Target IP must be victim_ip");
+
+    // Also verify broadcast ARP request (penetrates AP client isolation)
+    use rustrict::spoofer::raw_l2::craft_broadcast_arp_request;
+    let bcast_frame = craft_broadcast_arp_request(
+        local_mac,
+        gateway_ip,
+        spoof_mac,
+        victim_ip,
+        victim_mac,
+    );
+    assert_eq!(&bcast_frame[0..6], &MacAddress::BROADCAST.0, "Dst MAC must be BROADCAST");
+    assert_eq!(&bcast_frame[6..12], &local_mac.0, "Src MAC must be transmitting interface");
+    assert_eq!(&bcast_frame[20..22], &[0x00, 0x01], "Op must be ARP Request (1)");
+    assert_eq!(&bcast_frame[22..28], &spoof_mac.0, "Sender MAC must be spoof_mac");
+    assert_eq!(&bcast_frame[28..32], &gateway_ip.octets(), "Sender IP must be gateway_ip");
+    assert_eq!(&bcast_frame[32..38], &victim_mac.0, "Target MAC must be victim_mac");
+    assert_eq!(&bcast_frame[38..42], &victim_ip.octets(), "Target IP must be victim_ip");
 }
 

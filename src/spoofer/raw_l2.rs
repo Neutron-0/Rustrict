@@ -384,6 +384,41 @@ pub fn craft_directed_arp_request(
     pkt
 }
 
+/// Builds a 42-byte Ethernet + broadcast ARP Request frame to bypass Wi-Fi AP client isolation
+pub fn craft_broadcast_arp_request(
+    src_mac: MacAddress,
+    sender_ip: std::net::Ipv4Addr,
+    sender_mac: MacAddress,
+    target_ip: std::net::Ipv4Addr,
+    target_mac: MacAddress,
+) -> [u8; 42] {
+    let mut pkt = [0u8; 42];
+
+    // Ethernet Header (14 bytes) - Destination is BROADCAST (ff:ff:ff:ff:ff:ff)
+    // Wi-Fi Access Points are mandated to broadcast frames to all associated clients,
+    // which pierces client-to-client isolation boundaries.
+    pkt[0..6].copy_from_slice(&MacAddress::BROADCAST.0);
+    pkt[6..12].copy_from_slice(&src_mac.0);
+    pkt[12..14].copy_from_slice(&[0x08, 0x06]); // EtherType = ARP (0x0806)
+
+    // ARP Header (28 bytes)
+    pkt[14..16].copy_from_slice(&[0x00, 0x01]); // Hardware Type = Ethernet (1)
+    pkt[16..18].copy_from_slice(&[0x08, 0x00]); // Protocol Type = IPv4 (0x0800)
+    pkt[18] = 6; // Hardware Address Length (6)
+    pkt[19] = 4; // Protocol Address Length (4)
+    pkt[20..22].copy_from_slice(&[0x00, 0x01]); // Operation = Request (1)
+
+    // Sender Hardware & IP
+    pkt[22..28].copy_from_slice(&sender_mac.0);
+    pkt[28..32].copy_from_slice(&sender_ip.octets());
+
+    // Target Hardware & IP
+    pkt[32..38].copy_from_slice(&target_mac.0);
+    pkt[38..42].copy_from_slice(&target_ip.octets());
+
+    pkt
+}
+
 /// Parses an incoming raw Ethernet frame for an ARP Reply, returning (sender_ip, sender_mac)
 pub fn parse_arp_reply(frame: &[u8]) -> Option<(std::net::Ipv4Addr, MacAddress)> {
     if frame.len() < 42 {
