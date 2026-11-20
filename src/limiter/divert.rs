@@ -40,6 +40,7 @@ unsafe impl Sync for WinDivertHandle {}
 pub struct TrafficLimiter {
     rules: Arc<RwLock<HashMap<Ipv4Addr, HostLimitRule>>>,
     fault_profiles: Arc<RwLock<HashMap<Ipv4Addr, FaultProfile>>>,
+    has_faults: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     active_handle: Arc<parking_lot::Mutex<Option<(WinDivertHandle, WinDivertCloseFn)>>>,
 }
@@ -55,6 +56,7 @@ impl TrafficLimiter {
         Self {
             rules: Arc::new(RwLock::new(HashMap::new())),
             fault_profiles: Arc::new(RwLock::new(HashMap::new())),
+            has_faults: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
             active_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
@@ -102,17 +104,30 @@ impl TrafficLimiter {
 
     pub fn unlimit(&self, ip: &Ipv4Addr) {
         self.rules.write().remove(ip);
-        self.fault_profiles.write().remove(ip);
+        let mut fp = self.fault_profiles.write();
+        fp.remove(ip);
+        self.has_faults.store(!fp.is_empty(), Ordering::Relaxed);
+        drop(fp);
+        if self.rules.read().is_empty() && self.fault_profiles.read().is_empty() {
+            self.stop();
+        }
     }
 
     pub fn set_fault(&self, ip: Ipv4Addr, profile: FaultProfile) {
         self.fault_profiles.write().insert(ip, profile);
+        self.has_faults.store(true, Ordering::Relaxed);
         LIMITER_ACTIVATION_COUNT.fetch_add(1, Ordering::SeqCst);
         self.start_worker();
     }
 
     pub fn clear_fault(&self, ip: &Ipv4Addr) {
-        self.fault_profiles.write().remove(ip);
+        let mut fp = self.fault_profiles.write();
+        fp.remove(ip);
+        self.has_faults.store(!fp.is_empty(), Ordering::Relaxed);
+        drop(fp);
+        if self.rules.read().is_empty() && self.fault_profiles.read().is_empty() {
+            self.stop();
+        }
     }
 
     pub fn get_fault(&self, ip: &Ipv4Addr) -> Option<FaultProfile> {
@@ -135,11 +150,12 @@ impl TrafficLimiter {
 
         let rules = Arc::clone(&self.rules);
         let fault_profiles = Arc::clone(&self.fault_profiles);
+        let has_faults = Arc::clone(&self.has_faults);
         let running = Arc::clone(&self.running);
         let active_handle = Arc::clone(&self.active_handle);
 
         thread::spawn(move || {
-            run_windivert_loop(rules, fault_profiles, running, active_handle);
+            run_windivert_loop(rules, fault_profiles, has_faults, running, active_handle);
         });
     }
 }
@@ -162,6 +178,7 @@ struct DelayedPacket {
 fn run_windivert_loop(
     rules: Arc<RwLock<HashMap<Ipv4Addr, HostLimitRule>>>,
     fault_profiles: Arc<RwLock<HashMap<Ipv4Addr, FaultProfile>>>,
+    has_faults: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     active_handle: Arc<parking_lot::Mutex<Option<(WinDivertHandle, WinDivertCloseFn)>>>,
 ) {
@@ -299,17 +316,19 @@ fn run_windivert_loop(
 
     *active_handle.lock() = Some((WinDivertHandle(handle), close_fn));
 
-    // Spawn non-blocking background worker for delayed packets so the main receive loop is never stalled
-    let (delay_tx, delay_rx) = std::sync::mpsc::channel::<DelayedPacket>();
+    // Spawn non-blocking background worker for delayed packets so the main receive loop is never stalled.
+    // Bounded channel (512 slots) prevents unbounded memory growth under packet flood.
+    let (delay_tx, delay_rx) = std::sync::mpsc::sync_channel::<DelayedPacket>(512);
     let delay_running = Arc::clone(&running);
     let handle_usize = handle as usize;
     let delay_worker = thread::spawn(move || {
         let h = handle_usize as *mut std::ffi::c_void;
         while delay_running.load(Ordering::Relaxed) {
-            if let Ok(pkt) = delay_rx.recv_timeout(Duration::from_millis(50)) {
+            if let Ok(pkt) = delay_rx.recv_timeout(Duration::from_millis(20)) {
                 let now = Instant::now();
                 if pkt.send_at > now {
-                    thread::sleep(pkt.send_at - now);
+                    let sleep_dur = (pkt.send_at - now).min(Duration::from_millis(50));
+                    thread::sleep(sleep_dur);
                 }
                 if delay_running.load(Ordering::Relaxed) {
                     let _ = unsafe {
@@ -377,93 +396,104 @@ fn run_windivert_loop(
             packet_buf[18],
             packet_buf[19],
         );
-        let pkt_bits = (read_len as u64) * 8;
+        // Layer 2 + Layer 1 framing overhead: 14 (Ethernet MAC header) + 4 (FCS) + 8 (preamble/SFD) + 12 (IFG) = 38 bytes
+        let pkt_bits = ((read_len as u64) + 38) * 8;
         let ihl = ((packet_buf[0] & 0x0f) * 4) as usize;
         let protocol = packet_buf[9];
 
-        // Detect pure TCP ACKs (zero payload) to preserve the reverse ACK clock without rate penalty
-        let is_pure_tcp_ack = if protocol == 6 && (read_len as usize) >= (ihl + 20) {
+        // Detect pure TCP ACKs (zero payload) or TCP control packets (SYN/FIN/RST)
+        // to preserve connection handshakes and reverse ACK clocks without rate penalty
+        let is_tcp_control = if protocol == 6 && (read_len as usize) >= (ihl + 20) {
             let tcp_offset = (((packet_buf[ihl + 12] >> 4) & 0x0f) * 4) as usize;
             let flags = packet_buf[ihl + 13];
             let has_ack = (flags & 0x10) != 0;
-            let has_syn_fin = (flags & 0x03) != 0;
+            let has_syn = (flags & 0x02) != 0;
+            let has_fin = (flags & 0x01) != 0;
+            let has_rst = (flags & 0x04) != 0;
             let total_ip_len = u16::from_be_bytes([packet_buf[2], packet_buf[3]]) as usize;
-            has_ack && !has_syn_fin && (total_ip_len <= (ihl + tcp_offset))
+            let is_pure_ack = has_ack && !has_syn && !has_fin && (total_ip_len <= (ihl + tcp_offset));
+            is_pure_ack || has_syn || has_rst
         } else {
             false
         };
 
-        let rule_map = rules.read();
-        let src_rule = rule_map.get(&src_ip).cloned();
-        let dst_rule = rule_map.get(&dst_ip).cloned();
-        drop(rule_map);
-
         let mut pacing_delay = Duration::ZERO;
+        let mut drop_packet = false;
 
-        // Check Outbound (Upload)
-        if let Some(rule) = src_rule {
-            if rule.direction.includes_outgoing() {
-                if rule.blocked {
-                    continue; // Drop packet immediately
+        // Zero-allocation rule inspection: inspect rule by reference while holding short read lock
+        {
+            let rule_map = rules.read();
+            if let Some(rule) = rule_map.get(&src_ip) {
+                if rule.direction.includes_outgoing() {
+                    if rule.blocked {
+                        drop_packet = true;
+                    } else if !is_tcp_control {
+                        if let Some(ref bucket) = rule.ul_bucket {
+                            match bucket.consume_or_wait(pkt_bits) {
+                                TokenResult::Immediate => {}
+                                TokenResult::Delay(d) => pacing_delay = pacing_delay.max(d),
+                                TokenResult::Drop => drop_packet = true,
+                            }
+                        }
+                    }
                 }
-                if !is_pure_tcp_ack {
-                    if let Some(ref bucket) = rule.ul_bucket {
-                        match bucket.consume_or_wait(pkt_bits) {
-                            TokenResult::Immediate => {}
-                            TokenResult::Delay(d) => pacing_delay = pacing_delay.max(d),
-                            TokenResult::Drop => continue, // Tail drop on severe congestion
+            }
+
+            if !drop_packet {
+                if let Some(rule) = rule_map.get(&dst_ip) {
+                    if rule.direction.includes_incoming() {
+                        if rule.blocked {
+                            drop_packet = true;
+                        } else if !is_tcp_control {
+                            if let Some(ref bucket) = rule.dl_bucket {
+                                match bucket.consume_or_wait(pkt_bits) {
+                                    TokenResult::Immediate => {}
+                                    TokenResult::Delay(d) => pacing_delay = pacing_delay.max(d),
+                                    TokenResult::Drop => drop_packet = true,
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Check Inbound (Download)
-        if let Some(rule) = dst_rule {
-            if rule.direction.includes_incoming() {
-                if rule.blocked {
-                    continue; // Drop packet immediately
+        if drop_packet {
+            continue; // Drop packet immediately
+        }
+
+        // Check Resilience / Fault Injection Profiles only if faults are actively configured
+        let fault_delay = if has_faults.load(Ordering::Relaxed) {
+            let fault_map = fault_profiles.read();
+            let src_fault = fault_map.get(&src_ip);
+            let dst_fault = fault_map.get(&dst_ip);
+
+            if let Some(fault) = src_fault {
+                if fault.should_drop() {
+                    continue;
                 }
-                if !is_pure_tcp_ack {
-                    if let Some(ref bucket) = rule.dl_bucket {
-                        match bucket.consume_or_wait(pkt_bits) {
-                            TokenResult::Immediate => {}
-                            TokenResult::Delay(d) => pacing_delay = pacing_delay.max(d),
-                            TokenResult::Drop => continue, // Tail drop on severe congestion
-                        }
-                    }
+            }
+            if let Some(fault) = dst_fault {
+                if fault.should_drop() {
+                    continue;
                 }
             }
-        }
 
-        // Check Resilience / Fault Injection Profiles
-        let fault_map = fault_profiles.read();
-        let src_fault = fault_map.get(&src_ip).cloned();
-        let dst_fault = fault_map.get(&dst_ip).cloned();
-        drop(fault_map);
-
-        if let Some(ref fault) = src_fault {
-            if fault.should_drop() {
-                continue; // Simulated packet drop
+            match (src_fault, dst_fault) {
+                (Some(f1), Some(f2)) => f1.compute_delay().max(f2.compute_delay()),
+                (Some(f), None) | (None, Some(f)) => f.compute_delay(),
+                (None, None) => Duration::ZERO,
             }
-        }
-        if let Some(ref fault) = dst_fault {
-            if fault.should_drop() {
-                continue; // Simulated packet drop
-            }
-        }
-
-        let fault_delay = match (src_fault, dst_fault) {
-            (Some(f1), Some(f2)) => f1.compute_delay().max(f2.compute_delay()),
-            (Some(f), None) | (None, Some(f)) => f.compute_delay(),
-            (None, None) => Duration::ZERO,
+        } else {
+            Duration::ZERO
         };
 
         let total_delay = pacing_delay.max(fault_delay);
 
         if !total_delay.is_zero() {
-            // Offload delayed/paced packet to background queue without blocking the forward loop
-            let _ = delay_tx.send(DelayedPacket {
+            // Offload delayed/paced packet to background queue without blocking the forward loop.
+            // If the pacing queue is full (512 slots), drop to signal congestion naturally.
+            let _ = delay_tx.try_send(DelayedPacket {
                 data: packet_buf[..read_len as usize].to_vec(),
                 addr: addr_buf,
                 send_at: Instant::now() + total_delay,

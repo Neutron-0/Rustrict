@@ -61,9 +61,10 @@ impl TokenBucket {
         } else {
             let deficit = (bits as f64) - self.tokens;
             let wait_secs = deficit / (self.rate_bps as f64);
-            // Allow micro-delay pacing up to 250ms for smooth TCP self-clocking without drop
-            if wait_secs <= 0.250 {
-                self.tokens -= bits as f64;
+            // Allow micro-delay pacing up to 50ms for smooth TCP self-clocking without triggering retransmit timeouts
+            if wait_secs <= 0.050 {
+                // Bound negative tokens so the bucket does not drown in prolonged deficit
+                self.tokens = (self.tokens - bits as f64).max(-(self.capacity_bits as f64));
                 TokenResult::Delay(std::time::Duration::from_secs_f64(wait_secs))
             } else {
                 TokenResult::Drop

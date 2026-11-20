@@ -123,38 +123,46 @@ pub fn resolve_identity_with_gateway(
         }
     }
 
-    // 4. Try Fast Connectionless UDP Protocols First (NetBIOS, mDNS, LLMNR, Router DNS)
-    // UDP queries require no TCP handshake and resolve 90%+ of Windows, Apple, and Linux endpoints in < 5ms.
+    // 4. Concurrently Probe Connectionless UDP Protocols in Parallel (NetBIOS, mDNS, LLMNR, Router DNS)
+    // Running all 4 UDP queries simultaneously in parallel reduces resolution latency per silent host
+    // from 180ms down to at most 45ms (a 4x speedup across the host sweep).
+    let (mut netbios_name, mut mdns_name, mut llmnr_name, mut dns_name) = (None, None, None, None);
 
-    // NetBIOS Name Service (Windows, Samba, NAS, Printers)
-    if let Some(name) = netbios::query_netbios(ip) {
+    std::thread::scope(|s| {
+        let h_netbios = s.spawn(|| netbios::query_netbios(ip));
+        let h_mdns = s.spawn(|| mdns::query_mdns(ip));
+        let h_llmnr = s.spawn(|| llmnr::query_llmnr(ip));
+        let h_dns = s.spawn(|| dns::query_reverse_dns_via_gateway(ip, gateway_ip));
+
+        netbios_name = h_netbios.join().unwrap_or(None);
+        mdns_name = h_mdns.join().unwrap_or(None);
+        llmnr_name = h_llmnr.join().unwrap_or(None);
+        dns_name = h_dns.join().unwrap_or(None);
+    });
+
+    // Authoritative precedence: NetBIOS > mDNS > LLMNR > Router DNS
+    if let Some(name) = netbios_name {
         return HostIdentity {
             hostname: name,
             source: NameSource::NetBios,
             vendor,
         };
     }
-
-    // mDNS (Apple MacBooks, iPhones, Linux workstations, IoT)
-    if let Some(name) = mdns::query_mdns(ip) {
+    if let Some(name) = mdns_name {
         return HostIdentity {
             hostname: name,
             source: NameSource::Mdns,
             vendor,
         };
     }
-
-    // LLMNR (Windows Link-Local)
-    if let Some(name) = llmnr::query_llmnr(ip) {
+    if let Some(name) = llmnr_name {
         return HostIdentity {
             hostname: name,
             source: NameSource::Llmnr,
             vendor,
         };
     }
-
-    // Router DNS PTR query (UDP port 53) directly to gateway with 45ms timeout
-    if let Some(name) = dns::query_reverse_dns_via_gateway(ip, gateway_ip) {
+    if let Some(name) = dns_name {
         return HostIdentity {
             hostname: name,
             source: NameSource::Dns,

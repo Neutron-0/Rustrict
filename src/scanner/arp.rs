@@ -244,7 +244,7 @@ impl SubnetScanner {
         discovered_count.store(host_map.len(), Ordering::SeqCst);
 
         // 2. High-concurrency parallel ARP probe for all IPs in range
-        let num_threads = 128.min(total.max(8));
+        let num_threads = 256.min(total.max(16));
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
@@ -260,6 +260,16 @@ impl SubnetScanner {
             ip_list
                 .par_iter()
                 .filter_map(|&ip| {
+                    // Fast path: if already discovered in kernel ARP cache, reuse cached MAC
+                    if let Some(&cached_mac) = host_map.get(&ip) {
+                        let current_scanned = scanned_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                        let curr_disc = disc_clone.load(Ordering::Relaxed);
+                        if current_scanned.is_multiple_of(5) || current_scanned == total {
+                            progress_ref(current_scanned, total, curr_disc);
+                        }
+                        return Some((ip, cached_mac));
+                    }
+
                     let mac_opt = probe.send_arp(ip);
                     let current_scanned = scanned_clone.fetch_add(1, Ordering::Relaxed) + 1;
 

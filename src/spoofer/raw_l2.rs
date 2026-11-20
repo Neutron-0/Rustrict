@@ -247,7 +247,7 @@ impl RawL2Sender {
     }
 
     pub fn send_frame(&self, frame: &[u8]) -> Result<(), String> {
-        RAW_FRAME_SEND_COUNT.fetch_add(1, Ordering::SeqCst);
+        RAW_FRAME_SEND_COUNT.fetch_add(1, Ordering::Relaxed);
         let res = unsafe { (self.send_fn)(self.handle, frame.as_ptr(), frame.len() as i32) };
         if res != 0 {
             return Err("Failed to send raw packet".into());
