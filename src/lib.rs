@@ -13,3 +13,4 @@ pub mod types;
 pub mod wireless;
 pub mod server;
 pub mod resilience;
+pub mod defense;
