@@ -1,5 +1,6 @@
 pub mod avm;
 pub mod capabilities;
+pub mod config_backup;
 pub mod credentials;
 pub mod curl_util;
 pub mod dhcp_dns;
