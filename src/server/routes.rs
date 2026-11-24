@@ -2,7 +2,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Json,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::Serialize;
@@ -55,11 +55,27 @@ pub async fn get_hosts(
     Ok(Json(list))
 }
 
+pub async fn post_agent_telemetry(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let _ = state.event_bus.publish(crate::server::event_bus::EngineEvent::AgentHeartbeat(payload.clone()));
+    Ok(Json(serde_json::json!({
+        "status": "acknowledged",
+        "timestamp_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    })))
+}
+
 pub fn create_app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/status", get(get_status))
         .route("/api/hosts", get(get_hosts))
         .route("/api/ws", get(ws_handler))
+        .route("/api/events", get(ws_handler))
+        .route("/api/agent/telemetry", post(post_agent_telemetry))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

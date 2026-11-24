@@ -23,6 +23,8 @@ fn print_cli_usage() {
     println!("      --strict                Start with strict scope mode enabled (enforce explicit CIDRs)");
     println!("      --permissive            Start with permissive scope mode (allow all RFC 1918 private LANs)");
     println!("      --blockmode <MODE>      Set block enforcement mode: 'blackhole' (L2 drop, zero host load) or 'mitm' (WinDivert kernel drop)");
+    println!("      --server [PORT]         Start REST & WebSocket API bridge (default: 3000) for Web Dashboard");
+    println!("      --server-only [PORT]    Run REST & WebSocket API bridge in standalone foreground daemon mode");
     println!("\n{}", "SUBCOMMANDS (READ-ONLY):".bold());
     println!("  nic                         Run 2-second real-time health sampling on the active adapter");
     println!(
@@ -142,6 +144,60 @@ fn main() {
             eprintln!("{} {}", "[ERR]".bright_red().bold(), e);
             std::process::exit(1);
         }
+        return;
+    }
+
+    // Check for --server and --server-only options
+    let mut server_port: Option<u16> = None;
+    let mut is_server_only = false;
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--server-only" {
+            is_server_only = true;
+            server_port = Some(
+                args.get(i + 1)
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(3000),
+            );
+            break;
+        } else if let Some(val) = arg.strip_prefix("--server-only=") {
+            is_server_only = true;
+            server_port = Some(val.parse::<u16>().unwrap_or(3000));
+            break;
+        } else if arg == "--server" || arg == "-s" {
+            server_port = Some(
+                args.get(i + 1)
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(3000),
+            );
+        } else if let Some(val) = arg.strip_prefix("--server=") {
+            server_port = Some(val.parse::<u16>().unwrap_or(3000));
+        }
+    }
+
+    if is_server_only {
+        let port = server_port.unwrap_or(3000);
+        print_banner("");
+        println!(
+            "{} Starting standalone API & WebSocket server on port {}...",
+            "[SERVER]".bright_cyan().bold(),
+            port
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to initialize async runtime");
+        let event_bus = rustrict::server::EventBus::new(100);
+        let hosts_state = std::sync::Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let app_state = std::sync::Arc::new(rustrict::server::AppState {
+            event_bus,
+            hosts: hosts_state,
+            auth_token: None,
+        });
+        rt.block_on(async {
+            if let Err(e) = rustrict::server::run_server(port, app_state).await {
+                eprintln!("{} Server failure: {}", "[ERR]".bright_red().bold(), e);
+            }
+        });
         return;
     }
 
@@ -346,6 +402,26 @@ fn main() {
             }
         }
     }
+
+    // Spawn background API server if --server flag was provided
+    let _async_runtime = if let Some(port) = server_port {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to initialize async runtime");
+        let event_bus = rustrict::server::EventBus::new(100);
+        let hosts_state = std::sync::Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let app_state = std::sync::Arc::new(rustrict::server::AppState {
+            event_bus,
+            hosts: hosts_state,
+            auth_token: None,
+        });
+        let _guard = rt.enter();
+        rustrict::server::spawn_server_background(port, app_state);
+        Some(rt)
+    } else {
+        None
+    };
 
     // 3. Start interactive REPL
     app.run_interactive();

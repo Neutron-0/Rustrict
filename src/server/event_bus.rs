@@ -20,6 +20,7 @@ pub enum EngineEvent {
         bytes_rx_sec: u64,
         bytes_tx_sec: u64,
     },
+    AgentHeartbeat(serde_json::Value),
 }
 
 #[derive(Clone)]
