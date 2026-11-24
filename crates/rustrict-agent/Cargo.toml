@@ -9,3 +9,4 @@ description = "Authorized remote administration and telemetry agent for Rustrict
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+reqwest = { version = "0.12", features = ["json"] }

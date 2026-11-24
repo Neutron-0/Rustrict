@@ -63,4 +63,32 @@ impl TelemetryCollector {
     ) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(telemetry)
     }
+
+    /// Transmits current system health metrics to the Rustrict controller endpoint.
+    pub async fn send_heartbeat(&self, client: &reqwest::Client) -> Result<(), String> {
+        let metrics = self.collect_metrics();
+        let payload = self
+            .format_heartbeat_payload(&metrics)
+            .map_err(|e| e.to_string())?;
+        let res = client
+            .post(&self.config.controller_url)
+            .header("Content-Type", "application/json")
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.enrollment_token),
+            )
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if res.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Controller rejected heartbeat: HTTP {}",
+                res.status()
+            ))
+        }
+    }
 }
