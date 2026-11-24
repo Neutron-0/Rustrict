@@ -19,4 +19,9 @@ fn test_cli_resilience_and_tunnel_dispatch() {
     assert!(cli.dispatch_command("router nat"));
     assert!(cli.dispatch_command("router backup"));
     assert!(cli.dispatch_command("router diff"));
+
+    // 4. Observability and Blue-Team Security commands
+    assert!(cli.dispatch_command("flows"));
+    assert!(cli.dispatch_command("alerts"));
+    assert!(cli.dispatch_command("alerts test"));
 }
