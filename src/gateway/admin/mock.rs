@@ -29,6 +29,7 @@ pub struct MockRouterAdminProvider {
     pub active_policies: Arc<RwLock<Vec<ActivePolicyStatus>>>,
     pub discovered_services: Vec<String>,
     pub mock_devices: Arc<RwLock<Vec<crate::gateway::admin::diagnostics::RouterDeviceEntry>>>,
+    pub exemptions: Arc<RwLock<std::collections::HashSet<crate::types::MacAddress>>>,
 }
 
 impl Default for MockRouterAdminProvider {
@@ -90,6 +91,7 @@ impl Default for MockRouterAdminProvider {
                     .with_active(true)
                     .with_uptime(1800),
             ])),
+            exemptions: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -451,5 +453,18 @@ impl RouterAdminProvider for MockRouterAdminProvider {
         }
 
         Ok(self.mock_devices.read().clone())
+    }
+
+    fn apply_admin_exemption(
+        &self,
+        mac: crate::types::MacAddress,
+        _ip: std::net::Ipv4Addr,
+    ) -> Result<String, AdminError> {
+        self.exemptions.write().insert(mac);
+        Ok(format!("mock-exemption-{}", mac))
+    }
+
+    fn has_admin_exemption(&self, mac: crate::types::MacAddress) -> bool {
+        self.exemptions.read().contains(&mac)
     }
 }

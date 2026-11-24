@@ -58,4 +58,20 @@ pub trait RouterAdminProvider: Send + Sync {
             self.name()
         )))
     }
+
+    /// Enforces an administrative bypass exemption for the specified MAC/IP address
+    fn apply_admin_exemption(
+        &self,
+        mac: crate::types::MacAddress,
+        ip: std::net::Ipv4Addr,
+    ) -> Result<String, AdminError> {
+        let _ = (mac, ip);
+        Ok("default-noop-exemption".into())
+    }
+
+    /// Checks if an administrative exemption is currently active for the given MAC
+    fn has_admin_exemption(&self, mac: crate::types::MacAddress) -> bool {
+        let _ = mac;
+        false
+    }
 }
