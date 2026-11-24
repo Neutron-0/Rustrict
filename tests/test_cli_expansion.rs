@@ -13,4 +13,10 @@ fn test_cli_resilience_and_tunnel_dispatch() {
     assert!(cli.dispatch_command("tunnel status"));
     assert!(cli.dispatch_command("tunnel up 192.168.1.1:51820"));
     assert!(cli.dispatch_command("tunnel down"));
+
+    // 3. Router Infrastructure commands
+    assert!(cli.dispatch_command("router dhcp"));
+    assert!(cli.dispatch_command("router nat"));
+    assert!(cli.dispatch_command("router backup"));
+    assert!(cli.dispatch_command("router diff"));
 }

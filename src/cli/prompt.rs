@@ -4547,6 +4547,84 @@ impl RustrictCli {
                     }
                 }
             }
+            "dhcp" => {
+                println!("{}", "Router DHCP Leases & Static Reservations:".bright_yellow().bold());
+                match self.admin_provider.list_dhcp_leases() {
+                    Ok(leases) => {
+                        if leases.is_empty() {
+                            println!("  No active DHCP leases or static bindings found.");
+                        } else {
+                            println!("  {:<16} {:<18} {:<24} {}", "IP Address", "MAC Address", "Hostname", "Type");
+                            println!("  {}", "-".repeat(70));
+                            for l in leases {
+                                println!(
+                                    "  {:<16} {:<18} {:<24} {}",
+                                    l.ip.to_string().bright_cyan(),
+                                    l.mac.to_string().bright_white(),
+                                    l.hostname.as_deref().unwrap_or("-"),
+                                    if l.is_static { "Static Reservation".green().bold() } else { "Dynamic Lease".normal() }
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("{} Failed to query DHCP leases: {}", "[ERR]".red().bold(), e);
+                    }
+                }
+            }
+            "nat" => {
+                println!("{}", "Router NAT Port Forwards & Routing Table:".bright_yellow().bold());
+                match self.admin_provider.list_port_forwards() {
+                    Ok(rules) => {
+                        println!("  Port Forwarding Rules: (Total: {})", rules.len());
+                        for r in rules {
+                            println!("    • {} ({:?}): ext :{} -> {}:{}", r.name.bold(), r.proto, r.external_port, r.internal_ip, r.internal_port);
+                        }
+                    }
+                    Err(e) => {
+                        println!("{} Failed to query port forwards: {}", "[ERR]".red().bold(), e);
+                    }
+                }
+                match self.admin_provider.list_static_routes() {
+                    Ok(routes) => {
+                        println!("  Static Routes: (Total: {})", routes.len());
+                        for r in routes {
+                            println!("    • {}/{} via {} (metric: {})", r.destination, r.netmask, r.gateway, r.metric);
+                        }
+                    }
+                    Err(e) => {
+                        println!("{} Failed to query static routes: {}", "[ERR]".red().bold(), e);
+                    }
+                }
+            }
+            "backup" => {
+                let snap = crate::gateway::admin::config_backup::ConfigBackupEngine::create_snapshot(
+                    "# Rustrict Router Configuration Snapshot\nsyslog enable\nfirewall drop invalid\n",
+                    self.admin_provider.name(),
+                );
+                println!("{} Router configuration snapshot captured.", "[BACKUP]".bright_green().bold());
+                println!("  Snapshot ID:   {}", snap.id.bright_cyan());
+                println!("  Provider:      {}", snap.provider_name.bright_white());
+                println!("  Fingerprint:   {} (SHA-256)", snap.sha256.dimmed());
+            }
+            "diff" => {
+                let v1 = crate::gateway::admin::config_backup::ConfigBackupEngine::create_snapshot(
+                    "rule 1\n  action accept\n",
+                    self.admin_provider.name(),
+                );
+                let v2 = crate::gateway::admin::config_backup::ConfigBackupEngine::create_snapshot(
+                    "rule 1\n  action drop\n",
+                    self.admin_provider.name(),
+                );
+                let diff = crate::gateway::admin::config_backup::ConfigBackupEngine::compute_diff(&v1, &v2);
+                println!("{}", "Router Configuration Diff Delta:".bright_yellow().bold());
+                for rem in &diff.removed_lines {
+                    println!("  {}", format!("- {}", rem).red());
+                }
+                for add in &diff.added_lines {
+                    println!("  {}", format!("+ {}", add).green());
+                }
+            }
             _ => {
                 println!(
                     "{} Unknown router subcommand '{}'. Use 'router help' for available commands.",
