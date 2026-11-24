@@ -32,6 +32,8 @@ pub struct MockRouterAdminProvider {
     pub exemptions: Arc<RwLock<std::collections::HashSet<crate::types::MacAddress>>>,
     pub mock_leases: Arc<RwLock<Vec<crate::gateway::admin::dhcp_dns::DhcpLease>>>,
     pub mock_dns_rules: Arc<RwLock<Vec<crate::gateway::admin::dhcp_dns::DnsForwardRule>>>,
+    pub mock_port_forwards: Arc<RwLock<Vec<crate::gateway::admin::nat_routes::PortForwardRule>>>,
+    pub mock_static_routes: Arc<RwLock<Vec<crate::gateway::admin::nat_routes::StaticRoute>>>,
 }
 
 impl Default for MockRouterAdminProvider {
@@ -96,6 +98,8 @@ impl Default for MockRouterAdminProvider {
             exemptions: Arc::new(RwLock::new(std::collections::HashSet::new())),
             mock_leases: Arc::new(RwLock::new(Vec::new())),
             mock_dns_rules: Arc::new(RwLock::new(Vec::new())),
+            mock_port_forwards: Arc::new(RwLock::new(Vec::new())),
+            mock_static_routes: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -487,6 +491,24 @@ impl RouterAdminProvider for MockRouterAdminProvider {
 
     fn add_dns_rule(&self, rule: crate::gateway::admin::dhcp_dns::DnsForwardRule) -> Result<(), AdminError> {
         self.mock_dns_rules.write().push(rule);
+        Ok(())
+    }
+
+    fn list_port_forwards(&self) -> Result<Vec<crate::gateway::admin::nat_routes::PortForwardRule>, AdminError> {
+        Ok(self.mock_port_forwards.read().clone())
+    }
+
+    fn add_port_forward(&self, rule: crate::gateway::admin::nat_routes::PortForwardRule) -> Result<(), AdminError> {
+        self.mock_port_forwards.write().push(rule);
+        Ok(())
+    }
+
+    fn list_static_routes(&self) -> Result<Vec<crate::gateway::admin::nat_routes::StaticRoute>, AdminError> {
+        Ok(self.mock_static_routes.read().clone())
+    }
+
+    fn add_static_route(&self, route: crate::gateway::admin::nat_routes::StaticRoute) -> Result<(), AdminError> {
+        self.mock_static_routes.write().push(route);
         Ok(())
     }
 }

@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod engine;
 pub mod mikrotik;
 pub mod mock;
+pub mod nat_routes;
 pub mod openwrt;
 pub mod persistence;
 pub mod plan;

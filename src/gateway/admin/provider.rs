@@ -96,4 +96,26 @@ pub trait RouterAdminProvider: Send + Sync {
         let _ = rule;
         Ok(())
     }
+
+    /// Queries all current NAT port forward rules
+    fn list_port_forwards(&self) -> Result<Vec<crate::gateway::admin::nat_routes::PortForwardRule>, AdminError> {
+        Ok(Vec::new())
+    }
+
+    /// Adds or updates a NAT port forwarding rule
+    fn add_port_forward(&self, rule: crate::gateway::admin::nat_routes::PortForwardRule) -> Result<(), AdminError> {
+        let _ = rule;
+        Ok(())
+    }
+
+    /// Queries active static routes on the router
+    fn list_static_routes(&self) -> Result<Vec<crate::gateway::admin::nat_routes::StaticRoute>, AdminError> {
+        Ok(Vec::new())
+    }
+
+    /// Adds a static routing entry to the router's routing table
+    fn add_static_route(&self, route: crate::gateway::admin::nat_routes::StaticRoute) -> Result<(), AdminError> {
+        let _ = route;
+        Ok(())
+    }
 }
