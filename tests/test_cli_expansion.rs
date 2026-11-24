@@ -24,4 +24,8 @@ fn test_cli_resilience_and_tunnel_dispatch() {
     assert!(cli.dispatch_command("flows"));
     assert!(cli.dispatch_command("alerts"));
     assert!(cli.dispatch_command("alerts test"));
+
+    // 5. Red-Team and Controlled Lab commands
+    assert!(cli.dispatch_command("attack-graph"));
+    assert!(cli.dispatch_command("lab-sim 10.0.0.99")); // Out of scope rejection
 }

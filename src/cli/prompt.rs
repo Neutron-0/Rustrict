@@ -765,6 +765,8 @@ impl RustrictCli {
             "tunnel" => self.handle_tunnel(&args[1..]),
             "flows" => self.handle_flows(&args[1..]),
             "alerts" => self.handle_alerts(&args[1..]),
+            "attack-graph" => self.handle_attack_graph(&args[1..]),
+            "lab-sim" => self.handle_lab_sim(&args[1..]),
             "router" => self.handle_router(&args[1..]),
             "nic" | "adapter" => self.handle_nic(&args[1..]),
             "clear" | "cls" => {
@@ -2718,6 +2720,64 @@ impl RustrictCli {
                 "DnsAnomalyEngine",
                 "High entropy subdomain detected: tunnel.lab-sim.local (Entropy: 4.3 bits)"
             );
+        }
+    }
+
+    pub fn handle_attack_graph(&mut self, _args: &[&str]) {
+        println!("{}", "Attack Path Graph & Crown Jewel Analysis:".bright_yellow().bold());
+        let mut graph = crate::probes::AttackGraph::new();
+        let operator_node = crate::probes::AttackNode::Host(self.iface.ip);
+        let gateway_node = crate::probes::AttackNode::CrownJewel(self.iface.gateway);
+
+        graph.add_node(operator_node.clone());
+        graph.add_node(gateway_node.clone());
+        graph.add_edge(
+            operator_node.clone(),
+            gateway_node.clone(),
+            crate::probes::AttackEdge::LateralMovement("Management-Interface:443".into()),
+        );
+
+        let paths = graph.find_paths_to_crown_jewel(&operator_node);
+        println!("  Discovered Pathways to Crown Jewels: (Total: {})", paths.len());
+        for (i, p) in paths.iter().enumerate() {
+            let path_str: Vec<String> = p.iter().map(|n| format!("{:?}", n)).collect();
+            println!("    Path {}: {}", i + 1, path_str.join(" ──▶ ").bright_cyan());
+        }
+    }
+
+    pub fn handle_lab_sim(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: lab-sim <TARGET_IP> [VECTOR]");
+            println!("Vectors: default-creds, weak-perms, unquoted-path, sudo");
+            return;
+        }
+
+        let target_ip: std::net::Ipv4Addr = match args[0].parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                println!("{} Invalid IP address: {}", "[ERR]".red().bold(), e);
+                return;
+            }
+        };
+
+        let runner = crate::core::LabSimulationRunner::new();
+        let config = crate::core::LabSimulationConfig {
+            target_ip,
+            vector: crate::core::PrivilegeVector::DefaultCredentials,
+        };
+
+        match runner.run_simulation(&config, &self.scope) {
+            Ok(result) => {
+                println!("{}", "Lab Privilege Escalation Simulation Completed:".bright_green().bold());
+                println!("  Target:    {}", result.target_ip.to_string().bright_white());
+                println!("  Vector:    {:?}", result.vector);
+                println!("  Detection: {}", if result.detected_by_blue_team { "DETECTED & BLOCKED BY SENSORS".green().bold() } else { "UNDETECTED".red() });
+                println!("  Audit Log: {}", result.audit_log.dimmed());
+            }
+            Err(e) => {
+                println!("{} Scope Security Lockout: {:?}", "[FAIL-CLOSED]".bright_red().bold(), e);
+                println!("  Simulations are strictly prohibited on production endpoints outside authorized lab CIDRs.");
+            }
         }
     }
 
