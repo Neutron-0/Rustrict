@@ -319,9 +319,79 @@ flowchart TD
 
 ---
 
-## 7. What's Left to the Builder & Implementation Checklist
+## 7. Complete Merged Phase Roadmap & Task Matrix
 
-A builder implementing this specification will execute against the companion step-by-step TDD plan in [`docs/superpowers/plans/2026-11-24-rustrict-platform-expansion.md`](file:///d:/Vault/Rustrict/docs/superpowers/plans/2026-11-24-rustrict-platform-expansion.md):
+The following unified matrix synthesizes all 8 phases and 17 concrete implementation tasks from `rustrict_platform_expansion_plan.md` into this design specification. Every task follows strict Test-Driven Development (TDD) where failing tests are written and verified before implementation.
+
+| Phase | Task ID | Task Title | Target Files | Key Interfaces & Contracts | Verification Test |
+|---|---|---|---|---|---|
+| **Phase 1: Async Engine & Web Gateway** | **Task 1** | Async Runtime & Broadcast Event Bus | `src/server/event_bus.rs`, `src/server/mod.rs`, `Cargo.toml` | `EngineEvent`, `EventBus::publish()`, `EventBus::subscribe() -> Receiver<EngineEvent>` | `tests/test_event_bus.rs` |
+| | **Task 2** | Authenticated REST & WebSocket API Server | `src/server/routes.rs`, `src/server/ws.rs`, `src/server/auth.rs` | `start_api_server(addr, state)`, `/api/hosts`, `/api/router/*`, `/api/ws` | `tests/test_api_server.rs` |
+| **Phase 2: Anti-Eviction & Resilience** | **Task 3** | Layer 2 Static ARP Guard & Active Healer | `src/resilience/arp_guard.rs`, `src/resilience/mod.rs`, `src/platform/windows.rs` | `ArpGuard::lock_gateway()`, `ArpGuard::verify_or_heal() -> bool` | `tests/test_arp_guard.rs` |
+| | **Task 4** | Router Infrastructure Admin Exemption | `src/resilience/router_exemption.rs`, `src/gateway/admin/provider.rs`, `src/gateway/admin/engine.rs` | `PolicyExecutionEngine::enforce_admin_exemption(mac, ip)` | `tests/test_router_exemption.rs` |
+| | **Task 5** | Roaming Overlay Tunnel Daemon | `src/resilience/tunnel.rs`, `src/resilience/mod.rs` | `ResilientTunnel::start()`, `TunnelHandle::is_connected()` | `tests/test_tunnel.rs` |
+| **Phase 3: Router Infrastructure Management** | **Task 6** | Router DHCP & DNS Configuration Management | `src/gateway/admin/dhcp_dns.rs`, `openwrt.rs`, `mikrotik.rs` | `RouterDhcpConfig`, `RouterDnsConfig`, `get_dhcp_leases()`, `set_static_lease()` | `tests/test_router_dhcp_dns.rs` |
+| | **Task 7** | NAT, Port Forwarding & Routing Table Inspection | `src/gateway/admin/nat_routes.rs`, `src/gateway/admin/provider.rs` | `PortForwardRule`, `RoutingTableEntry`, `list_port_forwards()`, `list_routes()` | `tests/test_router_nat_routes.rs` |
+| | **Task 8** | Configuration Backup, Diff & Rollback Engine | `src/gateway/admin/config_backup.rs`, `src/gateway/admin/engine.rs` | `ConfigSnapshot`, `ConfigDiff`, `backup_configuration()`, `diff_configurations()` | `tests/test_router_config_backup.rs` |
+| **Phase 4: Traffic Observability & Dissection** | **Task 9** | 5-Tuple Stateful Connection Tracker | `src/monitor/flow_tracker.rs`, `src/limiter/divert.rs` | `ConnectionFlow`, `FlowKey { src, dst, proto }`, `FlowTracker::update_packet()` | `tests/test_flow_tracker.rs` |
+| | **Task 10** | In-Flight DNS & Passive TLS SNI Dissectors | `src/monitor/dns_dissector.rs`, `src/monitor/tls_sni.rs`, `src/limiter/divert.rs` | `DnsEvent { client, domain, answers }`, `SniEvent { client, server_name }` | `tests/test_dissectors.rs` |
+| **Phase 5: Blue-Team Defense & IDS** | **Task 11** | Rogue ARP & DHCP Anomaly Detectors | `src/defense/arp_detector.rs`, `src/defense/dhcp_detector.rs`, `src/defense/mod.rs` | `SecurityAlert { alert_type, severity, source_mac, details }` | `tests/test_defense_detectors.rs` |
+| | **Task 12** | DNS Anomaly & Tunneling Heuristics Engine | `src/defense/dns_heuristics.rs`, `src/defense/mod.rs` | `calculate_shannon_entropy(s) -> f64`, `DnsAnomalyDetector::inspect_query()` | `tests/test_dns_heuristics.rs` |
+| **Phase 6: Red-Team & Privilege Research** | **Task 13** | Attack-Path Topology & Exposure Graph | `src/probes/attack_graph.rs`, `src/probes/mod.rs` | `AttackGraphNode`, `AttackPath`, `AttackGraph::compute_attack_paths()` | `tests/test_attack_graph.rs` |
+| | **Task 14** | Scope-Gated Lab Privilege Simulation Harness | `src/core/lab_simulation.rs`, `src/core/scope.rs` | `SimulationRun`, `run_privilege_simulation(target, test_id)` | `tests/test_lab_simulation.rs` |
+| **Phase 7: Enrolled Endpoint Agent** | **Task 15** | Lightweight Host Agent Binary & mTLS Client | `crates/rustrict-agent/Cargo.toml`, `src/main.rs`, `src/telemetry.rs`, `src/runner.rs` | `HostTelemetry { cpu, ram, disk, services }`, visible daemon, non-root runner | `tests/test_agent_protocol.rs` |
+| **Phase 8: Web Operations Dashboard Integration** | **Task 16** | Next.js WebSocket Client & Live Topology Visualizer | `rustrict-web/src/lib/api-client.ts`, `TopologyCanvas.tsx`, `FlowStreamTable.tsx` | Consumes `ws://127.0.0.1:9090/api/ws`, dynamic force-directed topology canvas | `npm run build` |
+| | **Task 17** | Web Router Console & Incident Operations Center | `rustrict-web/src/components/RouterAdminPanel.tsx`, `IncidentTimeline.tsx`, `ResilienceStatus.tsx` | Visual DHCP reservations, live SARIF security alerts, ARP lock status | `npm run build` |
+
+---
+
+## 8. Verification, Regression Testing & Lab Scenarios
+
+### 8.1 Automated Test Verification
+Every step must verify zero regressions to existing code:
+```powershell
+# 1. Full regression test suite
+cargo test --all
+
+# 2. Subsystem-specific tests
+cargo test --test test_event_bus
+cargo test --test test_arp_guard
+cargo test --test test_router_exemption
+cargo test --test test_router_dhcp_dns
+cargo test --test test_router_nat_routes
+cargo test --test test_router_config_backup
+cargo test --test test_flow_tracker
+cargo test --test test_dissectors
+cargo test --test test_defense_detectors
+cargo test --test test_dns_heuristics
+cargo test --test test_attack_graph
+cargo test --test test_lab_simulation
+
+# 3. Web Dashboard compilation
+cd d:\Vault\rustrict-web
+npm run lint
+npm run build
+```
+
+### 8.2 Manual Lab Verification Scenarios
+1. **Anti-Eviction Verification:**
+   - Run Rustrict on a test Windows host with ARP Guard enabled.
+   - Fire an intentional ARP poisoner (`arpspoof` or test script) from a second machine targeting the gateway IP.
+   - Verify Rustrict drops the poisoned ARP frame in WinDivert and transmits a corrective Gratuitous ARP to the gateway within 50ms.
+2. **Router Admin Exemption:**
+   - Connect to an OpenWrt / MikroTik test router.
+   - Apply admin exemption via CLI / Web dashboard.
+   - Confirm persistent firewall rule appears at line 1 of the forward chain and station MAC is assigned a static lease.
+3. **Observability & DNS Dissection:**
+   - Browse various websites from a client machine whose traffic passes through the WinDivert limiter.
+   - Verify destination domains appear in real time on the `rustrict-web` Flow Table without decrypting TLS payloads.
+4. **Clean Shutdown & Emergency Teardown:**
+   - Trigger Ctrl+C or kill `rustrict.exe`.
+   - Verify Windows static ARP neighbor entries are cleared, WinDivert driver unloads cleanly, and the network adapter continues normal operation.
+
+---
+
+## 9. Implementation Checklist
 
 - [ ] **Phase 1:** Build `src/server/event_bus.rs`, `src/server/routes.rs`, and WebSocket streaming server.
 - [ ] **Phase 2:** Implement `src/resilience/arp_guard.rs` and router administrative exemptions.
