@@ -74,4 +74,26 @@ pub trait RouterAdminProvider: Send + Sync {
         let _ = mac;
         false
     }
+
+    /// Queries all current DHCP leases (both dynamic and static reservations)
+    fn list_dhcp_leases(&self) -> Result<Vec<crate::gateway::admin::dhcp_dns::DhcpLease>, AdminError> {
+        Ok(Vec::new())
+    }
+
+    /// Binds an IP and MAC address into a static DHCP reservation
+    fn add_static_lease(&self, lease: crate::gateway::admin::dhcp_dns::DhcpLease) -> Result<(), AdminError> {
+        let _ = lease;
+        Ok(())
+    }
+
+    /// Queries local DNS forwarding rules and host overrides
+    fn list_dns_rules(&self) -> Result<Vec<crate::gateway::admin::dhcp_dns::DnsForwardRule>, AdminError> {
+        Ok(Vec::new())
+    }
+
+    /// Configures a DNS forwarding rule / domain override
+    fn add_dns_rule(&self, rule: crate::gateway::admin::dhcp_dns::DnsForwardRule) -> Result<(), AdminError> {
+        let _ = rule;
+        Ok(())
+    }
 }

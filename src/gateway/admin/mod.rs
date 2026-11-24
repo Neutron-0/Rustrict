@@ -2,6 +2,7 @@ pub mod avm;
 pub mod capabilities;
 pub mod credentials;
 pub mod curl_util;
+pub mod dhcp_dns;
 pub mod diagnostics;
 pub mod engine;
 pub mod mikrotik;

@@ -30,6 +30,8 @@ pub struct MockRouterAdminProvider {
     pub discovered_services: Vec<String>,
     pub mock_devices: Arc<RwLock<Vec<crate::gateway::admin::diagnostics::RouterDeviceEntry>>>,
     pub exemptions: Arc<RwLock<std::collections::HashSet<crate::types::MacAddress>>>,
+    pub mock_leases: Arc<RwLock<Vec<crate::gateway::admin::dhcp_dns::DhcpLease>>>,
+    pub mock_dns_rules: Arc<RwLock<Vec<crate::gateway::admin::dhcp_dns::DnsForwardRule>>>,
 }
 
 impl Default for MockRouterAdminProvider {
@@ -92,6 +94,8 @@ impl Default for MockRouterAdminProvider {
                     .with_uptime(1800),
             ])),
             exemptions: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            mock_leases: Arc::new(RwLock::new(Vec::new())),
+            mock_dns_rules: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -466,5 +470,23 @@ impl RouterAdminProvider for MockRouterAdminProvider {
 
     fn has_admin_exemption(&self, mac: crate::types::MacAddress) -> bool {
         self.exemptions.read().contains(&mac)
+    }
+
+    fn list_dhcp_leases(&self) -> Result<Vec<crate::gateway::admin::dhcp_dns::DhcpLease>, AdminError> {
+        Ok(self.mock_leases.read().clone())
+    }
+
+    fn add_static_lease(&self, lease: crate::gateway::admin::dhcp_dns::DhcpLease) -> Result<(), AdminError> {
+        self.mock_leases.write().push(lease);
+        Ok(())
+    }
+
+    fn list_dns_rules(&self) -> Result<Vec<crate::gateway::admin::dhcp_dns::DnsForwardRule>, AdminError> {
+        Ok(self.mock_dns_rules.read().clone())
+    }
+
+    fn add_dns_rule(&self, rule: crate::gateway::admin::dhcp_dns::DnsForwardRule) -> Result<(), AdminError> {
+        self.mock_dns_rules.write().push(rule);
+        Ok(())
     }
 }
