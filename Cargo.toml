@@ -29,3 +29,6 @@ windows-sys = { version = "0.59", features = [
 ] }
 fs2 = "0.4.3"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }

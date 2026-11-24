@@ -67,7 +67,7 @@ impl FromStr for MacAddress {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
     Outgoing,
     Incoming,
@@ -92,7 +92,7 @@ impl Direction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostStatus {
     Free,
     Limited(BitRate, Direction),
@@ -128,7 +128,7 @@ pub enum NameSource {
     Unresolved, // No authoritative hostname resolved
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     pub id: usize,
     pub ip: Ipv4Addr,
@@ -203,7 +203,7 @@ impl Host {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BitRate(pub u64); // bits per second
 
 impl BitRate {
