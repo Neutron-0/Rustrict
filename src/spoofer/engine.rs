@@ -189,7 +189,7 @@ impl ArpSpoofer {
     }
 
     pub fn restore(&self, host: &Host) {
-        self.restore_all(&[host.clone()]);
+        self.restore_all(std::slice::from_ref(host));
     }
 
     pub fn restore_all(&self, targets: &[Host]) {

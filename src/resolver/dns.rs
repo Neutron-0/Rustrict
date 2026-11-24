@@ -38,10 +38,12 @@ pub fn query_reverse_dns_via_gateway(ip: Ipv4Addr, gateway_ip: Ipv4Addr) -> Opti
 
     let mut buf = [0u8; 1024];
     if let Ok((len, from)) = socket.recv_from(&mut buf) {
-        if from.ip() == std::net::IpAddr::V4(gateway_ip) && len > 12 {
-            if buf[0] == tx_id[0] && buf[1] == tx_id[1] {
-                return crate::resolver::llmnr::parse_llmnr_response(&buf[..len]);
-            }
+        if from.ip() == std::net::IpAddr::V4(gateway_ip)
+            && len > 12
+            && buf[0] == tx_id[0]
+            && buf[1] == tx_id[1]
+        {
+            return crate::resolver::llmnr::parse_llmnr_response(&buf[..len]);
         }
     }
     None
