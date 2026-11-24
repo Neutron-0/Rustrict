@@ -133,6 +133,8 @@ pub struct ScopeManager {
     pub strict_mode: bool,
 }
 
+pub type ScopeConfig = ScopeManager;
+
 impl Default for ScopeManager {
     fn default() -> Self {
         Self::new()

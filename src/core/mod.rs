@@ -1,10 +1,14 @@
 pub mod admission;
 pub mod assessment;
+pub mod lab_simulation;
 pub mod restoration;
 pub mod scope;
 
 pub use admission::{AdmissionOperation, TargetAdmissionValidator};
 pub use assessment::{AuditFinding, AuditSeverity, PortStatus, ServiceEntry};
+pub use lab_simulation::{
+    LabSecurityError, LabSimulationConfig, LabSimulationResult, LabSimulationRunner, PrivilegeVector,
+};
 pub use restoration::{
     restore_persistent_blocks_with, validate_restored_target, PersistentBlockActivator,
     PersistentRestorationReport, RestorationNetworkParams, ScopedForwardingEnabler,
